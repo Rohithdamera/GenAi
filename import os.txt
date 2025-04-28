@@ -151,3 +151,5 @@ def lambda_handler(event, context):
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
         }
+
+{"error": "Incorrect API key provided: 8MHolrBM************************************************************************ZYVp. You can find your API key at https://platform.openai.com/account/api-keys."}
