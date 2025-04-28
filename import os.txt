@@ -2,15 +2,32 @@ import os
 import json
 import shutil
 import zipfile
-import logging
-from base64 import b64decode
-from langchain_community.chat_models import AzureChatOpenAI
-from langchain.schema import HumanMessage
+import boto3
+import base64
+import tempfile
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from typing import Any
+from openai import AzureOpenAI
+from langchain_core.messages import HumanMessage
 
-def unzip_raml(zip_path, extract_dir="/tmp/temp_raml"):
+def decrypt_using_kms(ciphertext: str) -> str:
+    kms = boto3.client("kms")
+    response = kms.decrypt(
+        CiphertextBlob=base64.b64decode(ciphertext),
+        EncryptionAlgorithm="SYMMETRIC_DEFAULT",
+        KeyId=os.environ["AES_KEY"],
+    )
+    return response["Plaintext"].decode("utf-8")
+
+def get_openai_client(api_base: str, api_key: str, api_version: str, deployment_name: str):
+    return AzureOpenAI(
+        api_version=api_version,
+        azure_endpoint=api_base,
+        api_key=api_key,
+        deployment_name=deployment_name
+    )
+
+def unzip_raml(zip_path, extract_dir):
     if os.path.exists(extract_dir):
         shutil.rmtree(extract_dir)
     os.makedirs(extract_dir, exist_ok=True)
@@ -48,7 +65,6 @@ def resolve_includes_in_raml(file_path, root_dir):
             for f in files:
                 if f == os.path.basename(include_path):
                     return os.path.join(root, f)
-
         return None
 
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
@@ -87,68 +103,51 @@ def analyze_raml_with_openai(client, resolved_raml_content):
     response = client.invoke([HumanMessage(content=prompt + "\n\n" + resolved_raml_content)])
     return response.content
 
-def get_openai_client():
-    aes_key_base64 = os.environ['AES_KEY']
-    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-    api_version = os.environ['AZURE_API_VERSION']
-
-    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
-
-    if not decrypted_api_base.endswith('/'):
-        decrypted_api_base += '/'
-
-    return AzureChatOpenAI(
-        deployment_name=os.environ['MODEL_INSTANCE_NAME'],
-        openai_api_base=decrypted_api_base,
-        openai_api_key=decrypted_api_key,
-        openai_api_version=api_version
-    )
-
-def decrypt(data, key):
-    from Crypto.Cipher import AES
-    def unpad(data):
-        padding_length = data[-1]
-        return data[:-padding_length]
-
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted_data = cipher.decrypt(b64decode(data))
-    decrypted_data = unpad(decrypted_data)
-    return decrypted_data.decode()
-
 def lambda_handler(event, context):
     try:
-        logger.info(f"Received event: {json.dumps(event)[:1000]}...")  # Log only first 1000 chars to avoid huge output
+        if 'body' not in event:
+            return {"statusCode": 400, "body": json.dumps({"error": "No file uploaded"})}
 
-        if 'body' not in event or not event.get('isBase64Encoded', False):
-            raise ValueError("Request body missing or not base64 encoded.")
+        # Get headers
+        headers = event.get('headers', {})
+        deployment_name = headers.get("MODEL_INSTANCE_NAME")
+        if not deployment_name:
+            return {"statusCode": 400, "body": json.dumps({"error": "MODEL_INSTANCE_NAME header missing"})}
 
-        # Decode the base64-encoded zip file
-        zip_content = b64decode(event['body'])
+        api_base = decrypt_using_kms(os.environ["ENCRYPTED_API_BASE"])
+        api_key = decrypt_using_kms(os.environ["ENCRYPTED_API_KEY"])
+        api_version = os.environ["AZURE_API_VERSION"]
 
-        zip_path = '/tmp/uploaded.zip'
-        with open(zip_path, 'wb') as f:
-            f.write(zip_content)
+        client = get_openai_client(
+            api_base=api_base,
+            api_key=api_key,
+            api_version=api_version,
+            deployment_name=deployment_name
+        )
 
-        extracted_dir = unzip_raml(zip_path)
+        # Decode and save the uploaded zip file
+        file_content = base64.b64decode(event['body'])
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp_zip:
+            tmp_zip.write(file_content)
+            tmp_zip_path = tmp_zip.name
+
+        temp_extract_dir = tempfile.mkdtemp()
+
+        extracted_dir = unzip_raml(tmp_zip_path, temp_extract_dir)
         main_raml_file = find_main_raml_file(extracted_dir)
-        logger.info(f"Main RAML File Found: {main_raml_file}")
-
         resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
 
-        client = get_openai_client()
         final_analysis = analyze_raml_with_openai(client, resolved_raml)
 
         return {
-            'statusCode': 200,
-            'headers': {'Content-Type': 'application/json'},
-            'body': json.dumps({'generated_payloads': final_analysis})
+            "statusCode": 200,
+            "body": json.dumps({
+                "generated_payloads": final_analysis
+            })
         }
 
     except Exception as e:
-        logger.error(f"Error occurred: {e}")
         return {
-            'statusCode': 500,
-            'body': json.dumps({'error': str(e)})
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
         }
