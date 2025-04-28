@@ -1,327 +1,162 @@
 import os
-
 import logging
-
 import json
-
 import shutil
-
 import zipfile
-
 from base64 import b64decode
-
 from Crypto.Cipher import AES
-
 import openai
 
-
-
 # Set up logging
-
 logging.basicConfig(level=logging.INFO)
-
 logger = logging.getLogger(__name__)
 
-
-
 def unpad(data):
-
     padding_length = data[-1]
-
     return data[:-padding_length]
 
-
-
 def decrypt(data, key):
-
     cipher = AES.new(b64decode(key), AES.MODE_ECB)
-
     decrypted_data = cipher.decrypt(b64decode(data))
-
     decrypted_data = unpad(decrypted_data)
-
     return decrypted_data.decode()
 
-
-
 def get_openai_client():
-
     try:
-
         aes_key_base64 = os.environ['AES_KEY']
-
         encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-
-
-
         decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
-
-
-
         openai.api_key = decrypted_api_key
-
-
-
         logger.info("OpenAI client initialized.")
-
     except Exception as e:
-
         logger.error(f"Error initializing OpenAI client: {e}")
-
         raise ValueError(f"Error initializing OpenAI client: {e}")
 
-
-
 def unzip_raml(zip_bytes, extract_dir="/tmp/temp_raml"):
-
     if os.path.exists(extract_dir):
-
         shutil.rmtree(extract_dir)
-
     os.makedirs(extract_dir, exist_ok=True)
 
-
-
     zip_path = "/tmp/uploaded.zip"
-
     with open(zip_path, "wb") as f:
-
         f.write(zip_bytes)
 
-
-
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-
         zip_ref.extractall(extract_dir)
-
-
 
     return extract_dir
 
-
-
 def find_main_raml_file(base_dir):
-
     for root, _, files in os.walk(base_dir):
-
         for file in files:
-
             if file.endswith(".raml"):
-
                 full_path = os.path.join(root, file)
-
                 with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-
                     if "#%RAML 1.0" in f.readline():
-
                         return full_path
-
     raise FileNotFoundError("Main RAML file not found.")
 
-
-
 def resolve_includes_in_raml(file_path, root_dir):
-
     resolved_lines = []
-
     current_dir = os.path.dirname(file_path)
 
-
-
     def resolve_include_path(include_path):
-
         full_path = os.path.normpath(os.path.join(current_dir, include_path))
-
         if os.path.isfile(full_path):
-
             return full_path
-
         full_path = os.path.normpath(os.path.join(root_dir, include_path))
-
         if os.path.isfile(full_path):
-
             return full_path
-
         for root, _, files in os.walk(root_dir):
-
             for f in files:
-
                 if f == os.path.basename(include_path):
-
                     return os.path.join(root, f)
-
         return None
 
-
-
     def extract_example_values(include_file):
-
         example_values = {}
-
         with open(include_file, 'r', encoding='utf-8', errors='ignore') as inc_file:
-
             for line in inc_file:
-
                 if "example:" in line:
-
                     parts = line.strip().split("example:")
-
                     field_name = parts[0].strip()
-
                     example_value = parts[1].strip()
-
                     example_values[field_name] = example_value
-
         return example_values
 
-
-
+    # Process the main RAML file
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
-
         for line in file:
-
             if "!include" in line:
-
                 parts = line.strip().split("!include")
-
                 prefix = parts[0].strip()
-
                 include_path = parts[1].strip()
-
-
 
                 include_file = resolve_include_path(include_path)
 
-
-
                 if include_file and os.path.exists(include_file):
-
+                    # Extract example values from the included file
                     example_values = extract_example_values(include_file)
-
                     resolved_lines.append(f"{prefix} |\n")
-
                     for field, value in example_values.items():
-
                         resolved_lines.append(f"  {field}: {value}")
-
                 else:
-
                     resolved_lines.append(f"{line.strip()}  # Include not found")
-
             else:
-
                 resolved_lines.append(line.rstrip())
-
-
 
     return "\n".join(resolved_lines)
 
-
-
 def analyze_raml_with_openai(resolved_raml_content):
-
     prompt = (
-
-         "You are an expert in reading the RAML from the zip file. "
-
+        "You are an expert in reading the RAML from the zip file. "
         "The file has multiple endpoints which make use of traits, resource types, and API fragments. "
-
         "Please carefully analyze the RAML and generate the input payload for each endpoint. "
-
         "You are an expert in analyzing the RAML and generating payloads from the RAML. "
-
         "I am providing the RAML which will be used as an asset for designing my API. "
-
         "In RAML file, some example files are included using '!include'. Go to that file and take the necessary information. "
-
         "Please analyze the RAML and generate the sample payload that honors all the rules defined inside the RAML. "
-
         "You can refer to https://raml.org/developers/raml-100-tutorial for any doubts related to RAML."
-
     )
 
     response = openai.Completion.create(
-
-        model="Fourth_chatbot",
-
+        model="text-davinci-003",
         prompt=prompt + "\n\n" + resolved_raml_content,
-
         max_tokens=1500
-
     )
 
     return response.choices[0].text
 
-
-
 def lambda_handler(event, context):
-
     logger.info("Lambda invoked.")
-
     try:
-
         if 'body' not in event or not event.get('isBase64Encoded', False):
-
             raise ValueError("File content is missing or not base64-encoded.")
 
-
-
         zip_bytes = b64decode(event['body'])
-
-
-
         headers = event.get('headers', {})
-
         model_instance_name = (
-
             headers.get('model_instance_name') or
-
             headers.get('Model_Instance_Name') or
-
             os.environ.get('DEFAULT_MODEL_INSTANCE_NAME', 'default-model')
-
         )
 
-
-
         extracted_dir = unzip_raml(zip_bytes)
-
         main_raml_file = find_main_raml_file(extracted_dir)
-
         resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
 
-
-
         get_openai_client()
-
         final_output = analyze_raml_with_openai(resolved_raml)
 
-
-
         return {
-
             "statusCode": 200,
-
             "headers": {"Content-Type": "text/plain"},
-
             "body": final_output
-
         }
-
-
 
     except Exception as e:
-
         logger.error(f"Error during execution: {e}")
-
         return {
-
             "statusCode": 500,
-
             "body": json.dumps({"error": str(e)})
-
         }
-
-
-
-  
