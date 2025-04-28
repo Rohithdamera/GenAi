@@ -1,184 +1,98 @@
-import os
-import json
-import zipfile
-import shutil
-import logging
-from base64 import b64decode
-from langchain_community.chat_models import AzureChatOpenAI
-from langchain.schema import HumanMessage
+Generated Payloads:
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+Based on the provided RAML file, here are the sample input payloads for each endpoint:
 
-def unzip_raml(zip_data, extract_dir="/tmp/temp_raml"):
-    """Unzip the uploaded RAML ZIP content."""
-    if os.path.exists(extract_dir):
-        shutil.rmtree(extract_dir)
-    os.makedirs(extract_dir, exist_ok=True)
+### Endpoint: /heartbeat (POST)
+**Input Payload:**
+```json
+{
+  "applicationName": "SalesApplication",
+  "environment": "production",
+  "status": "active"
+}
+```
+**Headers:**
+- client_id: "1234567890"
+- client_secret: "1234567890"
+- correlationId: "123456789098dhjhgfhjhg786897"
 
-    with zipfile.ZipFile(zip_data, 'r') as zip_ref:
-        zip_ref.extractall(extract_dir)
-
-    return extract_dir
-
-def find_main_raml_file(base_dir):
-    """Find the main RAML file in the extracted directory."""
-    for root, _, files in os.walk(base_dir):
-        for file in files:
-            if file.endswith(".raml"):
-                full_path = os.path.join(root, file)
-                with open(full_path, 'r', encoding='utf-8', errors='ignore') as raml_file:
-                    first_line = raml_file.readline()
-                    if "#%RAML 1.0" in first_line:
-                        return full_path
-    raise FileNotFoundError("No main RAML file found in the extracted directory.")
-
-def resolve_includes_in_raml(file_path, root_dir):
-    """Resolve includes in the RAML file."""
-    resolved_lines = []
-    current_dir = os.path.dirname(file_path)
-
-    def resolve_include_path(include_path):
-        # Try relative to current file
-        full_path = os.path.normpath(os.path.join(current_dir, include_path))
-        if os.path.isfile(full_path):
-            return full_path
-
-        # Try relative to extracted root
-        full_path = os.path.normpath(os.path.join(root_dir, include_path))
-        if os.path.isfile(full_path):
-            return full_path
-
-        # Recursively search for file by name
-        for root, _, files in os.walk(root_dir):
-            for f in files:
-                if f == os.path.basename(include_path):
-                    return os.path.join(root, f)
-
-        return None
-
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
-        for line in file:
-            if "!include" in line:
-                parts = line.strip().split("!include")
-                prefix = parts[0].strip()
-                include_path = parts[1].strip()
-
-                include_file = resolve_include_path(include_path)
-
-                if include_file and os.path.exists(include_file):
-                    with open(include_file, 'r', encoding='utf-8', errors='ignore') as inc_file:
-                        included_content = inc_file.read()
-                        resolved_lines.append(f"{prefix} |\n")
-                        for inc_line in included_content.splitlines():
-                            resolved_lines.append(f"  {inc_line}")
-                else:
-                    resolved_lines.append(f"{line.strip()}  # Include not found")
-            else:
-                resolved_lines.append(line.rstrip())
-
-    return "\n".join(resolved_lines)
-
-def get_openai_client(model_instance_name):
-    """Initialize Azure OpenAI client."""
-    try:
-        aes_key_base64 = os.environ['AES_KEY']
-        encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-        encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-        api_version = os.environ['AZURE_API_VERSION']
-
-        decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-        decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
-
-        if not decrypted_api_base.endswith('/'):
-            decrypted_api_base += '/'
-
-        request_url = f"{decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}"
-        logger.info(f"Constructed Request URL: {request_url}")
-
-        return AzureChatOpenAI(
-            deployment_name=model_instance_name,
-            openai_api_base=decrypted_api_base,
-            openai_api_key=decrypted_api_key,
-            openai_api_version=api_version
-        )
-    except Exception as e:
-        logger.error(f"Error initializing OpenAI client: {e}")
-        raise ValueError(f"Error initializing OpenAI client: {e}")
-
-def analyze_raml_with_openai(client, resolved_raml_content):
-    """Analyze the RAML content using OpenAI."""
-    prompt = (
-        "You are an expert in reading the RAML from the zip file. "
-        "The file has multiple endpoints which make use of traits, resource types, and API fragments. "
-        "Please carefully analyze the RAML and generate the input payload for each endpoint. "
-        "You are an expert in analyzing the RAML and generating payloads from the RAML. "
-        "I am providing the RAML which will be used as an asset for designing my API. "
-        "In RAML file, some example files are included using '!include'. Go to that file and take the necessary information. "
-        "Please analyze the RAML and generate the sample payload that honors all the rules defined inside the RAML. "
-        "You can refer to https://raml.org/developers/raml-100-tutorial for any doubts related to RAML."
-    )
-    response = client.invoke([HumanMessage(content=prompt + "\n\n" + resolved_raml_content)])
-    return response.content
-
-def lambda_handler(event, context):
-    """AWS Lambda entry point."""
-    logger.info(f"Received event: {json.dumps(event)}")
-
-    try:
-        # Validate and decode the file content
-        if 'body' not in event or not event.get('isBase64Encoded', False):
-            raise ValueError("File content is missing or not base64-encoded in the event.")
-        
-        # Decode the base64-encoded body and save it as a temporary file
-        file_content = b64decode(event['body'])
-
-        # Write the binary content to a temporary file in /tmp
-        zip_path = "/tmp/uploaded.zip"
-        with open(zip_path, "wb") as temp_zip_file:
-            temp_zip_file.write(file_content)
-
-        # Unzip the content
-        extracted_dir = unzip_raml(zip_path)
-        main_raml_file = find_main_raml_file(extracted_dir)
-        logger.info(f"Main RAML File Found: {main_raml_file}")
-
-        # Resolve includes in RAML
-        resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
-
-        # Extract model_instance_name from event headers
-        model_instance_name = event.get('headers', {}).get('model_instance_name')
-        if not model_instance_name:
-            raise ValueError("'model_instance_name' is missing in the headers.")
-        
-        # Get OpenAI client and analyze the RAML
-        client = get_openai_client(model_instance_name)
-        final_analysis = analyze_raml_with_openai(client, resolved_raml)
-
-        # Return the response
-        return {
-            "statusCode": 200,
-            "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"generated_payloads": final_analysis})
+### Endpoint: /salesreturns (POST)
+**Input Payload:**
+```json
+{
+  "correlationId": "corrId123456789",
+  "Transaction": [
+    {
+      "RetailStoreId": "Store100",
+      "BusinessDayDate": "2023-11-08",
+      "WorkstationId": "WS1",
+      "TransactionNumber": "TX123",
+      "BeginTimestamp": "2023-11-08T09:00:00Z",
+      "EndTimestamp": "2023-11-08T09:30:00Z",
+      "Department": "Electronics",
+      "TransactionCurrency": "USD",
+      "CustomerInfo": {
+        "DataElementId": "Cust100",
+        "DataElementValue": "John Doe"
+      },
+      "Tender": [
+        {
+          "TenderSequenceNumber": "1",
+          "TenderTypeCode": "Cash",
+          "TenderAmount": 100.00,
+          "TenderId": "Tender100",
+          "ReferenceId": "Ref100",
+          "TenderCurrency": "USD",
+          "CreditCard": {
+            "PaymentCard": "Visa",
+            "CardNumber": "4111111111111111"
+          }
         }
-
-    except Exception as e:
-        logger.error(f"An error occurred: {e}")
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
+      ],
+      "RetailLineItem": [
+        {
+          "RetailLineNumber": "1",
+          "RetailTypeCode": "Product",
+          "RetailReasonCode": "Purchase",
+          "ItemId": "Item100",
+          "ItemIdIdentifier": "SKU100",
+          "RetailsQuantity": "1",
+          "SalesUOM": "Unit",
+          "SalesAmount": 100.00,
+          "NormalSalesAmt": 100.00,
+          "Tax": {
+            "TaxSequenceNumber": "1",
+            "TaxTypeCode": "SalesTax",
+            "TaxAmount": 5.00
+          },
+          "Discount": {
+            "DiscountTypeCode": "Percentage",
+            "ReductionAmount": 10.00,
+            "DiscountId": "Discount100",
+            "BonusBuyId": "Bonus100",
+            "OfferId": "Offer100"
+          },
+          "GoodsMovement": {
+            "GoodsMovementSequenceNumber": "1",
+            "GoodsMovementTypeCode": "Shipment",
+            "GoodsMovementReasonCode": "Sale",
+            "ShipmentSite": "Warehouse1",
+            "ToPartyId": "Party100"
+          }
         }
+      ]
+    }
+  ]
+}
+```
+**Headers:**
+- client_id: "1234567890"
+- client_secret: "1234567890"
+- correlationId: "123456789098dhjhgfhjhg786897"
 
-def decrypt(data, key):
-    """Decrypt the data using AES and remove padding."""
-    from Crypto.Cipher import AES
-    def unpad(data):
-        """Remove padding from decrypted data."""
-        padding_length = data[-1]
-        return data[:-padding_length]
+These input payloads respect and follow all the rules and structure outlined in the RAML provided, including mandatory fields and data types for each property.
 
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted_data = cipher.decrypt(b64decode(data))
-    decrypted_data = unpad(decrypted_data)
-    return decrypted_data.decode()
+
+{
+    "generated_payloads": "Based on the RAML provided, here are the sample input payloads for each endpoint:\n\n### Heartbeat Endpoint (`/heartbeat`)\n\n**POST Request Payload:**\nThere are no example payload details provided for POST request under `/heartbeat`.\n\n**GET Request Headers:**\n```json\n{\n  \"client_id\": \"1234567890\",\n  \"client_secret\": \"1234567890\",\n  \"correlationId\": \"123456789098dhjhgfhjhg786897\"\n}\n```\n\n### SalesReturns Endpoint (`/salesreturns`)\n\n**POST Request Payload:**\n```json\n{\n  \"status\": \"string\",\n  \"message\": \"string\"\n}\n```\n\n**POST Request Headers:**\n```json\n{\n  \"client_id\": \"1234567890\",\n  \"client_secret\": \"1234567890\",\n  \"correlationId\": \"123456789098dhjhgfhjhg786897\"\n}\n```\n\n**GET Request Headers and Query Parameters:**\n```json\n{\n  \"client_id\": \"1234567890\",\n  \"client_secret\": \"1234567890\",\n  \"correlationId\": \"123456789098dhjhgfhjhg786897\",\n  \"start_time\": \"2023-11-08T00:00:00Z\",\n  \"report_period\": 1440,\n  \"type\": \"SLRN\"\n}\n```\n\nThese payloads honor the rules defined in the RAML for each endpoint, including required headers, types, and traits."
+}
