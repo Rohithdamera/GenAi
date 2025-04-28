@@ -181,3 +181,5 @@ def decrypt(data, key):
     decrypted_data = cipher.decrypt(b64decode(data))
     decrypted_data = unpad(decrypted_data)
     return decrypted_data.decode()
+
+{"error": "[Errno 30] Read-only file system: 'temp_raml'"}
