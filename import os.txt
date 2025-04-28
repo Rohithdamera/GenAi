@@ -134,12 +134,9 @@ def lambda_handler(event, context):
             raise ValueError("File content is missing or not base64-encoded.")
 
         zip_bytes = b64decode(event['body'])
-        headers = event.get('headers', {})
-        model_instance_name = (
-            headers.get('model_instance_name') or
-            headers.get('Model_Instance_Name') or
-            os.environ.get('DEFAULT_MODEL_INSTANCE_NAME', 'default-model')
-        )
+
+        # Retrieving model_instance_name directly from headers
+        model_instance_name = event.get('headers', {}).get('model_instance_name', 'default-model')
 
         extracted_dir = unzip_raml(zip_bytes)
         main_raml_file = find_main_raml_file(extracted_dir)
@@ -160,5 +157,3 @@ def lambda_handler(event, context):
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
         }
-
-{"error": "get_openai_client() missing 2 required positional arguments: 'agent_name' and 'model_instance_name'"}
