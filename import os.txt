@@ -25,6 +25,7 @@ def decrypt(data, key):
 def get_openai_client(agent_name, model_instance_name):
     """Initialize Azure OpenAI client using decrypted API credentials."""
     try:
+        # Fetch and decrypt necessary environment variables
         aes_key_base64 = os.environ['AES_KEY']
         encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
         encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
@@ -33,12 +34,15 @@ def get_openai_client(agent_name, model_instance_name):
         decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
         decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
 
+        # Ensure the base URL ends with a slash
         if not decrypted_api_base.endswith('/'):
             decrypted_api_base += '/'
 
+        # Construct the request URL
         request_url = f"{decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}"
         logger.info(f"Constructed Request URL: {request_url}")
 
+        # Return the AzureChatOpenAI client initialized with the decrypted details
         return AzureChatOpenAI(
             deployment_name=model_instance_name,
             openai_api_base=decrypted_api_base,
@@ -52,6 +56,7 @@ def get_openai_client(agent_name, model_instance_name):
 def process_with_openai(client, file_content, agent_name):
     """Process file content using OpenAI based on Agent_name."""
     try:
+        # Customize the prompt based on agent_name
         if agent_name == "xslt_to_dwl":
             prompt = (
                 "You are an expert in Mulesoft integration. I will provide XSLT code. "
@@ -62,6 +67,7 @@ def process_with_openai(client, file_content, agent_name):
         else:
             raise ValueError(f"Unsupported Agent_name: {agent_name}")
 
+        # Make the request to OpenAI
         response = client.invoke([HumanMessage(content=prompt + "\n\n" + file_content)])
         return response.content
     except Exception as e:
@@ -87,27 +93,27 @@ def lambda_handler(event, context):
         if 'body' not in event or not event.get('isBase64Encoded', False):
             raise ValueError("File content is missing or not base64-encoded in the event.")
 
-        # Decode file content
+        # Decode the base64 file content
         try:
             file_content = b64decode(event['body']).decode('utf-8')
         except Exception as e:
             raise ValueError(f"Failed to decode file content: {e}")
 
-        # Extract query parameters
+        # Extract query parameters (Agent_name)
         query_params = event.get('queryStringParameters', {})
         agent_name = query_params.get('Agent_name')
         if not agent_name:
             raise ValueError("'Agent_name' is missing in the query parameters.")
 
-        # Extract model_instance_name
+        # Extract model_instance_name from headers
         model_instance_name = event.get('headers', {}).get('model_instance_name')
         if not model_instance_name:
             raise ValueError("'model_instance_name' is missing in the headers.")
 
-        # Process content
+        # Process the file content using OpenAI and the agent name
         processed_result = process_file_content(agent_name, file_content, model_instance_name)
 
-        # Return response
+        # Return the processed result based on agent_name
         if agent_name == "xslt_to_dwl":
             return {
                 "statusCode": 200,
