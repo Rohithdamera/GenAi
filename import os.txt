@@ -89,13 +89,13 @@ def lambda_handler(event, context):
     logger.info(f"Received event: {json.dumps(event)}")
 
     try:
-        # Validate file input
+        # Validate base64 encoded file content in the event
         if 'body' not in event or not event.get('isBase64Encoded', False):
             raise ValueError("File content is missing or not base64-encoded in the event.")
 
-        # Decode the base64 file content
+        # Decode the base64 file content as binary
         try:
-            file_content = b64decode(event['body']).decode('utf-8')
+            file_content = b64decode(event['body'])  # Treat the file content as binary
         except Exception as e:
             raise ValueError(f"Failed to decode file content: {e}")
 
@@ -129,5 +129,3 @@ def lambda_handler(event, context):
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
         }
-
-{"error": "Failed to decode file content: 'utf-8' codec can't decode byte 0xec in position 10: invalid continuation byte"}
