@@ -179,3 +179,5 @@ def unpad(data):
     """Remove padding from decrypted data."""
     padding_length = data[-1]
     return data[:-padding_length]
+
+{"error": "get_openai_client() missing 2 required positional arguments: 'agent_name' and 'model_instance_name'"}
