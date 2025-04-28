@@ -146,11 +146,12 @@ def lambda_handler(event, context):
         # Resolve includes in RAML
         resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
 
-        # Get OpenAI client and analyze the RAML
+        # Extract model_instance_name from event headers
         model_instance_name = event.get('headers', {}).get('model_instance_name')
         if not model_instance_name:
             raise ValueError("'model_instance_name' is missing in the headers.")
         
+        # Get OpenAI client and analyze the RAML
         client = get_openai_client(model_instance_name)
         final_analysis = analyze_raml_with_openai(client, resolved_raml)
 
@@ -170,14 +171,13 @@ def lambda_handler(event, context):
 
 def decrypt(data, key):
     """Decrypt the data using AES and remove padding."""
+    from Crypto.Cipher import AES
+    def unpad(data):
+        """Remove padding from decrypted data."""
+        padding_length = data[-1]
+        return data[:-padding_length]
+
     cipher = AES.new(b64decode(key), AES.MODE_ECB)
     decrypted_data = cipher.decrypt(b64decode(data))
     decrypted_data = unpad(decrypted_data)
     return decrypted_data.decode()
-
-def unpad(data):
-    """Remove padding from decrypted data."""
-    padding_length = data[-1]
-    return data[:-padding_length]
-
-{"error": "get_openai_client() missing 2 required positional arguments: 'agent_name' and 'model_instance_name'"}
