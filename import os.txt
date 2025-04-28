@@ -123,3 +123,117 @@ def lambda_handler(event, context):
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
         }
+
+
+import os
+import zipfile
+import shutil
+from langchain.chat_models import AzureChatOpenAI
+from langchain.schema import HumanMessage
+
+
+
+
+
+def unzip_raml(zip_path, extract_dir="temp_raml"):
+    if os.path.exists(extract_dir):
+        shutil.rmtree(extract_dir)
+    os.makedirs(extract_dir, exist_ok=True)
+
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_dir)
+
+    return extract_dir
+
+
+def find_main_raml_file(base_dir):
+    for root, _, files in os.walk(base_dir):
+        for file in files:
+            if file.endswith(".raml"):
+                full_path = os.path.join(root, file)
+                with open(full_path, 'r', encoding='utf-8', errors='ignore') as raml_file:
+                    first_line = raml_file.readline()
+                    if "#%RAML 1.0" in first_line:
+                        return full_path
+    raise FileNotFoundError("No main RAML file found in the extracted directory.")
+
+
+def resolve_includes_in_raml(file_path, root_dir):
+    resolved_lines = []
+    current_dir = os.path.dirname(file_path)
+
+    def resolve_include_path(include_path):
+        # Try relative to current file
+        full_path = os.path.normpath(os.path.join(current_dir, include_path))
+        if os.path.isfile(full_path):
+            return full_path
+
+        # Try relative to extracted root
+        full_path = os.path.normpath(os.path.join(root_dir, include_path))
+        if os.path.isfile(full_path):
+            return full_path
+
+        # Recursively search for file by name
+        for root, _, files in os.walk(root_dir):
+            for f in files:
+                if f == os.path.basename(include_path):
+                    return os.path.join(root, f)
+
+        return None
+
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
+        for line in file:
+            if "!include" in line:
+                parts = line.strip().split("!include")
+                prefix = parts[0].strip()
+                include_path = parts[1].strip()
+
+                include_file = resolve_include_path(include_path)
+
+                if include_file and os.path.exists(include_file):
+                    with open(include_file, 'r', encoding='utf-8', errors='ignore') as inc_file:
+                        included_content = inc_file.read()
+                        resolved_lines.append(f"{prefix} |\n")
+                        for inc_line in included_content.splitlines():
+                            resolved_lines.append(f"  {inc_line}")
+                else:
+                    resolved_lines.append(f"{line.strip()}  # Include not found")
+            else:
+                resolved_lines.append(line.rstrip())
+
+    return "\n".join(resolved_lines)
+
+def analyze_raml_with_openai(client, resolved_raml_content):
+    prompt = (
+        "You are an expert in reading the RAML from the zip file. "
+        "The file has multiple endpoints which make use of traits, resource types, and API fragments. "
+        "Please carefully analyze the RAML and generate the input payload for each endpoint. "
+        "You are an expert in analyzing the RAML and generating payloads from the RAML. "
+        "I am providing the RAML which will be used as an asset for designing my API. "
+        "In RAML file, some example files are included using '!include'. Go to that file and take the necessary information. "
+        "Please analyze the RAML and generate the sample payload that honors all the rules defined inside the RAML. "
+        "You can refer to https://raml.org/developers/raml-100-tutorial for any doubts related to RAML."
+    )
+    response = client.invoke([HumanMessage(content=prompt + "\n\n" + resolved_raml_content)])
+    return response.content
+
+
+if __name__ == "__main__":
+    zip_file_path = r"C:/Users/vpravali/Downloads/sales-exp-api (1).zip"
+
+    try:
+        extracted_dir = unzip_raml(zip_file_path)
+        main_raml_file = find_main_raml_file(extracted_dir)
+        print(f"Main RAML File Found: {main_raml_file}")
+
+        resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
+
+        client = get_openai_client()
+        final_analysis = analyze_raml_with_openai(client, resolved_raml)
+
+        print("\n\nGenerated Payloads:\n")
+        print(final_analysis)
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
