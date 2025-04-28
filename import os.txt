@@ -1,8 +1,9 @@
 import os
-import logging
 import json
+import zipfile
+import shutil
+import logging
 from base64 import b64decode
-from Crypto.Cipher import AES
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage
 
@@ -10,143 +11,19 @@ from langchain.schema import HumanMessage
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def unpad(data):
-    """Remove padding from decrypted data."""
-    padding_length = data[-1]
-    return data[:-padding_length]
-
-def decrypt(data, key):
-    """Decrypt the data using AES and remove padding."""
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted_data = cipher.decrypt(b64decode(data))
-    decrypted_data = unpad(decrypted_data)
-    return decrypted_data.decode()
-
-def get_openai_client(agent_name, model_instance_name):
-    """Initialize Azure OpenAI client using decrypted API credentials."""
-    try:
-        aes_key_base64 = os.environ['AES_KEY']
-        encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-        encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-        api_version = os.environ['AZURE_API_VERSION']
-
-        decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-        decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
-
-        if not decrypted_api_base.endswith('/'):
-            decrypted_api_base += '/'
-
-        request_url = f"{decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}"
-        logger.info(f"Constructed Request URL: {request_url}")
-
-        return AzureChatOpenAI(
-            deployment_name=model_instance_name,
-            openai_api_base=decrypted_api_base,
-            openai_api_key=decrypted_api_key,
-            openai_api_version=api_version
-        )
-    except Exception as e:
-        logger.error(f"Error initializing OpenAI client: {e}")
-        raise ValueError(f"Error initializing OpenAI client: {e}")
-
-def process_with_openai(client, file_content, agent_name):
-    """Process file content using OpenAI based on Agent_name."""
-    try:
-        if agent_name == "xslt_to_dwl":
-            prompt = (
-                "You are an expert in Mulesoft integration. I will provide XSLT code. "
-                "Please convert it into an equivalent DataWeave (DWL 2.0) script that performs the same transformation. "
-                "Ensure that the output script is clean, properly formatted, and complete. "
-                "Use appropriate DataWeave functions and syntax to mimic the logic of the original XSLT."
-            )
-        else:
-            raise ValueError(f"Unsupported Agent_name: {agent_name}")
-
-        response = client.invoke([HumanMessage(content=prompt + "\n\n" + file_content)])
-        return response.content
-    except Exception as e:
-        logger.error(f"Error in OpenAI API call: {e}")
-        raise
-
-def process_file_content(agent_name, file_content, model_instance_name):
-    """Process the DataWeave script based on the agent name."""
-    try:
-        client = get_openai_client(agent_name, model_instance_name)
-        result = process_with_openai(client, file_content, agent_name)
-        return result
-    except Exception as e:
-        logger.error(f"Error processing file content: {e}")
-        raise
-
-def lambda_handler(event, context):
-    """AWS Lambda entry point."""
-    logger.info(f"Received event: {json.dumps(event)}")
-
-    try:
-        # Validate file input
-        if 'body' not in event or not event.get('isBase64Encoded', False):
-            raise ValueError("File content is missing or not base64-encoded in the event.")
-
-        # Decode file content
-        try:
-            file_content = b64decode(event['body']).decode('utf-8')
-        except Exception as e:
-            raise ValueError(f"Failed to decode file content: {e}")
-
-        # Extract query parameters
-        query_params = event.get('queryStringParameters', {})
-        agent_name = query_params.get('Agent_name')
-        if not agent_name:
-            raise ValueError("'Agent_name' is missing in the query parameters.")
-
-        # Extract model_instance_name
-        model_instance_name = event.get('headers', {}).get('model_instance_name')
-        if not model_instance_name:
-            raise ValueError("'model_instance_name' is missing in the headers.")
-
-        # Process content
-        processed_result = process_file_content(agent_name, file_content, model_instance_name)
-
-        # Return response
-        if agent_name == "xslt_to_dwl":
-            return {
-                "statusCode": 200,
-                "headers": {"Content-Type": "text/plain"},
-                "body": processed_result
-            }
-        else:
-            raise ValueError("Unsupported Agent_name specified.")
-
-    except Exception as e:
-        logger.error(f"An error occurred: {e}")
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
-        }
-
-
-import os
-import zipfile
-import shutil
-from langchain.chat_models import AzureChatOpenAI
-from langchain.schema import HumanMessage
-
-
-
-
-
-def unzip_raml(zip_path, extract_dir="temp_raml"):
+def unzip_raml(zip_data, extract_dir="temp_raml"):
+    """Unzip the uploaded RAML ZIP content."""
     if os.path.exists(extract_dir):
         shutil.rmtree(extract_dir)
     os.makedirs(extract_dir, exist_ok=True)
 
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+    with zipfile.ZipFile(zip_data, 'r') as zip_ref:
         zip_ref.extractall(extract_dir)
 
     return extract_dir
 
-
 def find_main_raml_file(base_dir):
+    """Find the main RAML file in the extracted directory."""
     for root, _, files in os.walk(base_dir):
         for file in files:
             if file.endswith(".raml"):
@@ -157,8 +34,8 @@ def find_main_raml_file(base_dir):
                         return full_path
     raise FileNotFoundError("No main RAML file found in the extracted directory.")
 
-
 def resolve_includes_in_raml(file_path, root_dir):
+    """Resolve includes in the RAML file."""
     resolved_lines = []
     current_dir = os.path.dirname(file_path)
 
@@ -203,7 +80,35 @@ def resolve_includes_in_raml(file_path, root_dir):
 
     return "\n".join(resolved_lines)
 
+def get_openai_client(model_instance_name):
+    """Initialize Azure OpenAI client."""
+    try:
+        aes_key_base64 = os.environ['AES_KEY']
+        encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+        encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+        api_version = os.environ['AZURE_API_VERSION']
+
+        decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+        decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+
+        if not decrypted_api_base.endswith('/'):
+            decrypted_api_base += '/'
+
+        request_url = f"{decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}"
+        logger.info(f"Constructed Request URL: {request_url}")
+
+        return AzureChatOpenAI(
+            deployment_name=model_instance_name,
+            openai_api_base=decrypted_api_base,
+            openai_api_key=decrypted_api_key,
+            openai_api_version=api_version
+        )
+    except Exception as e:
+        logger.error(f"Error initializing OpenAI client: {e}")
+        raise ValueError(f"Error initializing OpenAI client: {e}")
+
 def analyze_raml_with_openai(client, resolved_raml_content):
+    """Analyze the RAML content using OpenAI."""
     prompt = (
         "You are an expert in reading the RAML from the zip file. "
         "The file has multiple endpoints which make use of traits, resource types, and API fragments. "
@@ -217,23 +122,60 @@ def analyze_raml_with_openai(client, resolved_raml_content):
     response = client.invoke([HumanMessage(content=prompt + "\n\n" + resolved_raml_content)])
     return response.content
 
-
-if __name__ == "__main__":
-    zip_file_path = r"C:/Users/vpravali/Downloads/sales-exp-api (1).zip"
+def lambda_handler(event, context):
+    """AWS Lambda entry point."""
+    logger.info(f"Received event: {json.dumps(event)}")
 
     try:
-        extracted_dir = unzip_raml(zip_file_path)
-        main_raml_file = find_main_raml_file(extracted_dir)
-        print(f"Main RAML File Found: {main_raml_file}")
+        # Validate and decode the file content
+        if 'body' not in event or not event.get('isBase64Encoded', False):
+            raise ValueError("File content is missing or not base64-encoded in the event.")
+        
+        # Decode the base64-encoded body and save it as a temporary file
+        file_content = b64decode(event['body'])
 
+        # Write the binary content to a temporary file
+        with open("/tmp/uploaded.zip", "wb") as temp_zip_file:
+            temp_zip_file.write(file_content)
+
+        # Unzip the content
+        extracted_dir = unzip_raml("/tmp/uploaded.zip")
+        main_raml_file = find_main_raml_file(extracted_dir)
+        logger.info(f"Main RAML File Found: {main_raml_file}")
+
+        # Resolve includes in RAML
         resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
 
-        client = get_openai_client()
+        # Get OpenAI client and analyze the RAML
+        model_instance_name = event.get('headers', {}).get('model_instance_name')
+        if not model_instance_name:
+            raise ValueError("'model_instance_name' is missing in the headers.")
+        
+        client = get_openai_client(model_instance_name)
         final_analysis = analyze_raml_with_openai(client, resolved_raml)
 
-        print("\n\nGenerated Payloads:\n")
-        print(final_analysis)
+        # Return the response
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"generated_payloads": final_analysis})
+        }
 
     except Exception as e:
-        print(f"An error occurred: {e}")
+        logger.error(f"An error occurred: {e}")
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
 
+def decrypt(data, key):
+    """Decrypt the data using AES and remove padding."""
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)
+    decrypted_data = cipher.decrypt(b64decode(data))
+    decrypted_data = unpad(decrypted_data)
+    return decrypted_data.decode()
+
+def unpad(data):
+    """Remove padding from decrypted data."""
+    padding_length = data[-1]
+    return data[:-padding_length]
