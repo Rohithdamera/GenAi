@@ -1,4 +1,16 @@
-def unzip_raml(zip_path, extract_dir="temp_raml"):
+import os
+import json
+import shutil
+import zipfile
+import logging
+from base64 import b64decode
+from langchain_community.chat_models import AzureChatOpenAI
+from langchain.schema import HumanMessage
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def unzip_raml(zip_path, extract_dir="/tmp/temp_raml"):
     if os.path.exists(extract_dir):
         shutil.rmtree(extract_dir)
     os.makedirs(extract_dir, exist_ok=True)
@@ -7,7 +19,6 @@ def unzip_raml(zip_path, extract_dir="temp_raml"):
         zip_ref.extractall(extract_dir)
 
     return extract_dir
-
 
 def find_main_raml_file(base_dir):
     for root, _, files in os.walk(base_dir):
@@ -20,23 +31,19 @@ def find_main_raml_file(base_dir):
                         return full_path
     raise FileNotFoundError("No main RAML file found in the extracted directory.")
 
-
 def resolve_includes_in_raml(file_path, root_dir):
     resolved_lines = []
     current_dir = os.path.dirname(file_path)
 
     def resolve_include_path(include_path):
-        # Try relative to current file
         full_path = os.path.normpath(os.path.join(current_dir, include_path))
         if os.path.isfile(full_path):
             return full_path
 
-        # Try relative to extracted root
         full_path = os.path.normpath(os.path.join(root_dir, include_path))
         if os.path.isfile(full_path):
             return full_path
 
-        # Recursively search for file by name
         for root, _, files in os.walk(root_dir):
             for f in files:
                 if f == os.path.basename(include_path):
@@ -80,22 +87,68 @@ def analyze_raml_with_openai(client, resolved_raml_content):
     response = client.invoke([HumanMessage(content=prompt + "\n\n" + resolved_raml_content)])
     return response.content
 
+def get_openai_client():
+    aes_key_base64 = os.environ['AES_KEY']
+    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+    api_version = os.environ['AZURE_API_VERSION']
 
-if __name__ == "__main__":
-    zip_file_path = r"C:/Users/vpravali/Downloads/sales-exp-api (1).zip"
+    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
 
+    if not decrypted_api_base.endswith('/'):
+        decrypted_api_base += '/'
+
+    return AzureChatOpenAI(
+        deployment_name=os.environ['MODEL_INSTANCE_NAME'],
+        openai_api_base=decrypted_api_base,
+        openai_api_key=decrypted_api_key,
+        openai_api_version=api_version
+    )
+
+def decrypt(data, key):
+    from Crypto.Cipher import AES
+    def unpad(data):
+        padding_length = data[-1]
+        return data[:-padding_length]
+
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)
+    decrypted_data = cipher.decrypt(b64decode(data))
+    decrypted_data = unpad(decrypted_data)
+    return decrypted_data.decode()
+
+def lambda_handler(event, context):
     try:
-        extracted_dir = unzip_raml(zip_file_path)
+        logger.info(f"Received event: {json.dumps(event)[:1000]}...")  # Log only first 1000 chars to avoid huge output
+
+        if 'body' not in event or not event.get('isBase64Encoded', False):
+            raise ValueError("Request body missing or not base64 encoded.")
+
+        # Decode the base64-encoded zip file
+        zip_content = b64decode(event['body'])
+
+        zip_path = '/tmp/uploaded.zip'
+        with open(zip_path, 'wb') as f:
+            f.write(zip_content)
+
+        extracted_dir = unzip_raml(zip_path)
         main_raml_file = find_main_raml_file(extracted_dir)
-        print(f"Main RAML File Found: {main_raml_file}")
+        logger.info(f"Main RAML File Found: {main_raml_file}")
 
         resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
 
         client = get_openai_client()
         final_analysis = analyze_raml_with_openai(client, resolved_raml)
 
-        print("\n\nGenerated Payloads:\n")
-        print(final_analysis)
+        return {
+            'statusCode': 200,
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({'generated_payloads': final_analysis})
+        }
 
     except Exception as e:
-        print(f"An error occurred: {e}")
+        logger.error(f"Error occurred: {e}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps({'error': str(e)})
+        }
