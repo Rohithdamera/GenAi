@@ -11,7 +11,7 @@ from langchain.schema import HumanMessage
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def unzip_raml(zip_data, extract_dir="temp_raml"):
+def unzip_raml(zip_data, extract_dir="/tmp/temp_raml"):
     """Unzip the uploaded RAML ZIP content."""
     if os.path.exists(extract_dir):
         shutil.rmtree(extract_dir)
@@ -134,12 +134,13 @@ def lambda_handler(event, context):
         # Decode the base64-encoded body and save it as a temporary file
         file_content = b64decode(event['body'])
 
-        # Write the binary content to a temporary file
-        with open("/tmp/uploaded.zip", "wb") as temp_zip_file:
+        # Write the binary content to a temporary file in /tmp
+        zip_path = "/tmp/uploaded.zip"
+        with open(zip_path, "wb") as temp_zip_file:
             temp_zip_file.write(file_content)
 
         # Unzip the content
-        extracted_dir = unzip_raml("/tmp/uploaded.zip")
+        extracted_dir = unzip_raml(zip_path)
         main_raml_file = find_main_raml_file(extracted_dir)
         logger.info(f"Main RAML File Found: {main_raml_file}")
 
@@ -181,5 +182,3 @@ def decrypt(data, key):
     decrypted_data = cipher.decrypt(b64decode(data))
     decrypted_data = unpad(decrypted_data)
     return decrypted_data.decode()
-
-{"error": "[Errno 30] Read-only file system: 'temp_raml'"}
