@@ -36,11 +36,14 @@ def unzip_raml(zip_bytes, extract_dir="/tmp/temp_raml"):
     if os.path.exists(extract_dir):
         shutil.rmtree(extract_dir)
     os.makedirs(extract_dir, exist_ok=True)
+
     zip_path = "/tmp/uploaded.zip"
     with open(zip_path, "wb") as f:
         f.write(zip_bytes)
+
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(extract_dir)
+
     return extract_dir
 
 def find_main_raml_file(base_dir):
@@ -49,48 +52,63 @@ def find_main_raml_file(base_dir):
             if file.endswith(".raml"):
                 full_path = os.path.join(root, file)
                 with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    first_line = f.readline()
-                    if "#%RAML 1.0" in first_line:
+                    if "#%RAML 1.0" in f.readline():
                         return full_path
     raise FileNotFoundError("Main RAML file not found.")
 
 def resolve_includes_in_raml(file_path, root_dir):
     resolved_lines = []
+    current_dir = os.path.dirname(file_path)
 
     def resolve_include_path(include_path):
-        # Prefer request folder first
-        request_candidate = None
-        fallback_candidate = None
+        # Check for the request folder first
+        request_folder = os.path.join(root_dir, "request")
+        include_full_path = os.path.normpath(os.path.join(request_folder, include_path))
+        if os.path.isfile(include_full_path):
+            return include_full_path
 
+        # Fallback to other directories (previous behavior)
+        full_path = os.path.normpath(os.path.join(current_dir, include_path))
+        if os.path.isfile(full_path):
+            return full_path
+
+        full_path = os.path.normpath(os.path.join(root_dir, include_path))
+        if os.path.isfile(full_path):
+            return full_path
+
+        # If not found, walk through the directories
         for root, _, files in os.walk(root_dir):
             for f in files:
                 if f == os.path.basename(include_path):
-                    full_path = os.path.join(root, f)
-                    if "request" in full_path.replace("\\", "/").lower():
-                        request_candidate = full_path
-                    elif fallback_candidate is None:
-                        fallback_candidate = full_path
+                    return os.path.join(root, f)
 
-        return request_candidate or fallback_candidate
+        return None
 
-    def read_include_content(include_file):
-        with open(include_file, 'r', encoding='utf-8', errors='ignore') as f:
-            return f.read()
+    def extract_example_values(include_file):
+        example_values = {}
+        with open(include_file, 'r', encoding='utf-8', errors='ignore') as inc_file:
+            for line in inc_file:
+                if "example:" in line:
+                    parts = line.strip().split("example:")
+                    field_name = parts[0].strip()
+                    example_value = parts[1].strip()
+                    example_values[field_name] = example_value
+        return example_values
 
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
         for line in file:
             if "!include" in line:
                 parts = line.strip().split("!include")
-                prefix = parts[0].rstrip()
+                prefix = parts[0].strip()
                 include_path = parts[1].strip()
 
                 include_file = resolve_include_path(include_path)
 
                 if include_file and os.path.exists(include_file):
-                    include_content = read_include_content(include_file)
+                    example_values = extract_example_values(include_file)
                     resolved_lines.append(f"{prefix} |\n")
-                    for include_line in include_content.splitlines():
-                        resolved_lines.append(f"  {include_line}")
+                    for field, value in example_values.items():
+                        resolved_lines.append(f"  {field}: {value}")
                 else:
                     resolved_lines.append(f"{line.strip()}  # Include not found")
             else:
@@ -106,7 +124,6 @@ def analyze_raml_with_openai(resolved_raml_content):
         "You are an expert in analyzing the RAML and generating payloads from the RAML. "
         "I am providing the RAML which will be used as an asset for designing my API. "
         "In RAML file, some example files are included using '!include'. Go to that file and take the necessary information. "
-        "Prefer the example files under the 'request' folder while generating payloads. "
         "Please analyze the RAML and generate the sample payload that honors all the rules defined inside the RAML. "
         "You can refer to https://raml.org/developers/raml-100-tutorial for any doubts related to RAML."
     )
@@ -119,6 +136,7 @@ def analyze_raml_with_openai(resolved_raml_content):
 
 def lambda_handler(event, context):
     logger.info("Lambda invoked.")
+
     try:
         if 'body' not in event or not event.get('isBase64Encoded', False):
             raise ValueError("File content is missing or not base64-encoded.")
@@ -151,5 +169,3 @@ def lambda_handler(event, context):
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
         }
-
-{"error": "Incorrect API key provided: 8MHolrBM************************************************************************ZYVp. You can find your API key at https://platform.openai.com/account/api-keys."}
