@@ -129,3 +129,5 @@ def lambda_handler(event, context):
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
         }
+
+{"error": "Failed to decode file content: 'utf-8' codec can't decode byte 0xec in position 10: invalid continuation byte"}
