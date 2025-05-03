@@ -1,154 +1,56 @@
-import os
-import json
-import shutil
-import zipfile
-import boto3
-import base64
-import tempfile
+1. @Component
+📌 What it is:
+A class-level annotation.
 
-from typing import Any
-from openai import AzureOpenAI
-from langchain_core.messages import HumanMessage
+Tells Spring: “Create and manage an instance of this class as a bean.”
 
-def decrypt_using_kms(ciphertext: str) -> str:
-    kms = boto3.client("kms")
-    response = kms.decrypt(
-        CiphertextBlob=base64.b64decode(ciphertext),
-        EncryptionAlgorithm="SYMMETRIC_DEFAULT",
-        KeyId=os.environ["AES_KEY"],
-    )
-    return response["Plaintext"].decode("utf-8")
+✅ Use case:
+Use it for your own classes — like services, repositories, or controllers.
 
-def get_openai_client(api_base: str, api_key: str, api_version: str, deployment_name: str):
-    return AzureOpenAI(
-        api_version=api_version,
-        azure_endpoint=api_base,
-        api_key=api_key,
-        deployment_name=deployment_name
-    )
+💡 Example:
+java
+Copy
+Edit
+@Component
+public class MyService {
+    public void doWork() {
+        System.out.println("Working...");
+    }
+}
+Spring scans it (via @ComponentScan) and registers it as a bean.
 
-def unzip_raml(zip_path, extract_dir):
-    if os.path.exists(extract_dir):
-        shutil.rmtree(extract_dir)
-    os.makedirs(extract_dir, exist_ok=True)
+It's automatically detected and injected where needed.
 
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(extract_dir)
+✅ 2. @Bean
+📌 What it is:
+A method-level annotation.
 
-    return extract_dir
+Tells Spring: “Register the return value of this method as a bean.”
 
-def find_main_raml_file(base_dir):
-    for root, _, files in os.walk(base_dir):
-        for file in files:
-            if file.endswith(".raml"):
-                full_path = os.path.join(root, file)
-                with open(full_path, 'r', encoding='utf-8', errors='ignore') as raml_file:
-                    first_line = raml_file.readline()
-                    if "#%RAML 1.0" in first_line:
-                        return full_path
-    raise FileNotFoundError("No main RAML file found in the extracted directory.")
+✅ Use case:
+When you don’t own the class (like a library class) or want more control over bean creation.
 
-def resolve_includes_in_raml(file_path, root_dir):
-    resolved_lines = []
-    current_dir = os.path.dirname(file_path)
+💡 Example:
+java
+Copy
+Edit
+@Configuration
+public class AppConfig {
 
-    def resolve_include_path(include_path):
-        full_path = os.path.normpath(os.path.join(current_dir, include_path))
-        if os.path.isfile(full_path):
-            return full_path
+    @Bean
+    public RestTemplate restTemplate() {
+        return new RestTemplate(); // manual creation
+    }
+}
+Spring manages RestTemplate as a bean.
 
-        full_path = os.path.normpath(os.path.join(root_dir, include_path))
-        if os.path.isfile(full_path):
-            return full_path
+✅ 3. @Configuration
+📌 What it is:
+A class-level annotation.
 
-        for root, _, files in os.walk(root_dir):
-            for f in files:
-                if f == os.path.basename(include_path):
-                    return os.path.join(root, f)
-        return None
+Marks the class as a source of bean definitions.
 
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
-        for line in file:
-            if "!include" in line:
-                parts = line.strip().split("!include")
-                prefix = parts[0].strip()
-                include_path = parts[1].strip()
+It's a special type of @Component.
 
-                include_file = resolve_include_path(include_path)
-
-                if include_file and os.path.exists(include_file):
-                    with open(include_file, 'r', encoding='utf-8', errors='ignore') as inc_file:
-                        included_content = inc_file.read()
-                        resolved_lines.append(f"{prefix} |\n")
-                        for inc_line in included_content.splitlines():
-                            resolved_lines.append(f"  {inc_line}")
-                else:
-                    resolved_lines.append(f"{line.strip()}  # Include not found")
-            else:
-                resolved_lines.append(line.rstrip())
-
-    return "\n".join(resolved_lines)
-
-def analyze_raml_with_openai(client, resolved_raml_content):
-    prompt = (
-        "You are an expert in reading the RAML from the zip file. "
-        "The file has multiple endpoints which make use of traits, resource types, and API fragments. "
-        "Please carefully analyze the RAML and generate the input payload for each endpoint. "
-        "You are an expert in analyzing the RAML and generating payloads from the RAML. "
-        "I am providing the RAML which will be used as an asset for designing my API. "
-        "In RAML file, some example files are included using '!include'. Go to that file and take the necessary information. "
-        "Please analyze the RAML and generate the sample payload that honors all the rules defined inside the RAML. "
-        "You can refer to https://raml.org/developers/raml-100-tutorial for any doubts related to RAML."
-    )
-    response = client.invoke([HumanMessage(content=prompt + "\n\n" + resolved_raml_content)])
-    return response.content
-
-def lambda_handler(event, context):
-    try:
-        if 'body' not in event:
-            return {"statusCode": 400, "body": json.dumps({"error": "No file uploaded"})}
-
-        # Get headers
-        headers = event.get('headers', {})
-        deployment_name = headers.get("MODEL_INSTANCE_NAME") or headers.get("model_instance_name")
-
-        if not deployment_name:
-            return {"statusCode": 400, "body": json.dumps({"error": "MODEL_INSTANCE_NAME header missing"})}
-
-        api_base = decrypt_using_kms(os.environ["ENCRYPTED_API_BASE"])
-        api_key = decrypt_using_kms(os.environ["ENCRYPTED_API_KEY"])
-        api_version = os.environ["AZURE_API_VERSION"]
-
-        client = get_openai_client(
-            api_base=api_base,
-            api_key=api_key,
-            api_version=api_version,
-            deployment_name=deployment_name
-        )
-
-        # Decode and save the uploaded zip file
-        file_content = base64.b64decode(event['body'])
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp_zip:
-            tmp_zip.write(file_content)
-            tmp_zip_path = tmp_zip.name
-
-        temp_extract_dir = tempfile.mkdtemp()
-
-        extracted_dir = unzip_raml(tmp_zip_path, temp_extract_dir)
-        main_raml_file = find_main_raml_file(extracted_dir)
-        resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
-
-        final_analysis = analyze_raml_with_openai(client, resolved_raml)
-
-        return {
-            "statusCode": 200,
-            "body": json.dumps({
-                "generated_payloads": final_analysis
-            })
-        }
-
-    except Exception as e:
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
-        }
+✅ Use case:
+Use it to group multiple @Bean methods together in one place.
