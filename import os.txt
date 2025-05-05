@@ -186,3 +186,20 @@ def lambda_handler(event, context):
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
         }
+
+
+{
+    "/heartbeat:": {
+        "field1": 897.64,
+        "field2": 195.55,
+        "field3": 651,
+        "field4": false,
+        "field5": 415.63
+    },
+    "/salesreturns:": {
+        "field1": "2wP79j",
+        "field2": false,
+        "field3": true,
+        "field4": true
+    }
+}
