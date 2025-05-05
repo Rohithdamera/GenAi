@@ -1,12 +1,13 @@
-\import os
+import os
 import shutil
 import zipfile
 import json
-from base64 import b64decode
 import logging
-from Crypto.Cipher import AES
+from base64 import b64decode
 import random
 import string
+import tempfile
+from Crypto.Cipher import AES
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,84 +29,53 @@ def decrypt(data, key):
 def mock_openai_client(model_instance_name):
     class MockClient:
         def invoke(self, messages):
-            raml_content = messages[0]['content']
+            prompt_and_raml = messages[0]['content']
+            raml_content = prompt_and_raml.split('\n\n', 1)[-1]
             endpoints = extract_endpoints_from_raml(raml_content)
-            payloads = generate_payloads_for_endpoints(endpoints, raml_content)
-            payloads = fill_empty_values(payloads)
+            payloads = generate_payloads_for_endpoints(endpoints)
             return type('obj', (object,), {'content': json.dumps(payloads)})
     return MockClient()
 
 def extract_endpoints_from_raml(raml_content):
     endpoints = []
-    lines = raml_content.split('\n')
-    for line in lines:
-        if line.startswith('/'):
+    for line in raml_content.splitlines():
+        if line.strip().startswith('/'):
             endpoints.append(line.strip())
     return endpoints
 
-def generate_payloads_for_endpoints(endpoints, raml_content):
+def generate_payloads_for_endpoints(endpoints):
     payloads = {}
     for endpoint in endpoints:
-        payloads[endpoint] = extract_fields_for_endpoint(endpoint, raml_content)
+        field_count = random.randint(2, 5)
+        payloads[endpoint] = {
+            f"field{i+1}": generate_random_value() for i in range(field_count)
+        }
     return payloads
 
-def extract_fields_for_endpoint(endpoint, raml_content):
-    fields = {}
-    lines = raml_content.split('\n')
-    capture = False
-    for line in lines:
-        if line.strip() == endpoint:
-            capture = True
-        elif capture and line.startswith('/'):
-            break
-        elif capture:
-            parts = line.split(':')
-            if len(parts) == 2:
-                key = parts[0].strip()
-                value = parts[1].strip()
-                fields[key] = value
-    return fields
+def generate_random_value():
+    char_set = string.ascii_letters + string.digits
+    value_type = random.choice(['text', 'int', 'float', 'bool'])
+    if value_type == 'text':
+        return ''.join(random.choices(char_set, k=random.randint(5, 12)))
+    elif value_type == 'int':
+        return random.randint(1, 10000)
+    elif value_type == 'float':
+        return round(random.uniform(1.0, 1000.0), 2)
+    elif value_type == 'bool':
+        return random.choice([True, False])
+    return ''.join(random.choices(char_set, k=8))
 
-def fill_empty_values(obj):
-    if isinstance(obj, dict):
-        return {k: fill_empty_values(v) if v != "" else generate_dummy_value(k) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [fill_empty_values(i) for i in obj]
-    return obj
-
-def generate_dummy_value(key):
-    if "id" in key.lower():
-        return ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-    if "name" in key.lower():
-        return "SampleName"
-    if "status" in key.lower():
-        return "SUCCESS"
-    if "message" in key.lower():
-        return "This is a sample message."
-    if "timestamp" in key.lower():
-        return "2025-05-05T12:00:00Z"
-    if "code" in key.lower():
-        return "200"
-    if "amount" in key.lower():
-        return 100
-    if "type" in key.lower():
-        return "TypeA"
-    return "SampleValue"
-
-def unzip_raml(zip_bytes, extract_dir="/tmp/temp_raml"):
+def unzip_raml(zip_bytes):
     try:
-        if os.path.exists(extract_dir):
-            shutil.rmtree(extract_dir)
-        os.makedirs(extract_dir, exist_ok=True)
-
-        zip_path = "/tmp/uploaded.zip"
+        temp_dir = tempfile.mkdtemp(prefix="raml_")
+        zip_path = os.path.join(temp_dir, "uploaded.zip")
         with open(zip_path, "wb") as f:
             f.write(zip_bytes)
 
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_dir)
+            zip_ref.extractall(temp_dir)
 
-        return extract_dir
+        return temp_dir
     except Exception as e:
         logger.error(f"Error unzipping RAML file: {e}")
         raise ValueError(f"Error unzipping RAML file: {e}")
@@ -125,28 +95,22 @@ def find_main_raml_file(base_dir):
         raise ValueError(f"Error finding main RAML file: {e}")
 
 def resolve_include_path(include_path, root_dir, current_dir):
-    request_dir = os.path.join(root_dir, 'examples', 'request')
-    full_path = os.path.normpath(os.path.join(request_dir, include_path))
-    if os.path.isfile(full_path):
-        return full_path
+    search_dirs = [
+        os.path.join(root_dir, 'examples', 'request'),
+        current_dir,
+        root_dir
+    ]
 
-    full_path = os.path.normpath(os.path.join(current_dir, include_path))
-    if os.path.isfile(full_path):
-        return full_path
+    for dir_path in search_dirs:
+        full_path = os.path.normpath(os.path.join(dir_path, include_path))
+        if os.path.isfile(full_path):
+            return full_path
 
-    full_path = os.path.normpath(os.path.join(root_dir, include_path))
-    if os.path.isfile(full_path):
-        return full_path
-
-    for root, _, files in os.walk(request_dir):
-        for f in files:
-            if f == os.path.basename(include_path):
-                return os.path.join(root, f)
-
-    for root, _, files in os.walk(root_dir):
-        for f in files:
-            if f == os.path.basename(include_path):
-                return os.path.join(root, f)
+    for base in [os.path.join(root_dir, 'examples', 'request'), root_dir]:
+        for root, _, files in os.walk(base):
+            for f in files:
+                if f == os.path.basename(include_path):
+                    return os.path.join(root, f)
 
     return None
 
@@ -160,9 +124,7 @@ def resolve_includes_in_raml(file_path, root_dir):
                 parts = line.strip().split("!include")
                 prefix = parts[0].strip()
                 include_path = parts[1].strip()
-
                 include_file = resolve_include_path(include_path, root_dir, current_dir)
-
                 if include_file and os.path.exists(include_file):
                     with open(include_file, 'r', encoding='utf-8', errors='ignore') as inc_file:
                         resolved_lines.append(f"{prefix} |\n")
@@ -175,16 +137,10 @@ def resolve_includes_in_raml(file_path, root_dir):
 
     return "\n".join(resolved_lines)
 
-def analyze_raml_with_openai(client, resolved_raml_content):
+def analyze_raml_with_openai(client, prompt, resolved_raml_content):
     try:
-        prompt = (
-            "You are an expert RAML analyzer. Analyze the following RAML content, "
-            "resolve all included files, traits, resource types, and fragments, "
-            "and then generate meaningful and valid test payloads for each endpoint defined. "
-            "Ensure that the payload fields are complete and contain realistic example values. "
-            "Respond only with a JSON containing the endpoints and their payloads."
-        )
-        response = client.invoke([{"content": prompt + "\n\n" + resolved_raml_content}])
+        full_prompt = f"{prompt}\n\n{resolved_raml_content}"
+        response = client.invoke([{"content": full_prompt}])
         return response.content
     except Exception as e:
         logger.error(f"Error analyzing RAML with OpenAI: {e}")
@@ -197,8 +153,14 @@ def lambda_handler(event, context):
             raise ValueError("File content is missing or not base64-encoded.")
 
         zip_bytes = b64decode(event['body'])
-
         headers = event.get('headers', {})
+
+        prompt = (
+            headers.get('prompt') or
+            headers.get('Prompt') or
+            os.environ.get('DEFAULT_RAML_PROMPT', 'Analyze this RAML and generate test payloads.')
+        )
+
         model_instance_name = (
             headers.get('model_instance_name') or
             headers.get('Model_Instance_Name') or
@@ -210,7 +172,7 @@ def lambda_handler(event, context):
         resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
 
         client = mock_openai_client(model_instance_name)
-        final_output = analyze_raml_with_openai(client, resolved_raml)
+        final_output = analyze_raml_with_openai(client, prompt, resolved_raml)
 
         return {
             "statusCode": 200,
