@@ -1,56 +1,209 @@
-1. @Component
-📌 What it is:
-A class-level annotation.
+import os
+import shutil
+import zipfile
+import json
+from base64 import b64decode
+import logging
+from Crypto.Cipher import AES
 
-Tells Spring: “Create and manage an instance of this class as a bean.”
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-✅ Use case:
-Use it for your own classes — like services, repositories, or controllers.
+def unpad(data):
+    padding_length = data[-1]
+    return data[:-padding_length]
 
-💡 Example:
-java
-Copy
-Edit
-@Component
-public class MyService {
-    public void doWork() {
-        System.out.println("Working...");
-    }
-}
-Spring scans it (via @ComponentScan) and registers it as a bean.
+def decrypt(data, key):
+    try:
+        cipher = AES.new(b64decode(key), AES.MODE_ECB)
+        decrypted_data = cipher.decrypt(b64decode(data))
+        decrypted_data = unpad(decrypted_data)
+        return decrypted_data.decode()
+    except Exception as e:
+        logger.error(f"Error during decryption: {e}")
+        raise ValueError(f"Error during decryption: {e}")
 
-It's automatically detected and injected where needed.
+def mock_openai_client(model_instance_name):
+    class MockClient:
+        def invoke(self, messages):
+            # Simulate RAML analysis and payload generation
+            raml_content = messages[0]['content']
+            endpoints = extract_endpoints_from_raml(raml_content)
+            payloads = generate_payloads_for_endpoints(endpoints, raml_content)
+            return type('obj', (object,), {'content': json.dumps(payloads)})
+    return MockClient()
 
-✅ 2. @Bean
-📌 What it is:
-A method-level annotation.
+def extract_endpoints_from_raml(raml_content):
+    # Extract endpoints from RAML content (simplified example)
+    endpoints = []
+    lines = raml_content.split('\n')
+    for line in lines:
+        if line.startswith('/'):
+            endpoints.append(line.strip())
+    return endpoints
 
-Tells Spring: “Register the return value of this method as a bean.”
+def generate_payloads_for_endpoints(endpoints, raml_content):
+    # Generate payloads for each endpoint based on RAML content
+    payloads = {}
+    for endpoint in endpoints:
+        payloads[endpoint] = extract_fields_for_endpoint(endpoint, raml_content)
+    return payloads
 
-✅ Use case:
-When you don’t own the class (like a library class) or want more control over bean creation.
+def extract_fields_for_endpoint(endpoint, raml_content):
+    # Extract fields for the given endpoint from RAML content (simplified example)
+    fields = {}
+    lines = raml_content.split('\n')
+    capture = False
+    for line in lines:
+        if line.strip() == endpoint:
+            capture = True
+        elif capture and line.startswith('/'):
+            break
+        elif capture:
+            parts = line.split(':')
+            if len(parts) == 2:
+                key = parts[0].strip()
+                value = parts[1].strip()
+                fields[key] = value
+    return fields
 
-💡 Example:
-java
-Copy
-Edit
-@Configuration
-public class AppConfig {
+def unzip_raml(zip_bytes, extract_dir="/tmp/temp_raml"):
+    try:
+        if os.path.exists(extract_dir):
+            shutil.rmtree(extract_dir)
+        os.makedirs(extract_dir, exist_ok=True)
 
-    @Bean
-    public RestTemplate restTemplate() {
-        return new RestTemplate(); // manual creation
-    }
-}
-Spring manages RestTemplate as a bean.
+        zip_path = "/tmp/uploaded.zip"
+        with open(zip_path, "wb") as f:
+            f.write(zip_bytes)
 
-✅ 3. @Configuration
-📌 What it is:
-A class-level annotation.
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_dir)
 
-Marks the class as a source of bean definitions.
+        return extract_dir
+    except Exception as e:
+        logger.error(f"Error unzipping RAML file: {e}")
+        raise ValueError(f"Error unzipping RAML file: {e}")
 
-It's a special type of @Component.
+def find_main_raml_file(base_dir):
+    try:
+        for root, _, files in os.walk(base_dir):
+            for file in files:
+                if file.endswith(".raml"):
+                    full_path = os.path.join(root, file)
+                    with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        if "#%RAML 1.0" in f.readline():
+                            return full_path
+        raise FileNotFoundError("Main RAML file not found.")
+    except Exception as e:
+        logger.error(f"Error finding main RAML file: {e}")
+        raise ValueError(f"Error finding main RAML file: {e}")
 
-✅ Use case:
-Use it to group multiple @Bean methods together in one place.
+def resolve_include_path(include_path, root_dir, current_dir):
+    # Try relative to '/examples/request' folder first
+    request_dir = os.path.join(root_dir, 'examples', 'request')
+    full_path = os.path.normpath(os.path.join(request_dir, include_path))
+    if os.path.isfile(full_path):
+        return full_path
+
+    # Try relative to current file
+    full_path = os.path.normpath(os.path.join(current_dir, include_path))
+    if os.path.isfile(full_path):
+        return full_path
+
+    # Try relative to extracted root
+    full_path = os.path.normpath(os.path.join(root_dir, include_path))
+    if os.path.isfile(full_path):
+        return full_path
+
+    # Recursively search for file by name in 'request' folder first
+    for root, _, files in os.walk(request_dir):
+        for f in files:
+            if f == os.path.basename(include_path):
+                return os.path.join(root, f)
+
+    # Recursively search for file by name in other locations
+    for root, _, files in os.walk(root_dir):
+        for f in files:
+            if f == os.path.basename(include_path):
+                return os.path.join(root, f)
+
+    return None
+
+def resolve_includes_in_raml(file_path, root_dir):
+    resolved_lines = []
+    current_dir = os.path.dirname(file_path)
+
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
+        for line in file:
+            if "!include" in line:
+                parts = line.strip().split("!include")
+                prefix = parts[0].strip()
+                include_path = parts[1].strip()
+
+                include_file = resolve_include_path(include_path, root_dir, current_dir)
+
+                if include_file and os.path.exists(include_file):
+                    with open(include_file, 'r', encoding='utf-8', errors='ignore') as inc_file:
+                        resolved_lines.append(f"{prefix} |\n")
+                        for inc_line in inc_file.read().splitlines():
+                            resolved_lines.append(f"  {inc_line}")
+                else:
+                    resolved_lines.append(f"{line.strip()}  # Include not found")
+            else:
+                resolved_lines.append(line.rstrip())
+
+    return "\n".join(resolved_lines)
+
+def analyze_raml_with_openai(client, resolved_raml_content):
+    try:
+        prompt = (
+            "You are an expert in reading the RAML from the zip file. "
+            "The file has multiple endpoints which make use of traits, resource types, and API fragments. "
+            "Please carefully analyze the RAML and generate the input payload for each endpoint. "
+            "You are an expert in analyzing the RAML and generating payloads from the RAML. "
+            "I am providing the RAML which will be used as an asset for designing my API. "
+            "In RAML file, some example files are included using '!include'. Go to that file and take the necessary information. "
+            "Please analyze the RAML and generate the sample payload that honors all the rules defined inside the RAML. "
+            "You can refer to https://raml.org/developers/raml-100-tutorial for any doubts related to RAML."
+        )
+        response = client.invoke([{"content": prompt + "\n\n" + resolved_raml_content}])
+        return response.content
+    except Exception as e:
+        logger.error(f"Error analyzing RAML with OpenAI: {e}")
+        raise ValueError(f"Error analyzing RAML with OpenAI: {e}")
+
+def lambda_handler(event, context):
+    logger.info("Lambda invoked.")
+    try:
+        if 'body' not in event or not event.get('isBase64Encoded', False):
+            raise ValueError("File content is missing or not base64-encoded.")
+
+        zip_bytes = b64decode(event['body'])
+
+        headers = event.get('headers', {})
+        model_instance_name = (
+            headers.get('model_instance_name') or
+            headers.get('Model_Instance_Name') or
+            os.environ.get('DEFAULT_MODEL_INSTANCE_NAME', 'default-model')
+        )
+
+        extracted_dir = unzip_raml(zip_bytes)
+        main_raml_file = find_main_raml_file(extracted_dir)
+        resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
+
+        client = mock_openai_client(model_instance_name)
+        final_output = analyze_raml_with_openai(client, resolved_raml)
+
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": final_output
+        }
+
+    except Exception as e:
+        logger.error(f"Error during execution: {e}")
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
