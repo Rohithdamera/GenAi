@@ -26,7 +26,6 @@ def decrypt(data, key):
 def mock_openai_client(model_instance_name):
     class MockClient:
         def invoke(self, messages):
-            # Simulate RAML analysis and payload generation
             raml_content = messages[0]['content']
             endpoints = extract_endpoints_from_raml(raml_content)
             payloads = generate_payloads_for_endpoints(endpoints, raml_content)
@@ -34,7 +33,6 @@ def mock_openai_client(model_instance_name):
     return MockClient()
 
 def extract_endpoints_from_raml(raml_content):
-    # Extract endpoints from RAML content (simplified example)
     endpoints = []
     lines = raml_content.split('\n')
     for line in lines:
@@ -43,14 +41,12 @@ def extract_endpoints_from_raml(raml_content):
     return endpoints
 
 def generate_payloads_for_endpoints(endpoints, raml_content):
-    # Generate payloads for each endpoint based on RAML content
     payloads = {}
     for endpoint in endpoints:
         payloads[endpoint] = extract_fields_for_endpoint(endpoint, raml_content)
     return payloads
 
 def extract_fields_for_endpoint(endpoint, raml_content):
-    # Extract fields for the given endpoint from RAML content (simplified example)
     fields = {}
     lines = raml_content.split('\n')
     capture = False
@@ -100,29 +96,24 @@ def find_main_raml_file(base_dir):
         raise ValueError(f"Error finding main RAML file: {e}")
 
 def resolve_include_path(include_path, root_dir, current_dir):
-    # Try relative to '/examples/request' folder first
     request_dir = os.path.join(root_dir, 'examples', 'request')
     full_path = os.path.normpath(os.path.join(request_dir, include_path))
     if os.path.isfile(full_path):
         return full_path
 
-    # Try relative to current file
     full_path = os.path.normpath(os.path.join(current_dir, include_path))
     if os.path.isfile(full_path):
         return full_path
 
-    # Try relative to extracted root
     full_path = os.path.normpath(os.path.join(root_dir, include_path))
     if os.path.isfile(full_path):
         return full_path
 
-    # Recursively search for file by name in 'request' folder first
     for root, _, files in os.walk(request_dir):
         for f in files:
             if f == os.path.basename(include_path):
                 return os.path.join(root, f)
 
-    # Recursively search for file by name in other locations
     for root, _, files in os.walk(root_dir):
         for f in files:
             if f == os.path.basename(include_path):
@@ -155,18 +146,8 @@ def resolve_includes_in_raml(file_path, root_dir):
 
     return "\n".join(resolved_lines)
 
-def analyze_raml_with_openai(client, resolved_raml_content):
+def analyze_raml_with_openai(client, resolved_raml_content, prompt):
     try:
-        prompt = (
-            "You are an expert in reading the RAML from the zip file. "
-            "The file has multiple endpoints which make use of traits, resource types, and API fragments. "
-            "Please carefully analyze the RAML and generate the input payload for each endpoint. "
-            "You are an expert in analyzing the RAML and generating payloads from the RAML. "
-            "I am providing the RAML which will be used as an asset for designing my API. "
-            "In RAML file, some example files are included using '!include'. Go to that file and take the necessary information. "
-            "Please analyze the RAML and generate the sample payload that honors all the rules defined inside the RAML. "
-            "You can refer to https://raml.org/developers/raml-100-tutorial for any doubts related to RAML."
-        )
         response = client.invoke([{"content": prompt + "\n\n" + resolved_raml_content}])
         return response.content
     except Exception as e:
@@ -188,12 +169,19 @@ def lambda_handler(event, context):
             os.environ.get('DEFAULT_MODEL_INSTANCE_NAME', 'default-model')
         )
 
+        custom_prompt = (
+            headers.get('prompt') or
+            os.environ.get('DEFAULT_RAML_ANALYSIS_PROMPT') or
+            "Analyze the given RAML file and generate sample input payloads for each endpoint. "
+            "Make sure to follow any rules, traits, or fragments defined in the RAML, including those from !include files."
+        )
+
         extracted_dir = unzip_raml(zip_bytes)
         main_raml_file = find_main_raml_file(extracted_dir)
         resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
 
         client = mock_openai_client(model_instance_name)
-        final_output = analyze_raml_with_openai(client, resolved_raml)
+        final_output = analyze_raml_with_openai(client, resolved_raml, custom_prompt)
 
         return {
             "statusCode": 200,
