@@ -1,4 +1,4 @@
-import os 
+import os
 import shutil
 import zipfile
 import json
@@ -33,6 +33,7 @@ def mock_openai_client(model_instance_name):
             payloads = generate_payloads_for_endpoints(endpoints, raml_content)
             payloads = fill_empty_values(payloads)
             return type('obj', (object,), {'content': json.dumps(payloads)})
+
     return MockClient()
 
 def extract_endpoints_from_raml(raml_content):
@@ -67,30 +68,12 @@ def extract_fields_for_endpoint(endpoint, raml_content):
     return fields
 
 def fill_empty_values(obj):
+    # Removed hardcoded values, fields are left for GPT to fill
     if isinstance(obj, dict):
-        return {k: fill_empty_values(v) if v != "" else generate_dummy_value(k) for k, v in obj.items()}
+        return {k: fill_empty_values(v) if v != "" else None for k, v in obj.items()}
     elif isinstance(obj, list):
         return [fill_empty_values(i) for i in obj]
     return obj
-
-def generate_dummy_value(key):
-    if "id" in key.lower():
-        return ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-    if "name" in key.lower():
-        return "SampleName"
-    if "status" in key.lower():
-        return "SUCCESS"
-    if "message" in key.lower():
-        return "This is a sample message."
-    if "timestamp" in key.lower():
-        return "2025-05-05T12:00:00Z"
-    if "code" in key.lower():
-        return "200"
-    if "amount" in key.lower():
-        return 100
-    if "type" in key.lower():
-        return "TypeA"
-    return "SampleValue"
 
 def unzip_raml(zip_bytes, extract_dir="/tmp/temp_raml"):
     try:
@@ -224,5 +207,3 @@ def lambda_handler(event, context):
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
         }
-
-
