@@ -4,8 +4,6 @@ import zipfile
 import json
 import logging
 from base64 import b64decode
-import random
-import string
 import tempfile
 from Crypto.Cipher import AES
 
@@ -31,39 +29,35 @@ def mock_openai_client(model_instance_name):
         def invoke(self, messages):
             prompt_and_raml = messages[0]['content']
             raml_content = prompt_and_raml.split('\n\n', 1)[-1]
-            endpoints = extract_endpoints_from_raml(raml_content)
-            payloads = generate_payloads_for_endpoints(endpoints)
-            return type('obj', (object,), {'content': json.dumps(payloads)})
+            return type('obj', (object,), {'content': json.dumps(generate_payloads_from_raml(raml_content))})
     return MockClient()
 
-def extract_endpoints_from_raml(raml_content):
-    endpoints = []
-    for line in raml_content.splitlines():
-        if line.strip().startswith('/'):
-            endpoints.append(line.strip())
-    return endpoints
-
-def generate_payloads_for_endpoints(endpoints):
-    payloads = {}
-    for endpoint in endpoints:
-        field_count = random.randint(2, 5)
-        payloads[endpoint] = {
-            f"field{i+1}": generate_random_value() for i in range(field_count)
-        }
-    return payloads
-
-def generate_random_value():
-    char_set = string.ascii_letters + string.digits
-    value_type = random.choice(['text', 'int', 'float', 'bool'])
-    if value_type == 'text':
-        return ''.join(random.choices(char_set, k=random.randint(5, 12)))
-    elif value_type == 'int':
-        return random.randint(1, 10000)
-    elif value_type == 'float':
-        return round(random.uniform(1.0, 1000.0), 2)
-    elif value_type == 'bool':
-        return random.choice([True, False])
-    return ''.join(random.choices(char_set, k=8))
+def generate_payloads_from_raml(raml_content):
+    import yaml
+    try:
+        raml_data = yaml.safe_load(raml_content)
+        if not isinstance(raml_data, dict):
+            return {}
+        
+        payloads = {}
+        for path, details in raml_data.items():
+            if path.startswith("/") and isinstance(details, dict):
+                payload = {}
+                body = details.get('post', {}).get('body') or details.get('get', {}).get('body') or {}
+                for mime_type, mime_details in body.items():
+                    example = mime_details.get('example') or mime_details.get('examples')
+                    if isinstance(example, str):
+                        try:
+                            payload = json.loads(example)
+                        except json.JSONDecodeError:
+                            continue
+                    elif isinstance(example, dict):
+                        payload = example
+                payloads[path] = payload or {"sampleField": "example"}
+        return payloads
+    except Exception as e:
+        logger.error(f"Error parsing RAML content: {e}")
+        return {}
 
 def unzip_raml(zip_bytes):
     try:
@@ -188,18 +182,12 @@ def lambda_handler(event, context):
         }
 
 
+
 {
-    "/heartbeat:": {
-        "field1": 897.64,
-        "field2": 195.55,
-        "field3": 651,
-        "field4": false,
-        "field5": 415.63
-    },
-    "/salesreturns:": {
-        "field1": "2wP79j",
-        "field2": false,
-        "field3": true,
-        "field4": true
-    }
+  "body": "BASE64_ZIP_CONTENT_HERE",
+  "isBase64Encoded": true,
+  "headers": {
+    "prompt": "Generate randomized test payloads using RAML reference examples from all nested folders",
+    "model_instance_name": "gpt-4"
+  }
 }
