@@ -2,14 +2,30 @@ import json
 import logging
 import random
 import string
+import re
 from base64 import b64decode
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def clean_json_text(text):
+    """
+    Attempt to fix common JSON formatting issues like:
+    - Missing quotes around keys
+    - Extra commas
+    - Trailing whitespace
+    """
+    # Fix missing quotes on keys using regex
+    text = re.sub(r'(\s*)([a-zA-Z0-9_]+)(\s*):', r'\1"\2"\3:', text)
+
+    # Remove trailing commas before closing brackets/braces
+    text = re.sub(r',(\s*[}\]])', r'\1', text)
+
+    return text.strip()
+
 def random_value(val):
     if isinstance(val, str):
-        return ''.join(random.choices(string.ascii_letters + string.digits, k=len(val)))
+        return ''.join(random.choices(string.ascii_letters + string.digits, k=max(5, len(val))))
     elif isinstance(val, int):
         return random.randint(1000, 9999)
     elif isinstance(val, float):
@@ -21,18 +37,22 @@ def random_value(val):
     return val
 
 def lambda_handler(event, context):
-    logger.info("Lambda invoked for .raml file containing raw JSON.")
+    logger.info("Lambda invoked for JSON-in-.raml scenario.")
 
     try:
         if 'body' not in event or not event.get('isBase64Encoded', False):
             raise ValueError("Missing or invalid base64-encoded body")
 
         file_bytes = b64decode(event['body'])
-        file_content = file_bytes.decode('utf-8', errors='ignore').strip()
+        file_content = file_bytes.decode('utf-8', errors='ignore')
+
+        # Clean and normalize malformed JSON
+        cleaned = clean_json_text(file_content)
 
         try:
-            json_data = json.loads(file_content)
-        except json.JSONDecodeError:
+            json_data = json.loads(cleaned)
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing failed: {e}")
             raise ValueError("RAML file does not contain valid JSON.")
 
         randomized_payload = random_value(json_data)
