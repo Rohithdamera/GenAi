@@ -68,7 +68,7 @@ def extract_fields_for_endpoint(endpoint, raml_content):
     return fields
 
 def fill_empty_values(obj):
-    # Removed hardcoded values, fields are left for GPT to fill
+    
     if isinstance(obj, dict):
         return {k: fill_empty_values(v) if v != "" else None for k, v in obj.items()}
     elif isinstance(obj, list):
@@ -161,11 +161,24 @@ def resolve_includes_in_raml(file_path, root_dir):
 def analyze_raml_with_openai(client, resolved_raml_content):
     try:
         prompt = (
-            "You are an expert RAML analyzer. Analyze the following RAML content, "
-            "resolve all included files, traits, resource types, and fragments, "
-            "and then generate meaningful and valid test payloads for each endpoint defined. "
-            "Ensure that the payload fields are complete and contain realistic example values. "
-            "Respond only with a JSON containing the endpoints and their payloads."
+             " You are an expert RAML analyst and test data generator.
+
+    You are given the full contents of a RAML project, including all folders and files (traits, includes, resource types, and examples). All referenced files have already been inlined.
+
+    Your tasks:
+    1. Analyze the RAML specification and resolve all available information from the structure and included examples.
+    2. For each endpoint, generate **two unique, complete, and randomized test payloads**.
+    3. Use the field structure, data types, and naming conventions as defined in the RAML and example files.
+    4. **Do NOT copy actual example values**. Instead, generate random values appropriate for each field (e.g., strings, numbers, UUIDs, timestamps, booleans).
+    5. Include all required fields. Optional fields may be skipped or randomly included.
+    6. Do not leave any field with null or empty values unless explicitly defined as nullable.
+
+    Return the result as a **JSON object** where each endpoint maps to a list containing **two distinct payloads**.
+
+    Begin processing the RAML content below:
+    keep the above prompt in side a "" double quotes"
+)
+
         )
         response = client.invoke([{"content": prompt + "\n\n" + resolved_raml_content}])
         return response.content
@@ -207,23 +220,3 @@ def lambda_handler(event, context):
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
         }
-
-
-
-
-You are an expert RAML analyst and test data generator.
-
-You are given the full contents of a RAML project, including all folders and files (traits, includes, resource types, and examples). All referenced files have already been inlined.
-
-Your tasks:
-1. Analyze the RAML specification and resolve all available information from the structure and included examples.
-2. For each endpoint, generate **two unique, complete, and randomized test payloads**.
-3. Use the field structure, data types, and naming conventions as defined in the RAML and example files.
-4. **Do NOT copy actual example values**. Instead, generate random values appropriate for each field (e.g., strings, numbers, UUIDs, timestamps, booleans).
-5. Include all required fields. Optional fields may be skipped or randomly included.
-6. Do not leave any field with null or empty values unless explicitly defined as nullable.
-
-Return the result as a **JSON object** where each endpoint maps to a list containing **two distinct payloads**.
-
-Begin processing the RAML content below:
-
