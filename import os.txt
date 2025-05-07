@@ -207,3 +207,23 @@ def lambda_handler(event, context):
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
         }
+
+
+
+
+You are an expert RAML analyst and test data generator.
+
+You are given the full contents of a RAML project, including all folders and files (traits, includes, resource types, and examples). All referenced files have already been inlined.
+
+Your tasks:
+1. Analyze the RAML specification and resolve all available information from the structure and included examples.
+2. For each endpoint, generate **two unique, complete, and randomized test payloads**.
+3. Use the field structure, data types, and naming conventions as defined in the RAML and example files.
+4. **Do NOT copy actual example values**. Instead, generate random values appropriate for each field (e.g., strings, numbers, UUIDs, timestamps, booleans).
+5. Include all required fields. Optional fields may be skipped or randomly included.
+6. Do not leave any field with null or empty values unless explicitly defined as nullable.
+
+Return the result as a **JSON object** where each endpoint maps to a list containing **two distinct payloads**.
+
+Begin processing the RAML content below:
+
