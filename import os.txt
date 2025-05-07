@@ -1,63 +1,41 @@
-import os
 import json
 import logging
 import random
 import string
-import re
 from base64 import b64decode
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def random_value(value):
-    if isinstance(value, str):
-        return ''.join(random.choices(string.ascii_letters + string.digits, k=len(value)))
-    elif isinstance(value, int):
+def random_value(val):
+    if isinstance(val, str):
+        return ''.join(random.choices(string.ascii_letters + string.digits, k=len(val)))
+    elif isinstance(val, int):
         return random.randint(1000, 9999)
-    elif isinstance(value, float):
+    elif isinstance(val, float):
         return round(random.uniform(1.0, 9999.9), 2)
-    elif isinstance(value, list):
-        return [random_value(v) for v in value]
-    elif isinstance(value, dict):
-        return {k: random_value(v) for k, v in value.items()}
-    return value
-
-def regenerate_payload_values(json_data):
-    return random_value(json_data)
-
-def extract_json_block_from_raml(content):
-    """
-    Extracts the first valid JSON object or array block from a RAML file.
-    """
-    content = content.strip()
-    
-    # Match the first top-level JSON object or array
-    json_match = re.search(r'(\{[\s\S]*?\}|\[[\s\S]*?\])', content)
-    if not json_match:
-        raise ValueError("No valid JSON block found in RAML content")
-
-    json_str = json_match.group(0)
-    
-    try:
-        return json.loads(json_str)
-    except json.JSONDecodeError as e:
-        raise ValueError("Extracted block is not valid JSON")
+    elif isinstance(val, list):
+        return [random_value(v) for v in val]
+    elif isinstance(val, dict):
+        return {k: random_value(v) for k, v in val.items()}
+    return val
 
 def lambda_handler(event, context):
-    logger.info("Lambda invoked for RAML with JSON inside.")
+    logger.info("Lambda invoked for .raml file containing raw JSON.")
 
     try:
         if 'body' not in event or not event.get('isBase64Encoded', False):
-            raise ValueError("File content is missing or not base64-encoded.")
+            raise ValueError("Missing or invalid base64-encoded body")
 
-        raml_bytes = b64decode(event['body'])
-        raml_content = raml_bytes.decode('utf-8', errors='ignore')
+        file_bytes = b64decode(event['body'])
+        file_content = file_bytes.decode('utf-8', errors='ignore').strip()
 
-        # Extract JSON content from RAML
-        json_data = extract_json_block_from_raml(raml_content)
+        try:
+            json_data = json.loads(file_content)
+        except json.JSONDecodeError:
+            raise ValueError("RAML file does not contain valid JSON.")
 
-        # Regenerate payload with randomized values
-        randomized_payload = regenerate_payload_values(json_data)
+        randomized_payload = random_value(json_data)
 
         return {
             "statusCode": 200,
@@ -66,7 +44,7 @@ def lambda_handler(event, context):
         }
 
     except Exception as e:
-        logger.error(f"Error during execution: {e}")
+        logger.error(f"Error: {e}")
         return {
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
