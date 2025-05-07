@@ -1,10 +1,62 @@
-def decrypt(data, key):
+import json
+import logging
+import base64
+import random
+import string
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+def generate_random_value(value):
+    if isinstance(value, str):
+        return ''.join(random.choices(string.ascii_letters + string.digits, k=len(value)))
+    elif isinstance(value, int):
+        return random.randint(1000, 9999)
+    elif isinstance(value, float):
+        return round(random.uniform(1.0, 1000.0), 2)
+    elif isinstance(value, bool):
+        return random.choice([True, False])
+    elif isinstance(value, list):
+        return [generate_random_value(v) for v in value]
+    elif isinstance(value, dict):
+        return {k: generate_random_value(v) for k, v in value.items()}
+    else:
+        return value
+
+def extract_json_from_raml(raml_content):
     try:
-        cipher = AES.new(b64decode(key), AES.MODE_ECB)
-        decrypted_data = cipher.decrypt(b64decode(data))
-        decrypted_data = unpad(decrypted_data)
-        return decrypted_data.decode()
+        first_line = raml_content.strip().splitlines()[0]
+        if first_line.strip().startswith('{'):
+            json_part = raml_content.strip()
+            return json.loads(json_part)
+        else:
+            raise ValueError("RAML does not start with valid JSON")
     except Exception as e:
-        logger.error(f"Error during decryption: {e}")
-        raise ValueError(f"Error during decryption: {e}")
- 
+        logger.error(f"Error parsing JSON from RAML: {e}")
+        raise ValueError("Failed to parse JSON content from RAML file.")
+
+def lambda_handler(event, context):
+    try:
+        # Decode the incoming body (binary)
+        body = base64.b64decode(event['body'])
+        raml_text = body.decode('utf-8')
+
+        # Extract and parse the JSON section
+        original_payload = extract_json_from_raml(raml_text)
+        randomized_payload = generate_random_value(original_payload)
+
+        return {
+            'statusCode': 200,
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'original_payload': original_payload,
+                'randomized_payload': randomized_payload
+            })
+        }
+
+    except Exception as e:
+        logger.error(f"Lambda error: {e}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps({'error': str(e)})
+        }
