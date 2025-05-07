@@ -3,6 +3,7 @@ import logging
 import base64
 import random
 import string
+import re
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -23,26 +24,31 @@ def generate_random_value(value):
     else:
         return value
 
-def extract_json_from_raml(raml_content):
+def extract_first_json_block(text):
+    """
+    Extract the first JSON object found in the RAML file using regex.
+    """
     try:
-        first_line = raml_content.strip().splitlines()[0]
-        if first_line.strip().startswith('{'):
-            json_part = raml_content.strip()
-            return json.loads(json_part)
-        else:
-            raise ValueError("RAML does not start with valid JSON")
+        # Match the first {...} JSON block
+        matches = re.findall(r'(?s){.*?}', text)
+        for match in matches:
+            try:
+                return json.loads(match)
+            except json.JSONDecodeError:
+                continue
+        raise ValueError("No valid JSON found in RAML file.")
     except Exception as e:
-        logger.error(f"Error parsing JSON from RAML: {e}")
+        logger.error(f"Error extracting JSON from RAML: {e}")
         raise ValueError("Failed to parse JSON content from RAML file.")
 
 def lambda_handler(event, context):
     try:
-        # Decode the incoming body (binary)
+        # Decode body from API Gateway binary mode
         body = base64.b64decode(event['body'])
         raml_text = body.decode('utf-8')
 
-        # Extract and parse the JSON section
-        original_payload = extract_json_from_raml(raml_text)
+        # Extract JSON from inside the RAML
+        original_payload = extract_first_json_block(raml_text)
         randomized_payload = generate_random_value(original_payload)
 
         return {
