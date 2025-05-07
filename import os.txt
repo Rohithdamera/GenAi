@@ -1,263 +1,50 @@
-{
-	"correlationId": "4e80db7c-cca9-41d0-81003",
-	"Transaction": [
-		{
-			"RetailStoreId": "801",
-			"BusinessDayDate": "28/05/2022 21:03:00",
-			"TransactionTypeCode": "SPOC",
-			"WorkstationId": "801",
-			"TransactionNumber": "ABCD100172121",
-			"BeginTimestamp": "28/05/2022 21:03:00",
-			"EndTimestamp": "28/05/2022 21:03:00",
-			"Department": "Store",
-			"TransactionCurrency": "INR",
-			"CustomerInfo": {
-				"DataElementId": "1",
-				"DataElementValue": "Central"
-			},
-			"Tender": [
-				{
-					"TenderSequenceNumber": "1",
-					"TenderTypeCode": "Credit",
-					"TenderAmount": 900,
-					"TenderId": "05282022210300",
-					"ReferenceId": "63198",
-					"TenderCurrency": "INR",
-					"CreditCard": {
-						"PaymentCard": "Visa",
-						"CardNumber": "5209632740500"
-					}
-				},
-				{
-					"TenderSequenceNumber": "2",
-					"TenderTypeCode": "Cash",
-					"TenderAmount": 70,
-					"TenderId": "05282022210300",
-					"ReferenceId": "5239553",
-					"TenderCurrency": "INR",
-					"CreditCard": {
-						"PaymentCard": "",
-						"CardNumber": ""
-					}
-				}
-			],
-			"RetailLineItem": [
-				{
-					"RetailLineNumber": "1",
-					"RetailTypeCode": "2001",
-					"RetailReasonCode": "R1",
-					"ItemId": "36182581440",
-					"ItemIdIdentifier": "1",
-					"RetailsQuantity": "4",
-					"SalesUOM": "Units",
-					"SalesAmount": 650,
-					"NormalSalesAmt": 600,
-					"Tax": {
-						"TaxSequenceNumber": "1",
-						"TaxTypeCode": "ZTAX",
-						"TaxAmount": 50
-					},
-					"Discount": {
-						"DiscountTypeCode": "TR",
-						"ReductionAmount": 10,
-						"DiscountId": "1",
-						"BonusBuyId": "487",
-						"OfferId": "34"
-					},
-					"GoodsMovement": {
-						"GoodsMovementSequenceNumber": "1",
-						"GoodsMovementTypeCode": "7201",
-						"GoodsMovementReasonCode": "10",
-						"ShipmentSite": "",
-						"ToPartyId": ""
-					}
-				},
-				{
-					"RetailLineNumber": "2",
-					"RetailTypeCode": "2001",
-					"RetailReasonCode": "R1",
-					"ItemId": "701549894029",
-					"RetailsQuantity": "2",
-					"SalesUOM": "Units",
-					"SalesAmount": 320,
-					"NormalSalesAmt": 300,
-					"Tax": {
-						"TaxSequenceNumber": "1",
-						"TaxTypeCode": "ZTAX",
-						"TaxAmount": 20
-					},
-					"Discount": {
-						"DiscountTypeCode": "TN",
-						"ReductionAmount": 5,
-						"DiscountId": "3451",
-						"BonusBuyId": "123432",
-						"OfferId": ""
-					},
-					"GoodsMovement": {
-						"GoodsMovementSequenceNumber": "2",
-						"GoodsMovementTypeCode": "7201",
-						"GoodsMovementReasonCode": "10",
-						"ShipmentSite": "",
-						"ToPartyId": ""
-					}
-				}
-			]
-		},
-		{
-			"RetailStoreId": "801",
-			"BusinessDayDate": "28/05/2022 21:03:00",
-			"WorkstationId": "801",
-			"TransactionNumber": "ABCD100172121",
-			"BeginTimestamp": "28/05/2022 21:03:00",
-			"EndTimestamp": "28/05/2022 21:03:00",
-			"Department": "",
-			"TransactionCurrency": "INR",
-			"CustomerInfo": {
-				"DataElementId": "",
-				"DataElementValue": ""
-			},
-			"Tender": [
-				{
-					"TenderSequenceNumber": "1",
-					"TenderTypeCode": "",
-					"TenderAmount": 20,
-					"TenderId": "05282022210300",
-					"TenderCurrency": "",
-					"ReferenceId": "",
-					"CreditCard": {
-						"PaymentCard": "",
-						"CardNumber": ""
-					}
-				}
-			],
-			"RetailLineItem": [
-				{
-					"RetailLineNumber": "1",
-					"RetailTypeCode": "2001",
-					"RetailReasonCode": "R1",
-					"ItemId": "36182581440",
-					"RetailsQuantity": "4",
-					"SalesUOM": "Units",
-					"SalesAmount": 650,
-					"NormalSalesAmt": 600,
-					"Tax": {
-						"TaxSequenceNumber": "1",
-						"TaxTypeCode": "ZTAX",
-						"TaxAmount": 50
-					},
-					"Discount": {
-						"DiscountTypeCode": "TN",
-						"ReductionAmount": 5,
-						"DiscountId": "3451",
-						"BonusBuyId": "123432",
-						"OfferId": ""
-					},
-					"GoodsMovement": {
-						"GoodsMovementSequenceNumber": "1",
-						"GoodsMovementTypeCode": "7201",
-						"GoodsMovementReasonCode": "10",
-						"ShipmentSite": "",
-						"ToPartyId": ""
-					}
-				}
-			]
-		}
-	]
-}
+import json
+import random
+import string
+import base64
 
+def generate_random_value(value):
+    if isinstance(value, int):
+        return random.randint(1, 10000)
+    elif isinstance(value, float):
+        return round(random.uniform(1, 10000), 2)
+    elif isinstance(value, str):
+        return ''.join(random.choices(string.ascii_letters + string.digits, k=random.randint(2, 8)))
+    elif isinstance(value, list):
+        return [generate_random_value(v) for v in value]
+    elif isinstance(value, dict):
+        return {k: generate_random_value(v) for k, v in value.items()}
+    else:
+        return value
 
+def lambda_handler(event, context):
+    try:
+        if 'body' not in event:
+            return {"statusCode": 400, "body": "Missing body in request"}
 
+        # Base64 decode the uploaded RAML file
+        content = base64.b64decode(event['body']).decode('utf-8')
 
+        # Try to extract the JSON part (RAML might contain YAML or annotations, but we assume it starts with a JSON block)
+        json_start = content.find('{')
+        json_data = json.loads(content[json_start:])  # Parse JSON portion only
 
+        # Randomize values based on type
+        randomized_output = generate_random_value(json_data)
 
-
-{
-    "original_payloads": [
-        {
-            "DiscountTypeCode": "TR",
-            "ReductionAmount": 10,
-            "DiscountId": "1",
-            "BonusBuyId": "487",
-            "OfferId": "34"
-        },
-        {
-            "GoodsMovementSequenceNumber": "1",
-            "GoodsMovementTypeCode": "7201",
-            "GoodsMovementReasonCode": "10",
-            "ShipmentSite": "",
-            "ToPartyId": ""
-        },
-        {
-            "DiscountTypeCode": "TN",
-            "ReductionAmount": 5,
-            "DiscountId": "3451",
-            "BonusBuyId": "123432",
-            "OfferId": ""
-        },
-        {
-            "GoodsMovementSequenceNumber": "2",
-            "GoodsMovementTypeCode": "7201",
-            "GoodsMovementReasonCode": "10",
-            "ShipmentSite": "",
-            "ToPartyId": ""
-        },
-        {
-            "DiscountTypeCode": "TN",
-            "ReductionAmount": 5,
-            "DiscountId": "3451",
-            "BonusBuyId": "123432",
-            "OfferId": ""
-        },
-        {
-            "GoodsMovementSequenceNumber": "1",
-            "GoodsMovementTypeCode": "7201",
-            "GoodsMovementReasonCode": "10",
-            "ShipmentSite": "",
-            "ToPartyId": ""
+        return {
+            "statusCode": 200,
+            "body": json.dumps(randomized_output),
+            "headers": {
+                "Content-Type": "application/json"
+            }
         }
-    ],
-    "randomized_payloads": [
-        {
-            "DiscountTypeCode": "X0",
-            "ReductionAmount": 3924,
-            "DiscountId": "F",
-            "BonusBuyId": "O2v",
-            "OfferId": "QV"
-        },
-        {
-            "GoodsMovementSequenceNumber": "2",
-            "GoodsMovementTypeCode": "lgQM",
-            "GoodsMovementReasonCode": "wP",
-            "ShipmentSite": "",
-            "ToPartyId": ""
-        },
-        {
-            "DiscountTypeCode": "VD",
-            "ReductionAmount": 5919,
-            "DiscountId": "P5Jm",
-            "BonusBuyId": "xV8bpZ",
-            "OfferId": ""
-        },
-        {
-            "GoodsMovementSequenceNumber": "L",
-            "GoodsMovementTypeCode": "Ojly",
-            "GoodsMovementReasonCode": "v0",
-            "ShipmentSite": "",
-            "ToPartyId": ""
-        },
-        {
-            "DiscountTypeCode": "VP",
-            "ReductionAmount": 6754,
-            "DiscountId": "mw5H",
-            "BonusBuyId": "rvtAyS",
-            "OfferId": ""
-        },
-        {
-            "GoodsMovementSequenceNumber": "B",
-            "GoodsMovementTypeCode": "WLxt",
-            "GoodsMovementReasonCode": "R1",
-            "ShipmentSite": "",
-            "ToPartyId": ""
+
+    except Exception as e:
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)}),
+            "headers": {
+                "Content-Type": "application/json"
+            }
         }
-    ]
-}
