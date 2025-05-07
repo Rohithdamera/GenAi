@@ -1,5 +1,3 @@
-# Full updated Lambda function
-
 import os
 import shutil
 import zipfile
@@ -18,74 +16,59 @@ def mock_openai_client(model_instance_name):
     class MockClient:
         def invoke(self, messages):
             raml_content = messages[0]['content']
-            endpoints = extract_endpoints_from_raml(raml_content)
-            example_structures = extract_example_structures(raml_content)
-            payloads = generate_payloads(endpoints, example_structures)
-            return type('obj', (object,), {'content': json.dumps(payloads)})
+            endpoints, examples = extract_examples_and_endpoints(raml_content)
+            response = {ep: [generate_random_payload(ex), generate_random_payload(ex)] for ep, ex in examples.items()}
+            return type('obj', (object,), {'content': json.dumps(response)})
     return MockClient()
 
-# ---------------- HELPER METHODS ----------------
+# ---------------- UTILS ----------------
 
-def extract_endpoints_from_raml(raml_content):
-    return [line.strip() for line in raml_content.splitlines() if line.strip().startswith('/')]
-
-def extract_example_structures(raml_content):
-    structures = {}
-    lines = raml_content.splitlines()
+def extract_examples_and_endpoints(raml_text):
+    """Extract example JSON from RAML content per endpoint."""
+    lines = raml_text.splitlines()
+    examples = {}
     current_endpoint = None
+    example_block = []
     inside_example = False
-    buffer = []
     for line in lines:
-        if line.strip().startswith('/'):
-            if current_endpoint and buffer:
+        stripped = line.strip()
+        if stripped.startswith("/"):
+            current_endpoint = stripped
+            inside_example = False
+        elif "example:" in stripped:
+            inside_example = True
+            example_block = []
+        elif inside_example:
+            if line.startswith(" ") or line.startswith("\t"):
+                example_block.append(line.strip())
+            else:
                 try:
-                    structures[current_endpoint] = json.loads("\n".join(buffer))
+                    if current_endpoint and example_block:
+                        examples[current_endpoint] = json.loads("\n".join(example_block))
                 except Exception:
                     pass
-            current_endpoint = line.strip()
-            buffer = []
-            inside_example = False
-        elif 'example:' in line:
-            inside_example = True
-            buffer = []
-        elif inside_example:
-            if line.startswith(' '):
-                buffer.append(line.strip())
-            else:
                 inside_example = False
-    if current_endpoint and buffer:
+    # catch last block
+    if inside_example and current_endpoint and example_block:
         try:
-            structures[current_endpoint] = json.loads("\n".join(buffer))
+            examples[current_endpoint] = json.loads("\n".join(example_block))
         except Exception:
             pass
-    return structures
+    return list(examples.keys()), examples
 
-def generate_payloads(endpoints, example_structures):
-    def generate_payload(template):
-        if isinstance(template, dict):
-            return {k: generate_payload(v) for k, v in template.items()}
-        elif isinstance(template, list):
-            return [generate_payload(template[0]) if template else []]
-        elif isinstance(template, str):
-            return ''.join(random.choices(string.ascii_letters, k=8))
-        elif isinstance(template, bool):
-            return random.choice([True, False])
-        elif isinstance(template, int) or isinstance(template, float):
-            return random.randint(1, 10000)
-        else:
-            return None
-
-    payloads = {}
-    for endpoint in endpoints:
-        example = example_structures.get(endpoint)
-        if example:
-            payloads[endpoint] = [
-                generate_payload(example),
-                generate_payload(example)
-            ]
-    return payloads
-
-# ---------------- FILE PROCESSING ----------------
+def generate_random_payload(template):
+    if isinstance(template, dict):
+        return {k: generate_random_payload(v) for k, v in template.items()}
+    elif isinstance(template, list):
+        return [generate_random_payload(template[0])] if template else []
+    elif isinstance(template, str):
+        return ''.join(random.choices(string.ascii_letters, k=8))
+    elif isinstance(template, bool):
+        return random.choice([True, False])
+    elif isinstance(template, int) or isinstance(template, float):
+        return random.randint(1, 9999)
+    else:
+        return None
 
 def unzip_raml(zip_bytes, extract_dir="/tmp/temp_raml"):
     if os.path.exists(extract_dir):
@@ -145,22 +128,13 @@ def resolve_includes_in_raml(file_path, root_dir):
 def analyze_raml_with_openai(client, resolved_raml_content):
     prompt = (
         "You are a RAML test data generator.\n"
-        "Below is a RAML specification with all includes already resolved (traits, examples, schemas, etc).\n"
-        "Use the structure and types defined in the examples.\n\n"
-        "For each endpoint, generate exactly two unique, complete, and randomized test payloads.\n"
-        "Guidelines:\n"
-        "- Do not invent or add any extra fields.\n"
-        "- Follow the exact field names and structures from the examples.\n"
-        "- Preserve types: string, number, boolean, array, object.\n"
-        "- All fields must have realistic dummy values of the correct type.\n"
-        "- Do not use empty/null unless a field is explicitly nullable.\n"
-        "- No hardcoding like 'name', 'count', 'id'. Use randomized realistic values.\n\n"
-        "Return a JSON object with this structure:\n"
-        "{\n"
-        "  \"/endpoint1\": [payload1, payload2],\n"
-        "  \"/endpoint2\": [payload1, payload2]\n"
-        "}\n\n"
-        "Here is the RAML project (fully inlined):\n"
+        "Below is a RAML specification with all includes already resolved.\n"
+        "Generate two randomized JSON test payloads per endpoint using the provided examples.\n"
+        "Only use fields shown in the examples. Do not add or skip fields.\n"
+        "Preserve data types: string, number, boolean, object, array.\n"
+        "Example output:\n"
+        "{ \"/api/endpoint\": [ {payload1}, {payload2} ] }\n\n"
+        "Here is the RAML:\n"
     )
     response = client.invoke([{"content": prompt + "\n\n" + resolved_raml_content}])
     return response.content
