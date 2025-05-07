@@ -21,44 +21,27 @@ def random_value(value):
         return {k: random_value(v) for k, v in value.items()}
     return value
 
-def parse_raml_json_block(raml_content):
-    try:
-        lines = raml_content.splitlines()
-        json_lines = []
-
-        # Start from first line that looks like JSON
-        in_json_block = False
-        for line in lines:
-            stripped = line.strip()
-            if not in_json_block and (stripped.startswith('{') or stripped.startswith('[')):
-                in_json_block = True
-            if in_json_block:
-                json_lines.append(line)
-
-        json_text = "\n".join(json_lines)
-        return json.loads(json_text)
-    except Exception as e:
-        logger.error(f"Error parsing JSON from RAML: {e}")
-        raise ValueError("Invalid or missing JSON block in RAML content.")
-
-def regenerate_payload_values(original_json):
-    return random_value(original_json)
+def regenerate_payload_values(json_data):
+    return random_value(json_data)
 
 def lambda_handler(event, context):
-    logger.info("Lambda invoked for single RAML file.")
+    logger.info("Lambda invoked for RAML JSON file.")
     try:
         if 'body' not in event or not event.get('isBase64Encoded', False):
             raise ValueError("File content is missing or not base64-encoded.")
 
-        # Decode base64 body to get the RAML file content
+        # Decode the RAML content from base64
         raml_bytes = b64decode(event['body'])
         raml_content = raml_bytes.decode('utf-8', errors='ignore')
 
-        # Extract the embedded JSON block
-        original_payload = parse_raml_json_block(raml_content)
+        try:
+            # Parse entire content directly as JSON
+            original_json = json.loads(raml_content)
+        except json.JSONDecodeError as e:
+            raise ValueError("RAML file does not contain valid JSON.")
 
-        # Generate new payload with same structure but randomized values
-        randomized_payload = regenerate_payload_values(original_payload)
+        # Regenerate payload with randomized values
+        randomized_payload = regenerate_payload_values(original_json)
 
         return {
             "statusCode": 200,
