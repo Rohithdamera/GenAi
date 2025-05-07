@@ -3,6 +3,7 @@ import json
 import logging
 import random
 import string
+import re
 from base64 import b64decode
 
 logging.basicConfig(level=logging.INFO)
@@ -24,24 +25,39 @@ def random_value(value):
 def regenerate_payload_values(json_data):
     return random_value(json_data)
 
+def extract_json_block_from_raml(content):
+    """
+    Extracts the first valid JSON object or array block from a RAML file.
+    """
+    content = content.strip()
+    
+    # Match the first top-level JSON object or array
+    json_match = re.search(r'(\{[\s\S]*?\}|\[[\s\S]*?\])', content)
+    if not json_match:
+        raise ValueError("No valid JSON block found in RAML content")
+
+    json_str = json_match.group(0)
+    
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        raise ValueError("Extracted block is not valid JSON")
+
 def lambda_handler(event, context):
-    logger.info("Lambda invoked for RAML JSON file.")
+    logger.info("Lambda invoked for RAML with JSON inside.")
+
     try:
         if 'body' not in event or not event.get('isBase64Encoded', False):
             raise ValueError("File content is missing or not base64-encoded.")
 
-        # Decode the RAML content from base64
         raml_bytes = b64decode(event['body'])
         raml_content = raml_bytes.decode('utf-8', errors='ignore')
 
-        try:
-            # Parse entire content directly as JSON
-            original_json = json.loads(raml_content)
-        except json.JSONDecodeError as e:
-            raise ValueError("RAML file does not contain valid JSON.")
+        # Extract JSON content from RAML
+        json_data = extract_json_block_from_raml(raml_content)
 
         # Regenerate payload with randomized values
-        randomized_payload = regenerate_payload_values(original_json)
+        randomized_payload = regenerate_payload_values(json_data)
 
         return {
             "statusCode": 200,
