@@ -1,16 +1,81 @@
-{
-    "original_payload": {
-        "DiscountTypeCode": "TR",
-        "ReductionAmount": 10,
-        "DiscountId": "1",
-        "BonusBuyId": "487",
-        "OfferId": "34"
-    },
-    "randomized_payload": {
-        "DiscountTypeCode": "PA",
-        "ReductionAmount": 8941,
-        "DiscountId": "M",
-        "BonusBuyId": "4JL",
-        "OfferId": "Lz"
-    }
-}
+import json
+import logging
+import base64
+import random
+import string
+import re
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+
+def generate_random_value(value):
+    if isinstance(value, str):
+        return ''.join(random.choices(string.ascii_letters + string.digits, k=len(value)))
+    elif isinstance(value, int):
+        return random.randint(1000, 9999)
+    elif isinstance(value, float):
+        return round(random.uniform(1.0, 1000.0), 2)
+    elif isinstance(value, bool):
+        return random.choice([True, False])
+    elif isinstance(value, list):
+        return [generate_random_value(v) for v in value]
+    elif isinstance(value, dict):
+        return {k: generate_random_value(v) for k, v in value.items()}
+    else:
+        return value
+
+
+def extract_all_json_blocks(text):
+    """
+    Extract all valid JSON blocks (objects only) from the RAML file using regex.
+    """
+    json_objects = []
+    try:
+        # Regex to find all {...} blocks, non-greedy to avoid over-capture
+        potential_jsons = re.findall(r'(?s){.*?}', text)
+
+        for block in potential_jsons:
+            try:
+                obj = json.loads(block)
+                if isinstance(obj, dict):  # Only include JSON objects, not arrays
+                    json_objects.append(obj)
+            except json.JSONDecodeError:
+                continue
+
+        if not json_objects:
+            raise ValueError("No valid JSON blocks found in RAML.")
+
+        return json_objects
+    except Exception as e:
+        logger.error(f"Error parsing JSON from RAML: {e}")
+        raise ValueError("Failed to parse any JSON objects from RAML file.")
+
+
+def lambda_handler(event, context):
+    try:
+        # Decode body from base64 (API Gateway binary mode)
+        body = base64.b64decode(event['body'])
+        raml_text = body.decode('utf-8')
+
+        # Extract all JSON blocks
+        all_original_jsons = extract_all_json_blocks(raml_text)
+
+        # Generate randomized versions
+        randomized_payloads = [generate_random_value(payload) for payload in all_original_jsons]
+
+        return {
+            'statusCode': 200,
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'original_payloads': all_original_jsons,
+                'randomized_payloads': randomized_payloads
+            })
+        }
+
+    except Exception as e:
+        logger.error(f"Lambda error: {e}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps({'error': str(e)})
+        }
