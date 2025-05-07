@@ -9,7 +9,7 @@ from base64 import b64decode
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Mock OpenAI client
+# Simulated OpenAI client
 def mock_openai_client(model_instance_name):
     class MockClient:
         def invoke(self, messages):
@@ -19,54 +19,70 @@ def mock_openai_client(model_instance_name):
             return type('obj', (object,), {'content': json.dumps(payloads)})
     return MockClient()
 
+# Extract top-level endpoints from RAML
 def extract_endpoints_from_raml(raml_content):
-    endpoints = []
     lines = raml_content.split('\n')
+    endpoints = []
     for line in lines:
-        if line.strip().startswith('/'):
-            endpoints.append(line.strip())
+        stripped = line.strip()
+        if stripped.startswith('/') and ':' not in stripped:
+            endpoints.append(stripped)
     return endpoints
 
+# Extract body fields based on indentation under an endpoint
 def extract_fields_for_endpoint(endpoint, raml_content):
-    fields = {}
     lines = raml_content.split('\n')
+    fields = {}
     capture = False
-    for line in lines:
-        if line.strip() == endpoint:
+    indent_level = None
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == endpoint:
             capture = True
+            indent_level = len(line) - len(stripped)
             continue
+
         if capture:
-            if line.strip().startswith('/'):
-                break  # Next endpoint found
-            if ':' in line:
-                key, val = line.strip().split(':', 1)
-                fields[key.strip()] = val.strip()
+            current_indent = len(line) - len(line.lstrip())
+            if current_indent <= indent_level or stripped.startswith('/'):
+                break  # End of current endpoint
+            if ':' in stripped:
+                key, val = map(str.strip, stripped.split(':', 1))
+                if key and val:
+                    fields[key] = val
     return fields
 
+# Generate randomized value based on original value
 def generate_random_value(original_value):
     if original_value.isdigit():
         return random.randint(1000, 9999)
     elif original_value.lower() in ['true', 'false']:
         return random.choice([True, False])
-    elif '-' in original_value and all(part.isdigit() for part in original_value.split('-') if part):
-        return random.randint(10000, 99999)
-    elif len(original_value) >= 8 and original_value.replace('-', '').isalnum():
+    elif '-' in original_value and all(p.isdigit() for p in original_value.split('-') if p):
+        return f"{random.randint(2000, 2030)}-{random.randint(1, 12):02}-{random.randint(1, 28):02}"
+    elif original_value.replace('-', '').isalnum():
         return ''.join(random.choices(string.ascii_letters + string.digits, k=10))
-    return ''.join(random.choices(string.ascii_letters, k=8))
+    else:
+        return ''.join(random.choices(string.ascii_letters, k=8))
 
+# Create randomized payload from field structure
 def generate_randomized_payload(field_template):
     return {k: generate_random_value(v) for k, v in field_template.items()}
 
+# Generate two payloads per endpoint
 def generate_payloads_for_endpoints(endpoints, raml_content):
     payloads = {}
     for endpoint in endpoints:
         fields = extract_fields_for_endpoint(endpoint, raml_content)
-        payloads[endpoint] = [
-            generate_randomized_payload(fields),
-            generate_randomized_payload(fields)
-        ]
+        if fields:
+            payloads[endpoint] = [
+                generate_randomized_payload(fields),
+                generate_randomized_payload(fields)
+            ]
     return payloads
 
+# Main RAML analysis logic
 def analyze_raml_with_openai(client, raml_content):
     try:
         prompt = (
@@ -84,7 +100,7 @@ def analyze_raml_with_openai(client, raml_content):
         logger.error(f"Error analyzing RAML with OpenAI: {e}")
         raise ValueError(f"Error analyzing RAML with OpenAI: {e}")
 
-# AWS Lambda handler
+# Lambda handler
 def lambda_handler(event, context):
     logger.info("Lambda invoked.")
     try:
