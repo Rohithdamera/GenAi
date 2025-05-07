@@ -1,1 +1,51 @@
-{"error": "[Errno 2] No such file or directory: '3{\\n\\t\"correlationId\": \"4e80db7c-cca9-41d0-81003\",\\n\\t\"Transaction\": [\\n\\t\\t{\\n\\t\\t\\t\"RetailStoreId\": \"801\",\\n\\t\\t\\t\"BusinessDayDate\": \"28/05/2022 21:03:00\",\\n\\t\\t\\t\"TransactionTypeCode\": \"SPOC\",\\n\\t\\t\\t\"WorkstationId\": \"801\",\\n\\t\\t\\t\"TransactionNumber\": \"ABCD100172121\",\\n\\t\\t\\t\"BeginTimestamp\": \"28/05/2022 21:03:00\",\\n\\t\\t\\t\"EndTimestamp\": \"28/05/2022 21:03:00\",\\n\\t\\t\\t\"Department\": \"Store\",\\n\\t\\t\\t\"TransactionCurrency\": \"INR\",\\n\\t\\t\\t\"CustomerInfo\": {\\n\\t\\t\\t\\t\"DataElementId\": \"1\",\\n\\t\\t\\t\\t\"DataElementValue\": \"Central\"\\n\\t\\t\\t},\\n\\t\\t\\t\"Tender\": [\\n\\t\\t\\t\\t{\\n\\t\\t\\t\\t\\t\"TenderSequenceNumber\": \"1\",\\n\\t\\t\\t\\t\\t\"TenderTypeCode\": \"Credit\",\\n\\t\\t\\t\\t\\t\"TenderAmount\": 900,\\n\\t\\t\\t\\t\\t\"TenderId\": \"05282022210300\",\\n\\t\\t\\t\\t\\t\"ReferenceId\": \"63198\",\\n\\t\\t\\t\\t\\t\"TenderCurrency\": \"INR\",\\n\\t\\t\\t\\t\\t\"CreditCard\": {\\n\\t\\t\\t\\t\\t\\t\"PaymentCard\": \"Visa\",\\n\\t\\t\\t\\t\\t\\t\"CardNumber\": \"5209632740500\"\\n\\t\\t\\t\\t\\t}\\n\\t\\t\\t\\t},\\n\\t\\t\\t\\t{\\n\\t\\t\\t\\t\\t\"TenderSequenceNumber\": \"2\",\\n\\t\\t\\t\\t\\t\"TenderTypeCode\": \"Cash\",\\n\\t\\t\\t\\t\\t\"TenderAmount\": 70,\\n\\t\\t\\t\\t\\t\"TenderId\": \"05282022210300\",\\n\\t\\t\\t\\t\\t\"ReferenceId\": \"5239553\",\\n\\t\\t\\t\\t\\t\"TenderCurrency\": \"INR\",\\n\\t\\t\\t\\t\\t\"CreditCard\": {\\n\\t\\t\\t\\t\\t\\t\"PaymentCard\": \"\",\\n\\t\\t\\t\\t\\t\\t\"CardNumber\": \"\"\\n\\t\\t\\t\\t\\t}\\n\\t\\t\\t\\t}\\n\\t\\t\\t],\\n\\t\\t\\t\"RetailLineItem\": [\\n\\t\\t\\t\\t{\\n\\t\\t\\t\\t\\t\"RetailLineNumber\": \"1\",\\n\\t\\t\\t\\t\\t\"RetailTypeCode\": \"2001\",\\n\\t\\t\\t\\t\\t\"RetailReasonCode\": \"R1\",\\n\\t\\t\\t\\t\\t\"ItemId\": \"36182581440\",\\n\\t\\t\\t\\t\\t\"ItemIdIdentifier\": \"1\",\\n\\t\\t\\t\\t\\t\"RetailsQuantity\": \"4\",\\n\\t\\t\\t\\t\\t\"SalesUOM\": \"Units\",\\n\\t\\t\\t\\t\\t\"SalesAmount\": 650,\\n\\t\\t\\t\\t\\t\"NormalSalesAmt\": 600,\\n\\t\\t\\t\\t\\t\"Tax\": {\\n\\t\\t\\t\\t\\t\\t\"TaxSequenceNumber\": \"1\",\\n\\t\\t\\t\\t\\t\\t\"TaxTypeCode\": \"ZTAX\",\\n\\t\\t\\t\\t\\t\\t\"TaxAmount\": 50\\n\\t\\t\\t\\t\\t},\\n\\t\\t\\t\\t\\t\"Discount\": {\\n\\t\\t\\t\\t\\t\\t\"DiscountTypeCode\": \"TR\",\\n\\t\\t\\t\\t\\t\\t\"ReductionAmount\": 10,\\n\\t\\t\\t\\t\\t\\t\"DiscountId\": \"1\",\\n\\t\\t\\t\\t\\t\\t\"BonusBuyId\": \"487\",\\n\\t\\t\\t\\t\\t\\t\"OfferId\": \"34\"\\n\\t\\t\\t\\t\\t},\\n\\t\\t\\t\\t\\t\"GoodsMovement\": {\\n\\t\\t\\t\\t\\t\\t\"GoodsMovementSequenceNumber\": \"1\",\\n\\t\\t\\t\\t\\t\\t\"GoodsMovementTypeCode\": \"7201\",\\n\\t\\t\\t\\t\\t\\t\"GoodsMovementReasonCode\": \"10\",\\n\\t\\t\\t\\t\\t\\t\"ShipmentSite\": \"\",\\n\\t\\t\\t\\t\\t\\t\"ToPartyId\": \"\"\\n\\t\\t\\t\\t\\t}\\n\\t\\t\\t\\t},\\n\\t\\t\\t\\t{\\n\\t\\t\\t\\t\\t\"RetailLineNumber\": \"2\",\\n\\t\\t\\t\\t\\t\"RetailTypeCode\": \"2001\",\\n\\t\\t\\t\\t\\t\"RetailReasonCode\": \"R1\",\\n\\t\\t\\t\\t\\t\"ItemId\": \"701549894029\",\\n\\t\\t\\t\\t\\t\"RetailsQuantity\": \"2\",\\n\\t\\t\\t\\t\\t\"SalesUOM\": \"Units\",\\n\\t\\t\\t\\t\\t\"SalesAmount\": 320,\\n\\t\\t\\t\\t\\t\"NormalSalesAmt\": 300,\\n\\t\\t\\t\\t\\t\"Tax\": {\\n\\t\\t\\t\\t\\t\\t\"TaxSequenceNumber\": \"1\",\\n\\t\\t\\t\\t\\t\\t\"TaxTypeCode\": \"ZTAX\",\\n\\t\\t\\t\\t\\t\\t\"TaxAmount\": 20\\n\\t\\t\\t\\t\\t},\\n\\t\\t\\t\\t\\t\"Discount\": {\\n\\t\\t\\t\\t\\t\\t\"DiscountTypeCode\": \"TN\",\\n\\t\\t\\t\\t\\t\\t\"ReductionAmount\": 5,\\n\\t\\t\\t\\t\\t\\t\"DiscountId\": \"3451\",\\n\\t\\t\\t\\t\\t\\t\"BonusBuyId\": \"123432\",\\n\\t\\t\\t\\t\\t\\t\"OfferId\": \"\"\\n\\t\\t\\t\\t\\t},\\n\\t\\t\\t\\t\\t\"GoodsMovement\": {\\n\\t\\t\\t\\t\\t\\t\"GoodsMovementSequenceNumber\": \"2\",\\n\\t\\t\\t\\t\\t\\t\"GoodsMovementTypeCode\": \"7201\",\\n\\t\\t\\t\\t\\t\\t\"GoodsMovementReasonCode\": \"10\",\\n\\t\\t\\t\\t\\t\\t\"ShipmentSite\": \"\",\\n\\t\\t\\t\\t\\t\\t\"ToPartyId\": \"\"\\n\\t\\t\\t\\t\\t}\\n\\t\\t\\t\\t}\\n\\t\\t\\t]\\n\\t\\t},\\n\\t\\t{\\n\\t\\t\\t\"RetailStoreId\": \"801\",\\n\\t\\t\\t\"BusinessDayDate\": \"28/05/2022 21:03:00\",\\n\\t\\t\\t\"WorkstationId\": \"801\",\\n\\t\\t\\t\"TransactionNumber\": \"ABCD100172121\",\\n\\t\\t\\t\"BeginTimestamp\": \"28/05/2022 21:03:00\",\\n\\t\\t\\t\"EndTimestamp\": \"28/05/2022 21:03:00\",\\n\\t\\t\\t\"Department\": \"\",\\n\\t\\t\\t\"TransactionCurrency\": \"INR\",\\n\\t\\t\\t\"CustomerInfo\": {\\n\\t\\t\\t\\t\"DataElementId\": \"\",\\n\\t\\t\\t\\t\"DataElementValue\": \"\"\\n\\t\\t\\t},\\n\\t\\t\\t\"Tender\": [\\n\\t\\t\\t\\t{\\n\\t\\t\\t\\t\\t\"TenderSequenceNumber\": \"1\",\\n\\t\\t\\t\\t\\t\"TenderTypeCode\": \"\",\\n\\t\\t\\t\\t\\t\"TenderAmount\": 20,\\n\\t\\t\\t\\t\\t\"TenderId\": \"05282022210300\",\\n\\t\\t\\t\\t\\t\"TenderCurrency\": \"\",\\n\\t\\t\\t\\t\\t\"ReferenceId\": \"\",\\n\\t\\t\\t\\t\\t\"CreditCard\": {\\n\\t\\t\\t\\t\\t\\t\"PaymentCard\": \"\",\\n\\t\\t\\t\\t\\t\\t\"CardNumber\": \"\"\\n\\t\\t\\t\\t\\t}\\n\\t\\t\\t\\t}\\n\\t\\t\\t],\\n\\t\\t\\t\"RetailLineItem\": [\\n\\t\\t\\t\\t{\\n\\t\\t\\t\\t\\t\"RetailLineNumber\": \"1\",\\n\\t\\t\\t\\t\\t\"RetailTypeCode\": \"2001\",\\n\\t\\t\\t\\t\\t\"RetailReasonCode\": \"R1\",\\n\\t\\t\\t\\t\\t\"ItemId\": \"36182581440\",\\n\\t\\t\\t\\t\\t\"RetailsQuantity\": \"4\",\\n\\t\\t\\t\\t\\t\"SalesUOM\": \"Units\",\\n\\t\\t\\t\\t\\t\"SalesAmount\": 650,\\n\\t\\t\\t\\t\\t\"NormalSalesAmt\": 600,\\n\\t\\t\\t\\t\\t\"Tax\": {\\n\\t\\t\\t\\t\\t\\t\"TaxSequenceNumber\": \"1\",\\n\\t\\t\\t\\t\\t\\t\"TaxTypeCode\": \"ZTAX\",\\n\\t\\t\\t\\t\\t\\t\"TaxAmount\": 50\\n\\t\\t\\t\\t\\t},\\n\\t\\t\\t\\t\\t\"Discount\": {\\n\\t\\t\\t\\t\\t\\t\"DiscountTypeCode\": \"TN\",\\n\\t\\t\\t\\t\\t\\t\"ReductionAmount\": 5,\\n\\t\\t\\t\\t\\t\\t\"DiscountId\": \"3451\",\\n\\t\\t\\t\\t\\t\\t\"BonusBuyId\": \"123432\",\\n\\t\\t\\t\\t\\t\\t\"OfferId\": \"\"\\n\\t\\t\\t\\t\\t},\\n\\t\\t\\t\\t\\t\"GoodsMovement\": {\\n\\t\\t\\t\\t\\t\\t\"GoodsMovementSequenceNumber\": \"1\",\\n\\t\\t\\t\\t\\t\\t\"GoodsMovementTypeCode\": \"7201\",\\n\\t\\t\\t\\t\\t\\t\"GoodsMovementReasonCode\": \"10\",\\n\\t\\t\\t\\t\\t\\t\"ShipmentSite\": \"\",\\n\\t\\t\\t\\t\\t\\t\"ToPartyId\": \"\"\\n\\t\\t\\t\\t\\t}\\n\\t\\t\\t\\t}\\n\\t\\t\\t]\\n\\t\\t}\\n\\t]\\n}'"}
+
+import json
+import random
+import string
+import base64
+
+def generate_random_value(value):
+    if isinstance(value, int):
+        return random.randint(1, 10000)
+    elif isinstance(value, float):
+        return round(random.uniform(1, 10000), 2)
+    elif isinstance(value, str):
+        return ''.join(random.choices(string.ascii_letters + string.digits, k=random.randint(2, 8)))
+    elif isinstance(value, list):
+        return [generate_random_value(v) for v in value]
+    elif isinstance(value, dict):
+        return {k: generate_random_value(v) for k, v in value.items()}
+    else:
+        return value
+
+def lambda_handler(event, context):
+    try:
+        if 'body' not in event:
+            return {"statusCode": 400, "body": "Missing body in request"}
+
+        # Base64 decode the uploaded RAML file
+        content = base64.b64decode(event['body']).decode('utf-8')
+
+        # Try to extract the JSON part (RAML might contain YAML or annotations, but we assume it starts with a JSON block)
+        json_start = content.find('{')
+        json_data = json.loads(content[json_start:])  # Parse JSON portion only
+
+        # Randomize values based on type
+        randomized_output = generate_random_value(json_data)
+
+        return {
+            "statusCode": 200,
+            "body": json.dumps(randomized_output),
+            "headers": {
+                "Content-Type": "application/json"
+            }
+        }
+
+    except Exception as e:
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)}),
+            "headers": {
+                "Content-Type": "application/json"
+            }
+        }
