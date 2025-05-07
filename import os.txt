@@ -1,97 +1,95 @@
 import json
 import base64
 import logging
+import boto3
 import random
 import string
-from base64 import b64decode
-from Crypto.Cipher import AES
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Function to unpad data after decryption (removes padding bytes)
-def unpad(data):
-    padding_length = data[-1]
-    return data[:-padding_length]
-
-# AES decryption function for credentials or data
-def decrypt(data, key):
-    try:
-        cipher = AES.new(b64decode(key), AES.MODE_ECB)
-        decrypted_data = cipher.decrypt(b64decode(data))
-        decrypted_data = unpad(decrypted_data)
-        return decrypted_data.decode()
-    except Exception as e:
-        logger.error(f"Error during decryption: {e}")
-        raise ValueError(f"Error during decryption: {e}")
-
-# Generate a random value based on the expected type of the field
-def generate_random_value(value_type):
-    if value_type == "int":
-        return random.randint(1000, 9999)  # Generates a random integer
-    elif value_type == "float":
-        return round(random.uniform(1.0, 10000.0), 2)  # Generates a random float
-    elif value_type == "string":
-        return ''.join(random.choices(string.ascii_letters + string.digits, k=random.randint(4, 10)))  # Random string
-    elif value_type == "boolean":
-        return random.choice([True, False])  # Random boolean
+# Generates dummy value matching expected data type
+def generate_dummy_value(example_value):
+    if isinstance(example_value, int):
+        return random.randint(1000, 9999)
+    elif isinstance(example_value, float):
+        return round(random.uniform(1.0, 9999.99), 2)
+    elif isinstance(example_value, str):
+        return ''.join(random.choices(string.ascii_letters + string.digits, k=random.randint(5, 10)))
+    elif isinstance(example_value, bool):
+        return random.choice([True, False])
+    elif isinstance(example_value, list):
+        return [generate_dummy_value(example_value[0]) if example_value else "example"]  # Safe default
+    elif isinstance(example_value, dict):
+        return generate_dummy_payload(example_value)
     else:
-        return None  # Default for unknown types
+        return "example"
 
-# Function to recursively generate randomized values for a dictionary or list
-def generate_random_structure(data):
+# Recursively replace values in JSON structure
+def generate_dummy_payload(data):
     if isinstance(data, dict):
-        return {k: generate_random_structure(v) for k, v in data.items()}
+        return {k: generate_dummy_payload(v) for k, v in data.items()}
     elif isinstance(data, list):
-        return [generate_random_structure(v) for v in data]
+        return [generate_dummy_payload(v) for v in data]
     else:
-        return data  # Return the value itself if it's not a dict or list
+        return generate_dummy_value(data)
 
-# Extract model instance name from headers if provided
+# Extract model instance name dynamically from headers
 def get_model_instance_name(event):
-    return event['headers'].get('model_instance_name', 'default_chatbot')
+    return event['headers'].get('model_instance_name', 'default-model')
 
-# Main Lambda function handler
+# Call the GenAI model through Bedrock or OpenAI
+def call_genai_model(model_instance, prompt, input_json):
+    client = boto3.client('bedrock-runtime')  # Ensure your Lambda has Bedrock permissions
+
+    body = {
+        "prompt": f"{prompt}\n\n{json.dumps(input_json, indent=2)}\n\nReturn two unique randomized payloads as JSON.",
+        "max_tokens_to_sample": 2048,
+        "temperature": 0.7,
+    }
+
+    response = client.invoke_model(
+        modelId=model_instance,
+        body=json.dumps(body),
+        contentType="application/json",
+        accept="application/json"
+    )
+
+    result = json.loads(response['body'].read().decode())
+    return json.loads(result['completion'])  # Expecting clean JSON string in completion
+
+# Main Lambda handler
 def lambda_handler(event, context):
     logger.info("Lambda function invoked.")
-    
     try:
-        # Ensure that the event contains base64-encoded body
         if 'body' not in event or not event.get('isBase64Encoded', False):
             raise ValueError("Missing or invalid file data in request.")
-        
-        # Decode base64 RAML file
-        content = base64.b64decode(event['body']).decode('utf-8')
 
-        # Extract JSON portion starting from first '{' (assuming it's the main data)
+        # Decode the incoming base64 content
+        content = base64.b64decode(event['body']).decode('utf-8')
         json_start = content.find('{')
         if json_start == -1:
-            raise ValueError("No JSON content found in RAML file.")
-        
-        json_string = content[json_start:]
-        original_data = json.loads(json_string)
+            raise ValueError("No JSON object found in RAML file.")
 
-        # Generate randomized values based on the original data structure
-        randomized_data = generate_random_structure(original_data)
+        json_data = json.loads(content[json_start:])
 
-        # Get model instance name from headers (this will be used for the model call if needed)
-        model_instance_name = get_model_instance_name(event)
-        
-        # Dynamically generate the prompt
+        # Dynamically extract the model instance
+        model_instance = get_model_instance_name(event)
+
+        # Prepare prompt for test data generation
         prompt = (
-            f"You are an expert RAML analyzer. Using the model instance '{model_instance_name}', "
-            "analyze the following RAML content, resolve all included files, traits, resource types, "
-            "and fragments, and generate two randomized test payloads for each endpoint defined. "
-            "The payload must maintain the field names and structure, but all values must be changed "
-            "to realistic random examples matching the original data types. "
-            "Return only the JSON with endpoints and their test payloads."
+            "You are a RAML analysis expert. Based on the structure provided below, "
+            "generate two randomized test payloads preserving the original field names and structure. "
+            "Each value must be replaced with a randomized one matching the correct data type (int, float, string, boolean, etc.)."
         )
 
-        # Return the randomized test data as the result
+        # Call GenAI model dynamically
+        result = call_genai_model(model_instance, prompt, json_data)
+
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(randomized_data)
+            "body": json.dumps(result)
         }
 
     except Exception as e:
