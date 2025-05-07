@@ -1,68 +1,16 @@
-import json
-import logging
-import base64
-import random
-import string
-import re
-
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-def generate_random_value(value):
-    if isinstance(value, str):
-        return ''.join(random.choices(string.ascii_letters + string.digits, k=len(value)))
-    elif isinstance(value, int):
-        return random.randint(1000, 9999)
-    elif isinstance(value, float):
-        return round(random.uniform(1.0, 1000.0), 2)
-    elif isinstance(value, bool):
-        return random.choice([True, False])
-    elif isinstance(value, list):
-        return [generate_random_value(v) for v in value]
-    elif isinstance(value, dict):
-        return {k: generate_random_value(v) for k, v in value.items()}
-    else:
-        return value
-
-def extract_first_json_block(text):
-    """
-    Extract the first JSON object found in the RAML file using regex.
-    """
-    try:
-        # Match the first {...} JSON block
-        matches = re.findall(r'(?s){.*?}', text)
-        for match in matches:
-            try:
-                return json.loads(match)
-            except json.JSONDecodeError:
-                continue
-        raise ValueError("No valid JSON found in RAML file.")
-    except Exception as e:
-        logger.error(f"Error extracting JSON from RAML: {e}")
-        raise ValueError("Failed to parse JSON content from RAML file.")
-
-def lambda_handler(event, context):
-    try:
-        # Decode body from API Gateway binary mode
-        body = base64.b64decode(event['body'])
-        raml_text = body.decode('utf-8')
-
-        # Extract JSON from inside the RAML
-        original_payload = extract_first_json_block(raml_text)
-        randomized_payload = generate_random_value(original_payload)
-
-        return {
-            'statusCode': 200,
-            'headers': {'Content-Type': 'application/json'},
-            'body': json.dumps({
-                'original_payload': original_payload,
-                'randomized_payload': randomized_payload
-            })
-        }
-
-    except Exception as e:
-        logger.error(f"Lambda error: {e}")
-        return {
-            'statusCode': 500,
-            'body': json.dumps({'error': str(e)})
-        }
+{
+    "original_payload": {
+        "DiscountTypeCode": "TR",
+        "ReductionAmount": 10,
+        "DiscountId": "1",
+        "BonusBuyId": "487",
+        "OfferId": "34"
+    },
+    "randomized_payload": {
+        "DiscountTypeCode": "PA",
+        "ReductionAmount": 8941,
+        "DiscountId": "M",
+        "BonusBuyId": "4JL",
+        "OfferId": "Lz"
+    }
+}
