@@ -5,6 +5,8 @@ import json
 from base64 import b64decode
 import logging
 from Crypto.Cipher import AES
+import random
+import string
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -47,7 +49,11 @@ def extract_endpoints_from_raml(raml_content):
 def generate_payloads_for_endpoints(endpoints, raml_content):
     payloads = {}
     for endpoint in endpoints:
-        payloads[endpoint] = extract_fields_for_endpoint(endpoint, raml_content)
+        field_template = extract_fields_for_endpoint(endpoint, raml_content)
+        payloads[endpoint] = [
+            generate_randomized_payload(field_template),
+            generate_randomized_payload(field_template)
+        ]
     return payloads
 
 def extract_fields_for_endpoint(endpoint, raml_content):
@@ -63,9 +69,26 @@ def extract_fields_for_endpoint(endpoint, raml_content):
             parts = line.split(':')
             if len(parts) == 2:
                 key = parts[0].strip()
-                value = parts[1].strip()
-                fields[key] = value
+                fields[key] = ""  # Use placeholder to identify keys
     return fields
+
+def generate_random_value():
+    value_type = random.choice(['string', 'number', 'uuid', 'boolean'])
+    if value_type == 'string':
+        return ''.join(random.choices(string.ascii_letters, k=8))
+    elif value_type == 'number':
+        return random.randint(1, 1000)
+    elif value_type == 'uuid':
+        return ''.join(random.choices(string.hexdigits.lower(), k=8)) + '-' + \
+               ''.join(random.choices(string.hexdigits.lower(), k=4)) + '-' + \
+               ''.join(random.choices(string.hexdigits.lower(), k=4)) + '-' + \
+               ''.join(random.choices(string.hexdigits.lower(), k=4)) + '-' + \
+               ''.join(random.choices(string.hexdigits.lower(), k=12))
+    elif value_type == 'boolean':
+        return random.choice([True, False])
+
+def generate_randomized_payload(field_template):
+    return {k: generate_random_value() for k in field_template}
 
 def fill_empty_values(obj):
     if isinstance(obj, dict):
