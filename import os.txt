@@ -7,214 +7,186 @@ import logging
 from Crypto.Cipher import AES
 import random
 import string
-from bs4 import BeautifulSoup
-import xml.etree.ElementTree as ET
 
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def unpad(data):
-    padding_length = data[-1]
-    return data[:-padding_length]
+    return data[:-data[-1]]
 
 def decrypt(data, key):
     try:
         cipher = AES.new(b64decode(key), AES.MODE_ECB)
-        decrypted_data = cipher.decrypt(b64decode(data))
-        decrypted_data = unpad(decrypted_data)
-        return decrypted_data.decode()
+        decrypted = cipher.decrypt(b64decode(data))
+        return unpad(decrypted).decode()
     except Exception as e:
-        logger.error(f"Error during decryption: {e}")
-        raise ValueError(f"Error during decryption: {e}")
+        logger.error(f"Decryption error: {e}")
+        raise ValueError("Decryption failed.")
 
-def mock_openai_client(model_instance_name):
-    class MockClient:
-        def invoke(self, messages):
-            raml_content = messages[0]['content']
-            endpoints = extract_endpoints_from_raml(raml_content)
-            payloads = generate_payloads_for_endpoints(endpoints, raml_content)
-            payloads = fill_empty_values(payloads)
-            return type('obj', (object,), {'content': json.dumps(payloads)})
-    return MockClient()
+def unzip_to_temp(zip_bytes):
+    base_path = "/tmp/extracted"
+    if os.path.exists(base_path):
+        shutil.rmtree(base_path)
+    os.makedirs(base_path, exist_ok=True)
 
-def extract_endpoints_from_raml(raml_content):
-    return [line.strip() for line in raml_content.split('\n') if line.strip().startswith('/')]
-
-def generate_payloads_for_endpoints(endpoints, raml_content):
-    payloads = {}
-    for endpoint in endpoints:
-        template = extract_fields_for_endpoint(endpoint, raml_content)
-        payloads[endpoint] = [
-            generate_randomized_payload(template),
-            generate_randomized_payload(template)
-        ]
-    return payloads
-
-def extract_fields_for_endpoint(endpoint, raml_content):
-    fields = {}
-    capture = False
-    for line in raml_content.split('\n'):
-        if line.strip() == endpoint:
-            capture = True
-        elif capture and line.startswith('/'):
-            break
-        elif capture:
-            parts = line.split(':')
-            if len(parts) == 2:
-                fields[parts[0].strip()] = "string"
-    return fields
-
-def generate_random_value(field_type):
-    if field_type == 'string':
-        return ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-    elif field_type == 'number':
-        return random.randint(1, 1000)
-    elif field_type == 'uuid':
-        return ''.join(random.choices(string.hexdigits.lower(), k=8)) + '-' + \
-               ''.join(random.choices(string.hexdigits.lower(), k=4)) + '-' + \
-               ''.join(random.choices(string.hexdigits.lower(), k=4)) + '-' + \
-               ''.join(random.choices(string.hexdigits.lower(), k=4)) + '-' + \
-               ''.join(random.choices(string.hexdigits.lower(), k=12))
-    elif field_type == 'boolean':
-        return random.choice([True, False])
-    return None
-
-def generate_randomized_payload(template):
-    return {k: generate_random_value(v) for k, v in template.items()}
-
-def fill_empty_values(obj):
-    if isinstance(obj, dict):
-        return {k: fill_empty_values(v) if v != "" else None for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [fill_empty_values(i) for i in obj]
-    return obj
-
-def unzip_input(zip_bytes, extract_dir="/tmp/temp_input"):
-    if os.path.exists(extract_dir):
-        shutil.rmtree(extract_dir)
-    os.makedirs(extract_dir, exist_ok=True)
-    with open("/tmp/uploaded.zip", "wb") as f:
+    with open("/tmp/upload.zip", "wb") as f:
         f.write(zip_bytes)
-    with zipfile.ZipFile("/tmp/uploaded.zip", 'r') as zip_ref:
-        zip_ref.extractall(extract_dir)
-    return extract_dir
 
-def find_html_and_parse_for_xml(base_dir):
-    for root, _, files in os.walk(base_dir):
+    with zipfile.ZipFile("/tmp/upload.zip", 'r') as zip_ref:
+        zip_ref.extractall(base_path)
+
+    return base_path
+
+def find_html_with_xml(base_path):
+    for root, _, files in os.walk(base_path):
         for file in files:
             if file.endswith(".html"):
-                with open(os.path.join(root, file), 'r', encoding='utf-8', errors='ignore') as f:
-                    soup = BeautifulSoup(f, "html.parser")
-                    for tag in soup.find_all('script', src=True):
-                        if tag['src'].endswith(".xml"):
-                            return os.path.join(root, tag['src'])
-    raise FileNotFoundError("No XML reference found in HTML file.")
+                html_path = os.path.join(root, file)
+                with open(html_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                    if ".xml" in content:
+                        return html_path, content
+    raise FileNotFoundError("No HTML with XML reference found.")
 
-def extract_connector_names_from_xml(xml_path):
-    connectors = []
-    tree = ET.parse(xml_path)
-    root = tree.getroot()
-    for elem in root.iter():
-        if 'connector' in elem.tag.lower():
-            if elem.text:
-                connectors.append(elem.text.strip())
-    return connectors
+def extract_xml_filename(html_content):
+    start = html_content.find(".xml")
+    if start == -1:
+        return None
+    i = start
+    while i > 0 and html_content[i] not in ['"', "'", ">", "<", " "]:
+        i -= 1
+    return html_content[i+1:start+4]
 
-def find_raml_files_by_keywords(base_dir, keywords):
+def extract_connector_names(xml_path):
+    connectors = set()
+    with open(xml_path, 'r', encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            if "connector" in line.lower():
+                line = line.strip().replace('<', '').replace('>', '')
+                for word in line.split():
+                    if "connector" in word.lower():
+                        connectors.add(word.split('=')[-1].strip('"'))
+    return list(connectors)
+
+def find_raml_files_for_connectors(base_path, connectors):
     raml_files = []
-    for root, _, files in os.walk(base_dir):
+    for root, _, files in os.walk(base_path):
         for file in files:
             if file.endswith(".raml"):
-                for keyword in keywords:
-                    if keyword.lower() in file.lower():
+                for connector in connectors:
+                    if connector in file:
                         raml_files.append(os.path.join(root, file))
-    return raml_files
+    return list(set(raml_files))
 
 def resolve_include_path(include_path, root_dir, current_dir):
-    candidate_paths = [
+    possible_paths = [
         os.path.join(current_dir, include_path),
         os.path.join(root_dir, include_path)
     ]
-    for path in candidate_paths:
+    for path in possible_paths:
         if os.path.isfile(path):
             return path
+
     for root, _, files in os.walk(root_dir):
         for f in files:
             if f == os.path.basename(include_path):
                 return os.path.join(root, f)
+
     return None
 
-def resolve_includes_in_raml(file_path, root_dir):
-    resolved_lines = []
-    current_dir = os.path.dirname(file_path)
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
-        for line in file:
+def resolve_includes(raml_path, root_dir):
+    resolved = []
+    current_dir = os.path.dirname(raml_path)
+    with open(raml_path, 'r', encoding='utf-8', errors='ignore') as f:
+        for line in f:
             if "!include" in line:
-                parts = line.strip().split("!include")
-                prefix = parts[0].strip()
-                include_path = parts[1].strip()
-                include_file = resolve_include_path(include_path, root_dir, current_dir)
-                if include_file and os.path.exists(include_file):
-                    with open(include_file, 'r', encoding='utf-8', errors='ignore') as inc:
-                        resolved_lines.append(f"{prefix} |\n")
-                        for inc_line in inc:
-                            resolved_lines.append(f"  {inc_line.rstrip()}")
+                prefix, include_path = line.strip().split("!include")
+                prefix = prefix.strip()
+                include_path = include_path.strip()
+                full_path = resolve_include_path(include_path, root_dir, current_dir)
+                if full_path:
+                    with open(full_path, 'r', encoding='utf-8', errors='ignore') as inc:
+                        resolved.append(f"{prefix} |\n")
+                        for l in inc:
+                            resolved.append("  " + l.strip())
                 else:
-                    resolved_lines.append(f"{line.strip()}  # Include not found")
+                    resolved.append(line.strip() + "  # include not found")
             else:
-                resolved_lines.append(line.rstrip())
-    return "\n".join(resolved_lines)
+                resolved.append(line.rstrip())
+    return "\n".join(resolved)
 
-def analyze_raml_with_openai(client, raml_content):
-    prompt = (
-        "You are an expert RAML analyst and test data generator.\n\n"
-        "You are given the full contents of RAML files.\n\n"
-        "Your tasks:\n"
-        "1. Analyze each RAML file and resolve all endpoints.\n"
-        "2. For each endpoint, generate **two unique, complete, and randomized test payloads**.\n"
-        "3. Use data types and naming conventions from the RAML.\n"
-        "4. Do NOT copy real example values. Use synthetic data like strings, numbers, UUIDs, timestamps.\n"
-        "5. Required fields must be present. Optional fields can be randomly included.\n"
-        "6. Do not use null unless a field is nullable.\n\n"
-        "Return a **JSON object** mapping each endpoint to a list of 2 test payloads.\n\n"
-        "Begin with this RAML:\n"
-    )
-    response = client.invoke([{"content": prompt + "\n" + raml_content}])
-    return response.content
+def extract_endpoints(raml_text):
+    return [line.strip() for line in raml_text.splitlines() if line.strip().startswith("/")]
+
+def extract_fields(endpoint, raml_text):
+    lines = raml_text.splitlines()
+    fields = {}
+    capture = False
+    for line in lines:
+        if line.strip() == endpoint:
+            capture = True
+        elif capture and line.strip().startswith("/"):
+            break
+        elif capture:
+            if ':' in line:
+                key = line.strip().split(":")[0]
+                fields[key] = "string"
+    return fields
+
+def generate_value(data_type):
+    if data_type == 'string':
+        return ''.join(random.choices(string.ascii_letters, k=8))
+    elif data_type == 'number':
+        return random.randint(0, 100)
+    elif data_type == 'boolean':
+        return random.choice([True, False])
+    else:
+        return "sample"
+
+def generate_payload(fields):
+    return {k: generate_value(v) for k, v in fields.items()}
+
+def mock_generate_payloads(raml_text):
+    result = {}
+    endpoints = extract_endpoints(raml_text)
+    for ep in endpoints:
+        fields = extract_fields(ep, raml_text)
+        result[ep] = [generate_payload(fields), generate_payload(fields)]
+    return result
 
 def lambda_handler(event, context):
-    logger.info("Lambda invoked.")
     try:
-        if 'body' not in event or not event.get('isBase64Encoded', False):
-            raise ValueError("Missing or invalid file data.")
-        
+        if 'body' not in event or not event.get('isBase64Encoded'):
+            raise ValueError("Invalid input. Expecting base64-encoded zip file.")
+
         zip_bytes = b64decode(event['body'])
-        headers = event.get('headers', {})
-        model_instance_name = (
-            headers.get('model_instance_name') or
-            headers.get('Model_Instance_Name') or
-            os.environ.get('DEFAULT_MODEL_INSTANCE_NAME', 'default-model')
-        )
+        base_dir = unzip_to_temp(zip_bytes)
 
-        extracted_dir = unzip_input(zip_bytes)
-        xml_path = find_html_and_parse_for_xml(extracted_dir)
-        connectors = extract_connector_names_from_xml(xml_path)
-        raml_paths = find_raml_files_by_keywords(extracted_dir, connectors)
+        html_path, html_content = find_html_with_xml(base_dir)
+        xml_file = extract_xml_filename(html_content)
+        if not xml_file:
+            raise ValueError("XML reference not found in HTML.")
 
+        xml_path = os.path.join(os.path.dirname(html_path), xml_file)
+        connectors = extract_connector_names(xml_path)
+        if not connectors:
+            raise ValueError("No connectors found in XML.")
+
+        raml_paths = find_raml_files_for_connectors(base_dir, connectors)
         if not raml_paths:
-            raise FileNotFoundError("No matching RAML files found for connectors.")
+            raise ValueError("No matching RAML files found for connectors.")
 
-        full_raml_content = ""
-        for raml_path in raml_paths:
-            full_raml_content += resolve_includes_in_raml(raml_path, extracted_dir) + "\n\n"
-
-        client = mock_openai_client(model_instance_name)
-        output = analyze_raml_with_openai(client, full_raml_content)
+        all_payloads = {}
+        for raml in raml_paths:
+            resolved = resolve_includes(raml, base_dir)
+            payloads = mock_generate_payloads(resolved)
+            all_payloads.update(payloads)
 
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": output
+            "body": json.dumps(all_payloads)
         }
 
     except Exception as e:
