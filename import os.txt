@@ -25,27 +25,30 @@ def decrypt(data, key):
         logger.error(f"Error during decryption: {e}")
         raise ValueError(f"Error during decryption: {e}")
 
-# Generate a random value based on inferred data type
+# Generate a random value based on original value's data type
 def generate_random_value_by_sample(sample_value):
     if isinstance(sample_value, int):
         return random.randint(1000, 9999)
     elif isinstance(sample_value, float):
         return round(random.uniform(1.0, 10000.0), 2)
-    elif isinstance(sample_value, str):
-        return ''.join(random.choices(string.ascii_letters + string.digits, k=random.randint(4, 10)))
     elif isinstance(sample_value, bool):
         return random.choice([True, False])
+    elif isinstance(sample_value, str):
+        # Try to detect datetime-like string
+        if any(sep in sample_value for sep in ['/', '-', ':']) and any(char.isdigit() for char in sample_value):
+            return "01/01/2025 12:00:00"  # Mock datetime
+        return ''.join(random.choices(string.ascii_letters + string.digits, k=random.randint(4, 10)))
     elif sample_value is None:
         return None
     else:
-        return sample_value  # fallback for unknown type
+        return sample_value  # fallback for unknown types
 
-# Recursively generate randomized structure maintaining original field names
+# Recursively preserve keys and structure, while randomizing values
 def generate_random_structure(template):
     if isinstance(template, dict):
         return {k: generate_random_structure(v) for k, v in template.items()}
     elif isinstance(template, list):
-        return [generate_random_structure(v) for v in template]
+        return [generate_random_structure(item) for item in template]
     else:
         return generate_random_value_by_sample(template)
 
@@ -53,19 +56,19 @@ def generate_random_structure(template):
 def get_model_instance_name(event):
     return event.get('headers', {}).get('model_instance_name', 'default_chatbot')
 
-# Main Lambda function handler
+# Main Lambda handler
 def lambda_handler(event, context):
     logger.info("Lambda function invoked.")
     
     try:
-        # Check for base64 body
+        # Check if base64 encoded body exists
         if 'body' not in event or not event.get('isBase64Encoded', False):
             raise ValueError("Missing or invalid file data in request.")
         
-        # Decode base64 body
+        # Decode the body
         content = base64.b64decode(event['body']).decode('utf-8')
 
-        # Find the JSON start
+        # Find JSON starting point
         json_start = content.find('{')
         if json_start == -1:
             raise ValueError("No JSON content found in RAML file.")
@@ -73,18 +76,13 @@ def lambda_handler(event, context):
         json_string = content[json_start:]
         original_data = json.loads(json_string)
 
-        # Generate randomized version of the original JSON
+        # Generate new structure with random values but same data types
         randomized_data = generate_random_structure(original_data)
 
-        # Get model instance name
+        # Get model instance name (optional use case)
         model_instance_name = get_model_instance_name(event)
 
-        # Prompt (for illustrative/logging purpose, not used in response)
-        prompt = (
-            f"You are an expert RAML analyzer. Using the model instance '{model_instance_name}', "
-            "generate randomized test payloads based on the JSON input structure. Only values should be randomized."
-        )
-        logger.info(prompt)
+        logger.info(f"Successfully generated test data for model instance '{model_instance_name}'")
 
         return {
             "statusCode": 200,
