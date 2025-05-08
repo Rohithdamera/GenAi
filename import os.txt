@@ -5,15 +5,15 @@ import random
 import string
 from base64 import b64decode
 from Crypto.Cipher import AES
- 
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
- 
+
 # Function to unpad data after decryption (removes padding bytes)
 def unpad(data):
     padding_length = data[-1]
     return data[:-padding_length]
- 
+
 # AES decryption function for credentials or data
 def decrypt(data, key):
     try:
@@ -24,76 +24,74 @@ def decrypt(data, key):
     except Exception as e:
         logger.error(f"Error during decryption: {e}")
         raise ValueError(f"Error during decryption: {e}")
- 
-# Generate a random value based on the expected type of the field
-def generate_random_value(value_type):
-    if value_type == "int":
-        return random.randint(1000, 9999)  # Generates a random integer
-    elif value_type == "float":
-        return round(random.uniform(1.0, 10000.0), 2)  # Generates a random float
-    elif value_type == "string":
-        return ''.join(random.choices(string.ascii_letters + string.digits, k=random.randint(4, 10)))  # Random string
-    elif value_type == "boolean":
-        return random.choice([True, False])  # Random boolean
+
+# Generate a random value based on inferred data type
+def generate_random_value_by_sample(sample_value):
+    if isinstance(sample_value, int):
+        return random.randint(1000, 9999)
+    elif isinstance(sample_value, float):
+        return round(random.uniform(1.0, 10000.0), 2)
+    elif isinstance(sample_value, str):
+        return ''.join(random.choices(string.ascii_letters + string.digits, k=random.randint(4, 10)))
+    elif isinstance(sample_value, bool):
+        return random.choice([True, False])
+    elif sample_value is None:
+        return None
     else:
-        return None  # Default for unknown types
- 
-# Function to recursively generate randomized values for a dictionary or list
-def generate_random_structure(data):
-    if isinstance(data, dict):
-        return {k: generate_random_structure(v) for k, v in data.items()}
-    elif isinstance(data, list):
-        return [generate_random_structure(v) for v in data]
+        return sample_value  # fallback for unknown type
+
+# Recursively generate randomized structure maintaining original field names
+def generate_random_structure(template):
+    if isinstance(template, dict):
+        return {k: generate_random_structure(v) for k, v in template.items()}
+    elif isinstance(template, list):
+        return [generate_random_structure(v) for v in template]
     else:
-        return data  # Return the value itself if it's not a dict or list
- 
+        return generate_random_value_by_sample(template)
+
 # Extract model instance name from headers if provided
 def get_model_instance_name(event):
-    return event['headers'].get('model_instance_name', 'default_chatbot')
- 
+    return event.get('headers', {}).get('model_instance_name', 'default_chatbot')
+
 # Main Lambda function handler
 def lambda_handler(event, context):
     logger.info("Lambda function invoked.")
-   
+    
     try:
-        # Ensure that the event contains base64-encoded body
+        # Check for base64 body
         if 'body' not in event or not event.get('isBase64Encoded', False):
             raise ValueError("Missing or invalid file data in request.")
-       
-        # Decode base64 RAML file
+        
+        # Decode base64 body
         content = base64.b64decode(event['body']).decode('utf-8')
- 
-        # Extract JSON portion starting from first '{' (assuming it's the main data)
+
+        # Find the JSON start
         json_start = content.find('{')
         if json_start == -1:
             raise ValueError("No JSON content found in RAML file.")
-       
+        
         json_string = content[json_start:]
         original_data = json.loads(json_string)
- 
-        # Generate randomized values based on the original data structure
+
+        # Generate randomized version of the original JSON
         randomized_data = generate_random_structure(original_data)
- 
-        # Get model instance name from headers (this will be used for the model call if needed)
+
+        # Get model instance name
         model_instance_name = get_model_instance_name(event)
-       
-        # Dynamically generate the prompt
+
+        # Prompt (for illustrative/logging purpose, not used in response)
         prompt = (
             f"You are an expert RAML analyzer. Using the model instance '{model_instance_name}', "
-            "analyze the following RAML content, resolve all included files, traits, resource types, "
-            "and fragments, and generate two randomized test payloads for each endpoint defined. "
-            "The payload must maintain the field names and structure, but all values must be changed "
-            "to realistic random examples matching the original data types. "
-            "Return only the JSON with endpoints and their test payloads."
+            "generate randomized test payloads based on the JSON input structure. Only values should be randomized."
         )
- 
-        # Return the randomized test data as the result
+        logger.info(prompt)
+
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
             "body": json.dumps(randomized_data)
         }
- 
+
     except Exception as e:
         logger.error(f"Error in Lambda handler: {e}")
         return {
