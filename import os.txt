@@ -81,6 +81,14 @@ def generate_random_structure(template):
 def get_model_instance_name(event):
     return event.get('headers', {}).get('model_instance_name', 'generated_model_instance')
 
+# Extract count from headers (default = 1)
+def get_count_from_headers(event):
+    try:
+        count = int(event.get('headers', {}).get('count', '1'))
+        return max(1, count)
+    except Exception:
+        return 1
+
 # Dynamically build the prompt
 def build_dynamic_prompt(model_instance_name):
     return (
@@ -107,19 +115,21 @@ def lambda_handler(event, context):
         json_string = content[json_start:]
         original_data = json.loads(json_string)
 
-        # Generate randomized structure
-        randomized_data = generate_random_structure(original_data)
-
-        # Auto-extract model name and build prompt
+        # Get header values
         model_instance_name = get_model_instance_name(event)
+        count = get_count_from_headers(event)
         prompt = build_dynamic_prompt(model_instance_name)
-        logger.info(f"Generated prompt for model instance '{model_instance_name}'")
-        logger.debug("Prompt: " + prompt)
+
+        logger.info(f"Model: {model_instance_name}, Count: {count}")
+        logger.debug(f"Prompt: {prompt}")
+
+        # Generate multiple variations
+        datasets = [generate_random_structure(original_data) for _ in range(count)]
 
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(randomized_data)
+            "body": json.dumps({"datasets": datasets})
         }
 
     except Exception as e:
