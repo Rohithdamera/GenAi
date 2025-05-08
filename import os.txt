@@ -9,12 +9,12 @@ from Crypto.Cipher import AES
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Unpad data after AES decryption
+# ===== Utility: Padding =====
 def unpad(data):
     padding_length = data[-1]
     return data[:-padding_length]
 
-# AES decryption (if needed in future)
+# ===== Utility: AES decryption (optional) =====
 def decrypt(data, key):
     try:
         cipher = AES.new(b64decode(key), AES.MODE_ECB)
@@ -25,7 +25,7 @@ def decrypt(data, key):
         logger.error(f"Error during decryption: {e}")
         raise ValueError(f"Error during decryption: {e}")
 
-# Heuristics to detect format of string fields
+# ===== Heuristic type checkers =====
 def is_datetime_like(value):
     return isinstance(value, str) and any(sep in value for sep in ['/', '-', ':']) and sum(c.isdigit() for c in value) >= 6
 
@@ -35,7 +35,7 @@ def is_uuid_like(value):
 def is_numeric_string(value):
     return isinstance(value, str) and value.isdigit()
 
-# Random generators based on detected types
+# ===== Random generators =====
 def random_datetime():
     return f"{random.randint(1,28):02}/{random.randint(1,12):02}/2025 {random.randint(0,23):02}:{random.randint(0,59):02}:{random.randint(0,59):02}"
 
@@ -53,7 +53,7 @@ def random_string_like(value):
     else:
         return ''.join(random.choices(string.ascii_letters + string.digits, k=len(value)))
 
-# Random value generation based on sample value type
+# ===== Value generator by sample type =====
 def generate_random_value_by_sample(sample_value):
     if isinstance(sample_value, int):
         return random.randint(1000, 9999)
@@ -68,7 +68,7 @@ def generate_random_value_by_sample(sample_value):
     else:
         return sample_value
 
-# Recursive random structure generator
+# ===== Recursively generate random structure =====
 def generate_random_structure(template):
     if isinstance(template, dict):
         return {k: generate_random_structure(v) for k, v in template.items()}
@@ -77,19 +77,22 @@ def generate_random_structure(template):
     else:
         return generate_random_value_by_sample(template)
 
-# Extract model instance name from headers
+# ===== Extract model_instance_name or auto-generate =====
 def get_model_instance_name(event):
-    return event.get('headers', {}).get('model_instance_name', 'generated_model_instance')
+    header_val = event.get('headers', {}).get('model_instance_name')
+    if header_val:
+        return header_val
+    # Generate a fallback name like: chatbot_xyz123
+    return 'chatbot_' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
 
-# Extract count from headers (default = 1)
+# ===== Extract count header (defaults to 1) =====
 def get_count_from_headers(event):
     try:
-        count = int(event.get('headers', {}).get('count', '1'))
-        return max(1, count)
+        return max(1, int(event.get('headers', {}).get('count', '1')))
     except Exception:
         return 1
 
-# Dynamically build the prompt
+# ===== Dynamic prompt (not used in response but logged for traceability) =====
 def build_dynamic_prompt(model_instance_name):
     return (
         f"You are an expert RAML analyzer. Using the model instance '{model_instance_name}', "
@@ -98,32 +101,29 @@ def build_dynamic_prompt(model_instance_name):
         "structure, and data types. Ensure the output is in clean JSON format without explanations."
     )
 
-# Lambda entry point
+# ===== Lambda Handler =====
 def lambda_handler(event, context):
     logger.info("Lambda function invoked.")
-    
+
     try:
         if 'body' not in event or not event.get('isBase64Encoded', False):
             raise ValueError("Missing or invalid file data in request.")
-        
-        # Decode incoming base64 JSON payload
+
         content = base64.b64decode(event['body']).decode('utf-8')
         json_start = content.find('{')
         if json_start == -1:
-            raise ValueError("No JSON content found in RAML file.")
-        
+            raise ValueError("No JSON content found in input.")
+
         json_string = content[json_start:]
         original_data = json.loads(json_string)
 
-        # Get header values
         model_instance_name = get_model_instance_name(event)
         count = get_count_from_headers(event)
         prompt = build_dynamic_prompt(model_instance_name)
 
-        logger.info(f"Model: {model_instance_name}, Count: {count}")
+        logger.info(f"Model instance: {model_instance_name}, Dataset count: {count}")
         logger.debug(f"Prompt: {prompt}")
 
-        # Generate multiple variations
         datasets = [generate_random_structure(original_data) for _ in range(count)]
 
         return {
@@ -133,7 +133,7 @@ def lambda_handler(event, context):
         }
 
     except Exception as e:
-        logger.error(f"Error in Lambda handler: {e}")
+        logger.error(f"Error: {e}")
         return {
             "statusCode": 500,
             "headers": {"Content-Type": "application/json"},
