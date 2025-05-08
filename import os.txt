@@ -9,10 +9,12 @@ from Crypto.Cipher import AES
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Unpad data after AES decryption
 def unpad(data):
     padding_length = data[-1]
     return data[:-padding_length]
 
+# AES decryption (if needed in future)
 def decrypt(data, key):
     try:
         cipher = AES.new(b64decode(key), AES.MODE_ECB)
@@ -23,24 +25,19 @@ def decrypt(data, key):
         logger.error(f"Error during decryption: {e}")
         raise ValueError(f"Error during decryption: {e}")
 
-# Heuristics to infer field types from string content
+# Heuristics to detect format of string fields
 def is_datetime_like(value):
     return isinstance(value, str) and any(sep in value for sep in ['/', '-', ':']) and sum(c.isdigit() for c in value) >= 6
 
 def is_uuid_like(value):
-    return isinstance(value, str) and len(value) in [36, 32] and '-' in value and value.count('-') in [4]
+    return isinstance(value, str) and len(value) in [36, 32] and value.count('-') == 4
 
 def is_numeric_string(value):
     return isinstance(value, str) and value.isdigit()
 
+# Random generators based on detected types
 def random_datetime():
-    day = str(random.randint(1, 28)).zfill(2)
-    month = str(random.randint(1, 12)).zfill(2)
-    year = random.choice(["2024", "2025"])
-    hour = str(random.randint(0, 23)).zfill(2)
-    minute = str(random.randint(0, 59)).zfill(2)
-    second = str(random.randint(0, 59)).zfill(2)
-    return f"{day}/{month}/{year} {hour}:{minute}:{second}"
+    return f"{random.randint(1,28):02}/{random.randint(1,12):02}/2025 {random.randint(0,23):02}:{random.randint(0,59):02}:{random.randint(0,59):02}"
 
 def random_uuid():
     sections = [8, 4, 4, 4, 12]
@@ -56,6 +53,7 @@ def random_string_like(value):
     else:
         return ''.join(random.choices(string.ascii_letters + string.digits, k=len(value)))
 
+# Random value generation based on sample value type
 def generate_random_value_by_sample(sample_value):
     if isinstance(sample_value, int):
         return random.randint(1000, 9999)
@@ -70,6 +68,7 @@ def generate_random_value_by_sample(sample_value):
     else:
         return sample_value
 
+# Recursive random structure generator
 def generate_random_structure(template):
     if isinstance(template, dict):
         return {k: generate_random_structure(v) for k, v in template.items()}
@@ -78,9 +77,20 @@ def generate_random_structure(template):
     else:
         return generate_random_value_by_sample(template)
 
+# Extract model instance name from headers
 def get_model_instance_name(event):
-    return event.get('headers', {}).get('model_instance_name', 'default_chatbot')
+    return event.get('headers', {}).get('model_instance_name', 'generated_model_instance')
 
+# Dynamically build the prompt
+def build_dynamic_prompt(model_instance_name):
+    return (
+        f"You are an expert RAML analyzer. Using the model instance '{model_instance_name}', "
+        "analyze the provided RAML content. Resolve all includes such as traits, resource types, and fragments. "
+        "Then generate realistic randomized test payloads for each endpoint while preserving the field names, "
+        "structure, and data types. Ensure the output is in clean JSON format without explanations."
+    )
+
+# Lambda entry point
 def lambda_handler(event, context):
     logger.info("Lambda function invoked.")
     
@@ -88,6 +98,7 @@ def lambda_handler(event, context):
         if 'body' not in event or not event.get('isBase64Encoded', False):
             raise ValueError("Missing or invalid file data in request.")
         
+        # Decode incoming base64 JSON payload
         content = base64.b64decode(event['body']).decode('utf-8')
         json_start = content.find('{')
         if json_start == -1:
@@ -96,22 +107,14 @@ def lambda_handler(event, context):
         json_string = content[json_start:]
         original_data = json.loads(json_string)
 
+        # Generate randomized structure
         randomized_data = generate_random_structure(original_data)
 
+        # Auto-extract model name and build prompt
         model_instance_name = get_model_instance_name(event)
-        logger.info(f"Generated test data for model instance '{model_instance_name}'")
-
-        # This prompt is used for logging or potential downstream processing
-        prompt = (
-            f"You are an expert RAML analyzer. Using the model instance '{model_instance_name}', "
-            "analyze the following RAML content, resolve all included files, traits, resource types, "
-            "and fragments, and generate two randomized test payloads for each endpoint defined. "
-            "The payload must maintain the field names and structure, but all values must be changed "
-            "to realistic random examples matching the original data types, formats, and lengths. "
-            "Return only the JSON with endpoints and their test payloads."
-        )
-
-        logger.info("Prompt: " + prompt)
+        prompt = build_dynamic_prompt(model_instance_name)
+        logger.info(f"Generated prompt for model instance '{model_instance_name}'")
+        logger.debug("Prompt: " + prompt)
 
         return {
             "statusCode": 200,
