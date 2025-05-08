@@ -1,101 +1,244 @@
+import os
+import shutil
+import zipfile
 import json
-import base64
+from base64 import b64decode
 import logging
-import boto3
+from Crypto.Cipher import AES
 import random
 import string
 
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Generates dummy value matching expected data type
-def generate_dummy_value(example_value):
-    if isinstance(example_value, int):
-        return random.randint(1000, 9999)
-    elif isinstance(example_value, float):
-        return round(random.uniform(1.0, 9999.99), 2)
-    elif isinstance(example_value, str):
-        return ''.join(random.choices(string.ascii_letters + string.digits, k=random.randint(5, 10)))
-    elif isinstance(example_value, bool):
-        return random.choice([True, False])
-    elif isinstance(example_value, list):
-        return [generate_dummy_value(example_value[0]) if example_value else "example"]  # Safe default
-    elif isinstance(example_value, dict):
-        return generate_dummy_payload(example_value)
-    else:
-        return "example"
+# Decryption helpers
+def unpad(data):
+    padding_length = data[-1]
+    return data[:-padding_length]
 
-# Recursively replace values in JSON structure
-def generate_dummy_payload(data):
-    if isinstance(data, dict):
-        return {k: generate_dummy_payload(v) for k, v in data.items()}
-    elif isinstance(data, list):
-        return [generate_dummy_payload(v) for v in data]
-    else:
-        return generate_dummy_value(data)
-
-# Extract model instance name dynamically from headers
-def get_model_instance_name(event):
-    return event['headers'].get('model_instance_name', 'default-model')
-
-# Call the GenAI model through Bedrock or OpenAI
-def call_genai_model(model_instance, prompt, input_json):
-    client = boto3.client('bedrock-runtime')  # Ensure your Lambda has Bedrock permissions
-
-    body = {
-        "prompt": f"{prompt}\n\n{json.dumps(input_json, indent=2)}\n\nReturn two unique randomized payloads as JSON.",
-        "max_tokens_to_sample": 2048,
-        "temperature": 0.7,
-    }
-
-    response = client.invoke_model(
-        modelId=model_instance,
-        body=json.dumps(body),
-        contentType="application/json",
-        accept="application/json"
-    )
-
-    result = json.loads(response['body'].read().decode())
-    return json.loads(result['completion'])  # Expecting clean JSON string in completion
-
-# Main Lambda handler
-def lambda_handler(event, context):
-    logger.info("Lambda function invoked.")
+def decrypt(data, key):
     try:
-        if 'body' not in event or not event.get('isBase64Encoded', False):
-            raise ValueError("Missing or invalid file data in request.")
+        cipher = AES.new(b64decode(key), AES.MODE_ECB)
+        decrypted_data = cipher.decrypt(b64decode(data))
+        decrypted_data = unpad(decrypted_data)
+        return decrypted_data.decode()
+    except Exception as e:
+        logger.error(f"Error during decryption: {e}")
+        raise ValueError(f"Error during decryption: {e}")
 
-        # Decode the incoming base64 content
-        content = base64.b64decode(event['body']).decode('utf-8')
-        json_start = content.find('{')
-        if json_start == -1:
-            raise ValueError("No JSON object found in RAML file.")
+# Mock OpenAI client
+def mock_openai_client(model_instance_name):
+    class MockClient:
+        def invoke(self, messages):
+            raml_content = messages[0]['content']
+            endpoints = extract_endpoints_from_raml(raml_content)
+            payloads = generate_payloads_for_endpoints(endpoints, raml_content)
+            payloads = fill_empty_values(payloads)
+            return type('obj', (object,), {'content': json.dumps(payloads)})
+    return MockClient()
 
-        json_data = json.loads(content[json_start:])
+def extract_endpoints_from_raml(raml_content):
+    endpoints = []
+    lines = raml_content.split('\n')
+    for line in lines:
+        if line.startswith('/'):
+            endpoints.append(line.strip())
+    return endpoints
 
-        # Dynamically extract the model instance
-        model_instance = get_model_instance_name(event)
+def generate_payloads_for_endpoints(endpoints, raml_content):
+    payloads = {}
+    for endpoint in endpoints:
+        field_template = extract_fields_for_endpoint(endpoint, raml_content)
+        payloads[endpoint] = [
+            generate_randomized_payload(field_template),
+            generate_randomized_payload(field_template)
+        ]
+    return payloads
 
-        # Prepare prompt for test data generation
+def extract_fields_for_endpoint(endpoint, raml_content):
+    fields = {}
+    lines = raml_content.split('\n')
+    capture = False
+    for line in lines:
+        if line.strip() == endpoint:
+            capture = True
+        elif capture and line.startswith('/'):
+            break
+        elif capture:
+            parts = line.split(':')
+            if len(parts) == 2:
+                key = parts[0].strip()
+                fields[key] = ""  # Use placeholder to identify keys
+    return fields
+
+def generate_random_value(field_type):
+    if field_type == 'string':
+        return ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+    elif field_type == 'number':
+        return random.randint(1, 1000)
+    elif field_type == 'uuid':
+        return ''.join(random.choices(string.hexdigits.lower(), k=8)) + '-' + \
+               ''.join(random.choices(string.hexdigits.lower(), k=4)) + '-' + \
+               ''.join(random.choices(string.hexdigits.lower(), k=4)) + '-' + \
+               ''.join(random.choices(string.hexdigits.lower(), k=4)) + '-' + \
+               ''.join(random.choices(string.hexdigits.lower(), k=12))
+    elif field_type == 'boolean':
+        return random.choice([True, False])
+    else:
+        return None
+
+def generate_randomized_payload(field_template):
+    return {k: generate_random_value(field_type) for k, field_type in field_template.items()}
+
+def fill_empty_values(obj):
+    if isinstance(obj, dict):
+        return {k: fill_empty_values(v) if v != "" else None for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [fill_empty_values(i) for i in obj]
+    return obj
+
+# RAML file processing
+def unzip_raml(zip_bytes, extract_dir="/tmp/temp_raml"):
+    try:
+        if os.path.exists(extract_dir):
+            shutil.rmtree(extract_dir)
+        os.makedirs(extract_dir, exist_ok=True)
+
+        zip_path = "/tmp/uploaded.zip"
+        with open(zip_path, "wb") as f:
+            f.write(zip_bytes)
+
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_dir)
+
+        return extract_dir
+    except Exception as e:
+        logger.error(f"Error unzipping RAML file: {e}")
+        raise ValueError(f"Error unzipping RAML file: {e}")
+
+def find_main_raml_file(base_dir):
+    try:
+        for root, _, files in os.walk(base_dir):
+            for file in files:
+                if file.endswith(".raml"):
+                    full_path = os.path.join(root, file)
+                    with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        if "#%RAML 1.0" in f.readline():
+                            return full_path
+        raise FileNotFoundError("Main RAML file not found.")
+    except Exception as e:
+        logger.error(f"Error finding main RAML file: {e}")
+        raise ValueError(f"Error finding main RAML file: {e}")
+
+def resolve_include_path(include_path, root_dir, current_dir):
+    request_dir = os.path.join(root_dir, 'examples', 'request')
+    full_path = os.path.normpath(os.path.join(request_dir, include_path))
+    if os.path.isfile(full_path):
+        return full_path
+
+    full_path = os.path.normpath(os.path.join(current_dir, include_path))
+    if os.path.isfile(full_path):
+        return full_path
+
+    full_path = os.path.normpath(os.path.join(root_dir, include_path))
+    if os.path.isfile(full_path):
+        return full_path
+
+    for root, _, files in os.walk(request_dir):
+        for f in files:
+            if f == os.path.basename(include_path):
+                return os.path.join(root, f)
+
+    for root, _, files in os.walk(root_dir):
+        for f in files:
+            if f == os.path.basename(include_path):
+                return os.path.join(root, f)
+
+    return None
+
+def resolve_includes_in_raml(file_path, root_dir):
+    resolved_lines = []
+    current_dir = os.path.dirname(file_path)
+
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
+        for line in file:
+            if "!include" in line:
+                parts = line.strip().split("!include")
+                prefix = parts[0].strip()
+                include_path = parts[1].strip()
+
+                include_file = resolve_include_path(include_path, root_dir, current_dir)
+
+                if include_file and os.path.exists(include_file):
+                    with open(include_file, 'r', encoding='utf-8', errors='ignore') as inc_file:
+                        resolved_lines.append(f"{prefix} |\n")
+                        for inc_line in inc_file.read().splitlines():
+                            resolved_lines.append(f"  {inc_line}")
+                else:
+                    resolved_lines.append(f"{line.strip()}  # Include not found")
+            else:
+                resolved_lines.append(line.rstrip())
+
+    return "\n".join(resolved_lines)
+
+# RAML Analysis
+def analyze_raml_with_openai(client, resolved_raml_content):
+    try:
         prompt = (
-            "You are a RAML analysis expert. Based on the structure provided below, "
-            "generate two randomized test payloads preserving the original field names and structure. "
-            "Each value must be replaced with a randomized one matching the correct data type (int, float, string, boolean, etc.)."
+            "You are an expert RAML analyst and test data generator.\n\n"
+            "You are given the full contents of a RAML project, including all folders and files "
+            "(traits, includes, resource types, and examples). All referenced files have already been inlined.\n\n"
+            "Your tasks:\n"
+            "1. Analyze the RAML specification and resolve all available information from the structure and included examples.\n"
+            "2. For each endpoint, generate **two unique, complete, and randomized test payloads**.\n"
+            "3. Use the field structure, data types, and naming conventions as defined in the RAML and example files.\n"
+            "4. **Do NOT copy actual example values**. Instead, generate random values appropriate for each field "
+            "(e.g., strings, numbers, UUIDs, timestamps, booleans).\n"
+            "5. Include all required fields. Optional fields may be skipped or randomly included.\n"
+            "6. Do not leave any field with null or empty values unless explicitly defined as nullable.\n\n"
+            "Return the result as a **JSON object** where each endpoint maps to a list containing **two distinct payloads**.\n\n"
+            "Begin processing the RAML content below:"
         )
 
-        # Call GenAI model dynamically
-        result = call_genai_model(model_instance, prompt, json_data)
+        response = client.invoke([{"content": prompt + "\n\n" + resolved_raml_content}])
+        return response.content
+    except Exception as e:
+        logger.error(f"Error analyzing RAML with OpenAI: {e}")
+        raise ValueError(f"Error analyzing RAML with OpenAI: {e}")
+
+# AWS Lambda entry point
+def lambda_handler(event, context):
+    logger.info("Lambda invoked.")
+    try:
+        if 'body' not in event or not event.get('isBase64Encoded', False):
+            raise ValueError("File content is missing or not base64-encoded.")
+
+        zip_bytes = b64decode(event['body'])
+
+        headers = event.get('headers', {})
+        model_instance_name = (
+            headers.get('model_instance_name') or
+            headers.get('Model_Instance_Name') or
+            os.environ.get('DEFAULT_MODEL_INSTANCE_NAME', 'default-model')
+        )
+
+        extracted_dir = unzip_raml(zip_bytes)
+        main_raml_file = find_main_raml_file(extracted_dir)
+        resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
+
+        client = mock_openai_client(model_instance_name)
+        final_output = analyze_raml_with_openai(client, resolved_raml)
 
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(result)
+            "body": final_output
         }
 
     except Exception as e:
-        logger.error(f"Error in Lambda handler: {e}")
+        logger.error(f"Error during execution: {e}")
         return {
             "statusCode": 500,
-            "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"error": str(e)})
         }
