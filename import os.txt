@@ -2,18 +2,13 @@ import json
 import logging
 import random
 import string
-import os
-import shutil
-from urllib.parse import parse_qs
+import base64
 from io import BytesIO
-from http import client as http_client
-
 import cgi
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========== Helpers for type detection and random generation ==========
 def is_datetime_like(value):
     return isinstance(value, str) and any(sep in value for sep in ['/', '-', ':']) and sum(c.isdigit() for c in value) >= 6
 
@@ -74,53 +69,56 @@ def get_count(headers):
     except Exception:
         return 1
 
-# ========== Lambda Handler ==========
 def lambda_handler(event, context):
-    logger.info("Lambda invoked with multi-part form")
-
     try:
         headers = {k.lower(): v for k, v in event.get('headers', {}).items()}
         content_type = headers.get('content-type')
-
         if not content_type or 'multipart/form-data' not in content_type:
             raise ValueError("Content-Type must be multipart/form-data")
 
-        body_bytes = BytesIO(base64.b64decode(event['body']))
+        # Decode base64 body
+        if not event.get('isBase64Encoded'):
+            raise ValueError("Expected base64 encoded body.")
+        body_bytes = base64.b64decode(event['body'])
+
+        # Prepare environment for cgi parsing
         environ = {
             'REQUEST_METHOD': 'POST',
             'CONTENT_TYPE': content_type,
-            'CONTENT_LENGTH': str(len(body_bytes.getvalue()))
+            'CONTENT_LENGTH': str(len(body_bytes))
         }
 
-        form = cgi.FieldStorage(fp=body_bytes, environ=environ, keep_blank_values=True)
+        fs = cgi.FieldStorage(
+            fp=BytesIO(body_bytes),
+            environ=environ,
+            headers={'content-type': content_type},
+            keep_blank_values=True
+        )
 
-        if 'file' not in form:
-            raise ValueError("No 'file' part in the form-data")
+        if 'file' not in fs:
+            raise ValueError("No file uploaded with key 'file'.")
 
-        uploaded_file = form['file']
-        raw_content = uploaded_file.file.read().decode('utf-8')
+        file_item = fs['file']
+        content = file_item.file.read().decode('utf-8')
 
-        json_start = raw_content.find('{')
+        json_start = content.find('{')
         if json_start == -1:
-            raise ValueError("Uploaded file does not contain valid JSON")
-
-        json_data = json.loads(raw_content[json_start:])
+            raise ValueError("Uploaded file must contain valid JSON content.")
+        json_data = json.loads(content[json_start:])
 
         model_name = get_model_instance_name(headers)
         count = get_count(headers)
-
-        generated = [generate_random_structure(json_data) for _ in range(count)]
+        result = [generate_random_structure(json_data) for _ in range(count)]
 
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"datasets": generated})
+            "body": json.dumps({"datasets": result})
         }
 
     except Exception as e:
-        logger.error(f"Processing error: {e}")
+        logger.error(f"Error: {e}")
         return {
             "statusCode": 500,
-            "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"error": str(e)})
         }
