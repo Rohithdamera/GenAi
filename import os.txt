@@ -96,16 +96,14 @@ def build_dynamic_prompt(model_instance_name):
 
 def detect_and_extract_json(content: str):
     try:
-        # Try parsing entire content directly as JSON
         return json.loads(content)
     except json.JSONDecodeError:
         pass
 
-    # Try extracting embedded JSON block (for RAML or mixed content)
     json_start = content.find('{')
     if json_start == -1:
         raise ValueError("No JSON object found in file content.")
-    
+
     json_text = content[json_start:]
     try:
         return json.loads(json_text)
@@ -117,15 +115,18 @@ def lambda_handler(event, context):
     logger.info("Lambda function invoked.")
 
     try:
-        # Ensure the binary body is present and Base64-encoded
-        if 'body' not in event or not event.get('isBase64Encoded', False):
-            raise ValueError("Missing or invalid file data in request.")
+        # Get raw content (Base64 or plain)
+        body = event.get('body')
+        if not body:
+            raise ValueError("Missing file content in request.")
 
-        binary_data = base64.b64decode(event['body'])
-        content_str = binary_data.decode('utf-8', errors='replace')  # Replace invalid characters safely
+        # Decode based on encoding flag
+        if event.get('isBase64Encoded', False):
+            raw_content = base64.b64decode(body).decode('utf-8', errors='replace')
+        else:
+            raw_content = body
 
-        # Extract JSON structure (whether it's from .json or inside .raml)
-        original_data = detect_and_extract_json(content_str)
+        original_data = detect_and_extract_json(raw_content)
 
         model_instance_name = get_model_instance_name(event)
         count = get_count_from_headers(event)
