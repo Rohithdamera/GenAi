@@ -6,16 +6,18 @@ import string
 from base64 import b64decode
 from Crypto.Cipher import AES
 
+# Initialize logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
+# Utility Functions
 def unpad(data):
+    """Remove padding from decrypted data."""
     padding_length = data[-1]
     return data[:-padding_length]
 
-
 def decrypt(data, key):
+    """Decrypt data using AES encryption."""
     try:
         cipher = AES.new(b64decode(key), AES.MODE_ECB)
         decrypted_data = cipher.decrypt(b64decode(data))
@@ -25,76 +27,8 @@ def decrypt(data, key):
         logger.error(f"Error during decryption: {e}")
         raise ValueError(f"Error during decryption: {e}")
 
-
-def is_datetime_like(value):
-    return isinstance(value, str) and any(sep in value for sep in ['/', '-', ':']) and sum(c.isdigit() for c in value) >= 6
-
-def is_uuid_like(value):
-    return isinstance(value, str) and len(value) in [36, 32] and value.count('-') == 4
-
-def is_numeric_string(value):
-    return isinstance(value, str) and value.isdigit()
-
-def random_datetime():
-    return f"{random.randint(1,28):02}/{random.randint(1,12):02}/2025 {random.randint(0,23):02}:{random.randint(0,59):02}:{random.randint(0,59):02}"
-
-def random_uuid():
-    sections = [8, 4, 4, 4, 12]
-    return '-'.join(''.join(random.choices(string.hexdigits.lower(), k=s)) for s in sections)
-
-def random_string_like(value):
-    if is_datetime_like(value):
-        return random_datetime()
-    elif is_uuid_like(value):
-        return random_uuid()
-    elif is_numeric_string(value):
-        return ''.join(random.choices(string.digits, k=len(value)))
-    else:
-        return ''.join(random.choices(string.ascii_letters + string.digits, k=len(value)))
-
-def generate_random_value_by_sample(sample_value):
-    if isinstance(sample_value, int):
-        return random.randint(1000, 9999)
-    elif isinstance(sample_value, float):
-        return round(random.uniform(1.0, 10000.0), 2)
-    elif isinstance(sample_value, bool):
-        return random.choice([True, False])
-    elif isinstance(sample_value, str):
-        return random_string_like(sample_value)
-    elif sample_value is None:
-        return None
-    else:
-        return sample_value
-
-def generate_random_structure(template):
-    if isinstance(template, dict):
-        return {k: generate_random_structure(v) for k, v in template.items()}
-    elif isinstance(template, list):
-        return [generate_random_structure(item) for item in template]
-    else:
-        return generate_random_value_by_sample(template)
-
-def get_model_instance_name(event):
-    header_val = event.get('headers', {}).get('model_instance_name')
-    if header_val:
-        return header_val
-    return 'chatbot_' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
-
-def get_count_from_headers(event):
-    try:
-        return max(1, int(event.get('headers', {}).get('count', '1')))
-    except Exception:
-        return 1
-
-def build_dynamic_prompt(model_instance_name):
-    return (
-        f"You are an expert RAML analyzer. Using the model instance '{model_instance_name}', "
-        "analyze the provided RAML content. Resolve all includes such as traits, resource types, and fragments. "
-        "Then generate realistic randomized test payloads for each endpoint while preserving the field names, "
-        "structure, and data types. Ensure the output is in clean JSON format without explanations."
-    )
-
-def detect_and_extract_json(content: str):
+def detect_and_extract_json(content):
+    """Try to parse content as JSON, handle edge cases."""
     try:
         return json.loads(content)
     except json.JSONDecodeError:
@@ -110,24 +44,91 @@ def detect_and_extract_json(content: str):
     except json.JSONDecodeError:
         raise ValueError("Embedded JSON block could not be parsed.")
 
-# ===== Lambda Handler =====
-def lambda_handler(event, context):
-    logger.info("Lambda function invoked.")
+# Data Generation Helpers
+def random_datetime():
+    """Generate random datetime string."""
+    return f"{random.randint(1,28):02}/{random.randint(1,12):02}/2025 {random.randint(0,23):02}:{random.randint(0,59):02}:{random.randint(0,59):02}"
 
+def random_uuid():
+    """Generate random UUID."""
+    sections = [8, 4, 4, 4, 12]
+    return '-'.join(''.join(random.choices(string.hexdigits.lower(), k=s)) for s in sections)
+
+def random_string_like(value):
+    """Generate random string matching the structure of the given value."""
+    if isinstance(value, str):
+        if any(sep in value for sep in ['/', '-', ':']):
+            return random_datetime()
+        elif len(value) == 36 or len(value) == 32:
+            return random_uuid()
+        elif value.isdigit():
+            return ''.join(random.choices(string.digits, k=len(value)))
+        else:
+            return ''.join(random.choices(string.ascii_letters + string.digits, k=len(value)))
+    return value
+
+def generate_random_value_by_sample(sample_value):
+    """Generate a random value based on the sample's type."""
+    if isinstance(sample_value, int):
+        return random.randint(1000, 9999)
+    elif isinstance(sample_value, float):
+        return round(random.uniform(1.0, 10000.0), 2)
+    elif isinstance(sample_value, bool):
+        return random.choice([True, False])
+    elif isinstance(sample_value, str):
+        return random_string_like(sample_value)
+    elif sample_value is None:
+        return None
+    return sample_value
+
+def generate_random_structure(template):
+    """Recursively generate a random structure based on the input template."""
+    if isinstance(template, dict):
+        return {k: generate_random_structure(v) for k, v in template.items()}
+    elif isinstance(template, list):
+        return [generate_random_structure(item) for item in template]
+    return generate_random_value_by_sample(template)
+
+# Event Header Extraction
+def get_model_instance_name(event):
+    """Retrieve model instance name from headers or generate a random one."""
+    return event.get('headers', {}).get('model_instance_name', 'chatbot_' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=6)))
+
+def get_count_from_headers(event):
+    """Retrieve the count from headers or default to 1."""
     try:
-        # Get raw content (Base64 or plain)
+        return max(1, int(event.get('headers', {}).get('count', '1')))
+    except Exception:
+        return 1
+
+def build_dynamic_prompt(model_instance_name):
+    """Build a dynamic prompt based on the model instance name."""
+    return (
+        f"You are an expert RAML analyzer. Using the model instance '{model_instance_name}', "
+        "analyze the provided RAML content. Resolve all includes such as traits, resource types, and fragments. "
+        "Then generate realistic randomized test payloads for each endpoint while preserving the field names, "
+        "structure, and data types. Ensure the output is in clean JSON format without explanations."
+    )
+
+# Lambda Handler
+def lambda_handler(event, context):
+    """Main Lambda function handler."""
+    logger.info("Lambda function invoked.")
+    try:
+        # Retrieve and decode file content (base64 or plain text)
         body = event.get('body')
         if not body:
             raise ValueError("Missing file content in request.")
 
-        # Decode based on encoding flag
         if event.get('isBase64Encoded', False):
             raw_content = base64.b64decode(body).decode('utf-8', errors='replace')
         else:
             raw_content = body
 
+        # Parse and extract JSON data from the content
         original_data = detect_and_extract_json(raw_content)
 
+        # Extract model instance name and count from headers
         model_instance_name = get_model_instance_name(event)
         count = get_count_from_headers(event)
         prompt = build_dynamic_prompt(model_instance_name)
@@ -135,6 +136,7 @@ def lambda_handler(event, context):
         logger.info(f"Model instance: {model_instance_name}, Dataset count: {count}")
         logger.debug(f"Prompt: {prompt}")
 
+        # Generate the random datasets
         datasets = [generate_random_structure(original_data) for _ in range(count)]
 
         return {
