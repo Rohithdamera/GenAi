@@ -94,43 +94,44 @@ def build_dynamic_prompt(model_instance_name):
         "structure, and data types. Ensure the output is in clean JSON format without explanations."
     )
 
-def extract_payload_from_file(file_content, file_name):
-    file_name = file_name.lower()
+def detect_and_extract_json(content: str):
+    try:
+        # Try parsing entire content directly as JSON
+        return json.loads(content)
+    except json.JSONDecodeError:
+        pass
 
-    if file_name.endswith('.json'):
-        return json.loads(file_content)
-
-    elif file_name.endswith('.raml'):
-        # Very naive RAML parser: extract the first JSON-like structure (mock logic)
-        json_start = file_content.find('{')
-        if json_start == -1:
-            raise ValueError("No JSON structure found inside RAML.")
-        json_string = file_content[json_start:]
-        return json.loads(json_string)
-
-    else:
-        raise ValueError("Unsupported file type. Only .raml or .json are allowed.")
+    # Try extracting embedded JSON block (for RAML or mixed content)
+    json_start = content.find('{')
+    if json_start == -1:
+        raise ValueError("No JSON object found in file content.")
+    
+    json_text = content[json_start:]
+    try:
+        return json.loads(json_text)
+    except json.JSONDecodeError:
+        raise ValueError("Embedded JSON block could not be parsed.")
 
 # ===== Lambda Handler =====
 def lambda_handler(event, context):
     logger.info("Lambda function invoked.")
 
     try:
+        # Ensure the binary body is present and Base64-encoded
         if 'body' not in event or not event.get('isBase64Encoded', False):
             raise ValueError("Missing or invalid file data in request.")
 
-        file_name = event.get('headers', {}).get('filename', '').strip()
-        if not file_name:
-            raise ValueError("Missing 'filename' header. Must be .raml or .json")
+        binary_data = base64.b64decode(event['body'])
+        content_str = binary_data.decode('utf-8', errors='replace')  # Replace invalid characters safely
 
-        content = base64.b64decode(event['body']).decode('utf-8')
-        original_data = extract_payload_from_file(content, file_name)
+        # Extract JSON structure (whether it's from .json or inside .raml)
+        original_data = detect_and_extract_json(content_str)
 
         model_instance_name = get_model_instance_name(event)
         count = get_count_from_headers(event)
         prompt = build_dynamic_prompt(model_instance_name)
 
-        logger.info(f"Model instance: {model_instance_name}, Dataset count: {count}, File: {file_name}")
+        logger.info(f"Model instance: {model_instance_name}, Dataset count: {count}")
         logger.debug(f"Prompt: {prompt}")
 
         datasets = [generate_random_structure(original_data) for _ in range(count)]
