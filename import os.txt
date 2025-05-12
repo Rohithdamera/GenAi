@@ -9,12 +9,12 @@ from Crypto.Cipher import AES
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ===== Utility: Padding =====
+
 def unpad(data):
     padding_length = data[-1]
     return data[:-padding_length]
 
-# ===== Utility: AES decryption (optional) =====
+
 def decrypt(data, key):
     try:
         cipher = AES.new(b64decode(key), AES.MODE_ECB)
@@ -25,7 +25,7 @@ def decrypt(data, key):
         logger.error(f"Error during decryption: {e}")
         raise ValueError(f"Error during decryption: {e}")
 
-# ===== Heuristic type checkers =====
+
 def is_datetime_like(value):
     return isinstance(value, str) and any(sep in value for sep in ['/', '-', ':']) and sum(c.isdigit() for c in value) >= 6
 
