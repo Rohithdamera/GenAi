@@ -1,61 +1,68 @@
 import openai
- 
-# Set your OpenAI API key and other configurations
+import urllib.request
+import urllib.parse
+import json
+import base64
 
+# OpenAI Azure Configuration
 openai.api_type = "azure"
-
-
-
+openai.api_key = "123erfgfrewqwerftyuytrewqwwwwwwwwwwwwwwefghbvfdertyhgfd"
+openai.api_base = "https://testopenai.azure.com"
 openai.api_version = "2024-08-01-preview"
- 
-# Define the API endpoint
 
+# External API endpoint
 api_url = "https://anypoint.mulesoft.com/mocking/api/v1/sources/exchange/assets/68ef9520-24e9-4cf2-b2f5-620025690913/training-american-flights-api/2.0.5/m/flights?destination=SFO"
- 
-# Define the prompt for OpenAI
 
+# Client credentials
+client_id = "12345"
+client_secret = "12345"
+
+# Optional system prompt
 prompt = (
-
-    "Here is an API call to the flights endpoint. "
-
-    "Please access that URL and generate test payloads based on the data returned from the API. "
-
+    "Here is the response from a flight API. "
+    "Please analyze the response and generate example test payloads "
+    "that match the structure of the data returned by the API."
 )
- 
-def get_openai_client(api_url):
 
+def get_api_response_with_auth(url, client_id, client_secret):
     try:
+        # Prepare headers
+        headers = {
+            "client_id": client_id,
+            "client_secret": client_secret
+        }
 
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req) as response:
+            response_data = response.read().decode('utf-8')
+            return response_data
+
+    except Exception as e:
+        print(f"Error while accessing external API: {e}")
+        return None
+
+def get_openai_payload(api_response):
+    try:
         response = openai.ChatCompletion.create(
-
             deployment_id="Fourth_Chatbot",
-
             messages=[
-
                 {"role": "system", "content": prompt},
-
-                {"role": "user", "content": api_url}
-
+                {"role": "user", "content": f"API response:\n{api_response}"}
             ],
-
             max_tokens=1000,
-
             temperature=0.5
-
         )
 
         test_payloads = response['choices'][0]['message']['content']
-
-        print("Test Payloads:\n", test_payloads)
+        print("Generated Test Payloads:\n", test_payloads)
 
     except Exception as e:
+        print(f"Error during OpenAI payload generation: {e}")
 
-        print(f"Error during generating the test payloads: {e}")
- 
-# Call the function with the API URL
+def main():
+    api_response = get_api_response_with_auth(api_url, client_id, client_secret)
+    if api_response:
+        get_openai_payload(api_response)
 
-get_openai_client(api_url)
-
- 
-client_id: 12345, client_secret: 12345
- 
+# Run the main function
+main()
