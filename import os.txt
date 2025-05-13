@@ -67,7 +67,7 @@ def generate_random_structure(template):
     else:
         return generate_random_value_by_sample(template)
 
-# ========== File Utilities ==========
+# ========== File Handling ==========
 def unzip_to_temp(zip_bytes, extract_dir="/tmp/temp_raml"):
     if os.path.exists(extract_dir):
         shutil.rmtree(extract_dir)
@@ -82,6 +82,18 @@ def unzip_to_temp(zip_bytes, extract_dir="/tmp/temp_raml"):
 
     return extract_dir
 
+def extract_json_from_text(text):
+    """Extract the first valid JSON object or array from mixed text."""
+    start = min((i for i in (text.find('{'), text.find('[')) if i != -1), default=-1)
+    if start == -1:
+        return None
+    for end in range(len(text), start, -1):
+        try:
+            return json.loads(text[start:end])
+        except Exception:
+            continue
+    return None
+
 def find_first_valid_json_raml_file(base_dir):
     for root, _, files in os.walk(base_dir):
         for file in files:
@@ -89,11 +101,13 @@ def find_first_valid_json_raml_file(base_dir):
                 full_path = os.path.join(root, file)
                 try:
                     with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read().strip()
-                        json_obj = json.loads(content)
-                        logger.info(f"Valid JSON RAML file found: {full_path}")
-                        return json_obj
-                except Exception:
+                        content = f.read()
+                        json_candidate = extract_json_from_text(content)
+                        if isinstance(json_candidate, (dict, list)):
+                            logger.info(f"Valid JSON RAML file found: {full_path}")
+                            return json_candidate
+                except Exception as e:
+                    logger.warning(f"Failed to parse {file}: {e}")
                     continue
     raise FileNotFoundError("No valid RAML file with example JSON found.")
 
@@ -105,7 +119,6 @@ def lambda_handler(event, context):
         if 'body' not in event or not event.get('isBase64Encoded', False):
             raise ValueError("Missing or invalid file content.")
 
-        # Optional encryption handling
         encrypted = event.get("headers", {}).get("x-encrypted", "false").lower() == "true"
         aes_key = event.get("headers", {}).get("x-aes-key")
 
@@ -117,13 +130,8 @@ def lambda_handler(event, context):
             decrypted_str = decrypt(file_bytes.decode(), aes_key)
             file_bytes = decrypted_str.encode()
 
-        # Step 1: Unzip to /tmp
         extracted_dir = unzip_to_temp(file_bytes)
-
-        # Step 2: Search all .raml files for valid JSON content
         template_json = find_first_valid_json_raml_file(extracted_dir)
-
-        # Step 3: Generate test data
         generated_output = generate_random_structure(template_json)
 
         return {
