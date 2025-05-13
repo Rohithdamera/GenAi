@@ -6,13 +6,27 @@ import logging
 import random
 import string
 from base64 import b64decode
+from Crypto.Cipher import AES
 
-# Setup logger
+# ========== Logging ==========
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========== Utilities for Random Test Data ==========
+# ========== AES Decryption ==========
+def unpad(s):
+    return s[:-ord(s[-1:])]
 
+def decrypt(data, key):
+    try:
+        cipher = AES.new(b64decode(key), AES.MODE_ECB)
+        decrypted_data = cipher.decrypt(b64decode(data))
+        decrypted_data = unpad(decrypted_data)
+        return decrypted_data.decode()
+    except Exception as e:
+        logger.error(f"Error during decryption: {e}")
+        raise ValueError(f"Error during decryption: {e}")
+
+# ========== Utilities for Random Data ==========
 def random_datetime():
     return f"{random.randint(1,28):02}/{random.randint(1,12):02}/2025 {random.randint(0,23):02}:{random.randint(0,59):02}:{random.randint(0,59):02}"
 
@@ -53,8 +67,7 @@ def generate_random_structure(template):
     else:
         return generate_random_value_by_sample(template)
 
-# ========== RAML Extraction and Detection ==========
-
+# ========== File Utilities ==========
 def unzip_to_temp(zip_bytes, extract_dir="/tmp/temp_raml"):
     if os.path.exists(extract_dir):
         shutil.rmtree(extract_dir)
@@ -77,32 +90,41 @@ def find_json_raml_file(base_dir):
                 try:
                     with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
                         content = f.read().strip()
-                        # Only accept if it's valid JSON and not mixed RAML/YAML
                         json_obj = json.loads(content)
-                        return json_obj  # Return parsed JSON
+                        return json_obj  # Parsed JSON content
                 except Exception:
                     continue
     raise FileNotFoundError("No valid RAML file with example JSON found.")
 
 # ========== Lambda Handler ==========
-
 def lambda_handler(event, context):
     logger.info("Lambda function invoked.")
+
     try:
         if 'body' not in event or not event.get('isBase64Encoded', False):
-            raise ValueError("File content is missing or not base64-encoded.")
+            raise ValueError("Missing or invalid file content.")
 
-        # Step 1: Decode and unzip
-        zip_bytes = b64decode(event['body'])
-        extracted_dir = unzip_to_temp(zip_bytes)
+        # === Optional: Handle encrypted content if provided ===
+        encrypted = event.get("headers", {}).get("x-encrypted", "false").lower() == "true"
+        aes_key = event.get("headers", {}).get("x-aes-key")  # Optional AES key
 
-        # Step 2: Find the correct .raml file with pure JSON
+        file_bytes = b64decode(event["body"])
+
+        if encrypted:
+            if not aes_key:
+                raise ValueError("Missing AES key for decryption.")
+            decrypted_str = decrypt(file_bytes.decode(), aes_key)
+            file_bytes = decrypted_str.encode()
+
+        # === Step 1: Unzip to temp ===
+        extracted_dir = unzip_to_temp(file_bytes)
+
+        # === Step 2: Find JSON-only RAML file ===
         template_json = find_json_raml_file(extracted_dir)
 
-        # Step 3: Generate random test data using the template
+        # === Step 3: Generate output ===
         generated_output = generate_random_structure(template_json)
 
-        # Step 4: Return clean JSON response
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
