@@ -183,16 +183,18 @@ def lambda_handler(event, context):
         resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
 
         payloads = generate_test_payloads(resolved_raml)
+        pretty_output = json.dumps(payloads, indent=2)
 
         return {
             "statusCode": 200,
-            "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(payloads, indent=2)
+            "headers": {"Content-Type": "text/plain"},
+            "body": pretty_output
         }
 
     except Exception as e:
         logger.error(f"Error during Lambda execution: {e}")
         return {
             "statusCode": 500,
+            "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"error": str(e)})
         }
