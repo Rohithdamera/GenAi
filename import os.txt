@@ -27,8 +27,7 @@ def decrypt(data, key):
         logger.error(f"Error during decryption: {e}")
         raise ValueError(f"Error during decryption: {e}")
 
-# ========== Data Generation ==========
-
+# ========== Random Value Generation ==========
 def random_datetime():
     return f"{random.randint(1,28):02}/{random.randint(1,12):02}/2025 {random.randint(0,23):02}:{random.randint(0,59):02}:{random.randint(0,59):02}"
 
@@ -40,7 +39,7 @@ def random_string_like(value):
     if isinstance(value, str):
         if any(sep in value for sep in ['/', '-', ':']):
             return random_datetime()
-        elif len(value) == 36 or len(value) == 32:
+        elif len(value) in [32, 36]:
             return random_uuid()
         elif value.isdigit():
             return ''.join(random.choices(string.digits, k=len(value)))
@@ -65,11 +64,10 @@ def generate_random_structure(template):
     if isinstance(template, dict):
         return {k: generate_random_structure(v) for k, v in template.items()}
     elif isinstance(template, list):
-        return [generate_random_structure(item) for item in template]
+        return [generate_random_structure(template[0])] if template else []
     return generate_random_value_by_sample(template)
 
-# ========== RAML Unzipping and Parsing ==========
-
+# ========== Zip Extraction ==========
 def unzip_raml(zip_bytes, extract_dir="/tmp/temp_raml"):
     if os.path.exists(extract_dir):
         shutil.rmtree(extract_dir)
@@ -84,6 +82,7 @@ def unzip_raml(zip_bytes, extract_dir="/tmp/temp_raml"):
 
     return extract_dir
 
+# ========== Main RAML & JSON Structure ==========
 def find_main_raml_file(base_dir):
     for root, _, files in os.walk(base_dir):
         for file in files:
@@ -131,46 +130,20 @@ def resolve_includes_in_raml(file_path, root_dir):
 
     return "\n".join(resolved_lines)
 
-# ========== RAML Test Payload Generation ==========
-
-def extract_endpoints_from_raml(raml_content):
-    endpoints = []
-    for line in raml_content.split('\n'):
-        if line.strip().startswith('/'):
-            endpoints.append(line.strip())
-    return endpoints
-
-def extract_fields_for_endpoint(endpoint, raml_content):
-    fields = {}
-    lines = raml_content.split('\n')
-    capture = False
-    for line in lines:
-        if line.strip() == endpoint:
-            capture = True
-        elif capture and line.startswith('/'):
-            break
-        elif capture and ':' in line:
-            parts = line.strip().split(':')
-            if len(parts) == 2:
-                fields[parts[0].strip()] = parts[1].strip() or "string"
-    return fields
-
-def generate_randomized_payload(field_template):
-    return {k: generate_random_value_by_sample(v) for k, v in field_template.items()}
-
-def generate_test_payloads(raml_content):
-    endpoints = extract_endpoints_from_raml(raml_content)
-    result = {}
-    for endpoint in endpoints:
-        template = extract_fields_for_endpoint(endpoint, raml_content)
-        result[endpoint] = [
-            generate_randomized_payload(template),
-            generate_randomized_payload(template)
-        ]
-    return result
+# ========== Reference JSON Discovery ==========
+def find_reference_json(base_dir):
+    for root, _, files in os.walk(base_dir):
+        for file in files:
+            if file.endswith(".json"):
+                json_path = os.path.join(root, file)
+                try:
+                    with open(json_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        return json.load(f)
+                except Exception as e:
+                    logger.warning(f"Skipping non-JSON file: {file}")
+    raise FileNotFoundError("No valid JSON reference structure found.")
 
 # ========== Lambda Handler ==========
-
 def lambda_handler(event, context):
     logger.info("Lambda function invoked.")
     try:
@@ -179,22 +152,27 @@ def lambda_handler(event, context):
 
         zip_bytes = b64decode(event['body'])
         extracted_dir = unzip_raml(zip_bytes)
-        main_raml_file = find_main_raml_file(extracted_dir)
-        resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
 
-        payloads = generate_test_payloads(resolved_raml)
-        pretty_output = json.dumps(payloads, indent=2)
+        # Optional: Ensure RAML resolution (for debugging)
+        try:
+            main_raml_file = find_main_raml_file(extracted_dir)
+            resolve_includes_in_raml(main_raml_file, extracted_dir)
+        except Exception as e:
+            logger.warning("RAML parsing failed or skipped.")
+
+        # Generate output using reference JSON
+        reference_json = find_reference_json(extracted_dir)
+        result = [generate_random_structure(reference_json) for _ in range(2)]
 
         return {
             "statusCode": 200,
-            "headers": {"Content-Type": "text/plain"},
-            "body": pretty_output
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps(result, indent=2)
         }
 
     except Exception as e:
         logger.error(f"Error during Lambda execution: {e}")
         return {
             "statusCode": 500,
-            "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"error": str(e)})
         }
