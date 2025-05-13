@@ -12,9 +12,10 @@ from Crypto.Cipher import AES
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========== AES Decryption ==========
-def unpad(s):
-    return s[:-ord(s[-1:])]
+# ========== Decryption ==========
+def unpad(data):
+    padding_length = data[-1]
+    return data[:-padding_length]
 
 def decrypt(data, key):
     try:
@@ -55,20 +56,22 @@ def generate_random_value_by_sample(sample_value):
         return random.choice([True, False])
     elif isinstance(sample_value, str):
         return random_string_like(sample_value)
-    elif sample_value is None:
-        return None
+    elif isinstance(sample_value, list):
+        return [generate_random_structure(item) for item in sample_value]
+    elif isinstance(sample_value, dict):
+        return generate_random_structure(sample_value)
     return sample_value
 
 def generate_random_structure(template):
     if isinstance(template, dict):
         return {k: generate_random_structure(v) for k, v in template.items()}
     elif isinstance(template, list):
-        return [generate_random_structure(item) for item in template]
+        return [generate_random_structure(template[0]) if template else []]
     else:
         return generate_random_value_by_sample(template)
 
 # ========== File Handling ==========
-def unzip_to_temp(zip_bytes, extract_dir="/tmp/temp_raml"):
+def unzip_raml(zip_bytes, extract_dir="/tmp/temp_raml"):
     if os.path.exists(extract_dir):
         shutil.rmtree(extract_dir)
     os.makedirs(extract_dir, exist_ok=True)
@@ -82,66 +85,80 @@ def unzip_to_temp(zip_bytes, extract_dir="/tmp/temp_raml"):
 
     return extract_dir
 
-def extract_json_from_text(text):
-    """Extract the first valid JSON object or array from mixed text."""
-    start = min((i for i in (text.find('{'), text.find('[')) if i != -1), default=-1)
-    if start == -1:
-        return None
-    for end in range(len(text), start, -1):
-        try:
-            return json.loads(text[start:end])
-        except Exception:
-            continue
-    return None
-
-def find_first_valid_json_raml_file(base_dir):
+def find_main_raml_file(base_dir):
     for root, _, files in os.walk(base_dir):
         for file in files:
             if file.endswith(".raml"):
                 full_path = os.path.join(root, file)
-                try:
-                    with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read()
-                        json_candidate = extract_json_from_text(content)
-                        if isinstance(json_candidate, (dict, list)):
-                            logger.info(f"Valid JSON RAML file found: {full_path}")
-                            return json_candidate
-                except Exception as e:
-                    logger.warning(f"Failed to parse {file}: {e}")
-                    continue
-    raise FileNotFoundError("No valid RAML file with example JSON found.")
+                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                    if "#%RAML 1.0" in content:
+                        return full_path
+    raise FileNotFoundError("Main RAML file not found.")
 
-# ========== Lambda Handler ==========
+def extract_first_include_file_path(raml_file_path):
+    with open(raml_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            if "!include" in line:
+                parts = line.split("!include")
+                if len(parts) == 2:
+                    include_path = parts[1].strip()
+                    return include_path
+    raise ValueError("No !include reference found in RAML.")
+
+def resolve_include_path(include_path, root_dir, current_dir):
+    for base in [current_dir, root_dir, os.path.join(root_dir, 'examples', 'request')]:
+        full_path = os.path.normpath(os.path.join(base, include_path))
+        if os.path.isfile(full_path):
+            return full_path
+    for root, _, files in os.walk(root_dir):
+        for f in files:
+            if f == os.path.basename(include_path):
+                return os.path.join(root, f)
+    return None
+
+def extract_json_structure_from_include(raml_file_path, root_dir):
+    current_dir = os.path.dirname(raml_file_path)
+    include_path = extract_first_include_file_path(raml_file_path)
+    include_full_path = resolve_include_path(include_path, root_dir, current_dir)
+
+    if not include_full_path or not os.path.exists(include_full_path):
+        raise FileNotFoundError(f"Included file not found: {include_path}")
+
+    with open(include_full_path, 'r', encoding='utf-8', errors='ignore') as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            raise ValueError(f"Included file {include_path} is not a valid JSON.")
+
+# ========== Lambda Entry ==========
 def lambda_handler(event, context):
     logger.info("Lambda function invoked.")
 
     try:
         if 'body' not in event or not event.get('isBase64Encoded', False):
-            raise ValueError("Missing or invalid file content.")
+            raise ValueError("File content is missing or not base64-encoded.")
 
-        encrypted = event.get("headers", {}).get("x-encrypted", "false").lower() == "true"
-        aes_key = event.get("headers", {}).get("x-aes-key")
+        zip_bytes = b64decode(event['body'])
+        extracted_dir = unzip_raml(zip_bytes)
 
-        file_bytes = b64decode(event["body"])
+        main_raml_file = find_main_raml_file(extracted_dir)
+        json_template = extract_json_structure_from_include(main_raml_file, extracted_dir)
 
-        if encrypted:
-            if not aes_key:
-                raise ValueError("Missing AES key for decryption.")
-            decrypted_str = decrypt(file_bytes.decode(), aes_key)
-            file_bytes = decrypted_str.encode()
-
-        extracted_dir = unzip_to_temp(file_bytes)
-        template_json = find_first_valid_json_raml_file(extracted_dir)
-        generated_output = generate_random_structure(template_json)
+        # Generate 2 variations
+        payload = [
+            generate_random_structure(json_template),
+            generate_random_structure(json_template)
+        ]
 
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(generated_output, indent=2)
+            "body": json.dumps(payload, indent=2)
         }
 
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.error(f"Error during Lambda execution: {e}")
         return {
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
