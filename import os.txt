@@ -26,7 +26,7 @@ def decrypt(data, key):
         logger.error(f"Error during decryption: {e}")
         raise ValueError(f"Error during decryption: {e}")
 
-# ========== Utilities for Random Data ==========
+# ========== Random Data Generation ==========
 def random_datetime():
     return f"{random.randint(1,28):02}/{random.randint(1,12):02}/2025 {random.randint(0,23):02}:{random.randint(0,59):02}:{random.randint(0,59):02}"
 
@@ -82,7 +82,7 @@ def unzip_to_temp(zip_bytes, extract_dir="/tmp/temp_raml"):
 
     return extract_dir
 
-def find_json_raml_file(base_dir):
+def find_first_valid_json_raml_file(base_dir):
     for root, _, files in os.walk(base_dir):
         for file in files:
             if file.endswith(".raml"):
@@ -91,7 +91,8 @@ def find_json_raml_file(base_dir):
                     with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
                         content = f.read().strip()
                         json_obj = json.loads(content)
-                        return json_obj  # Parsed JSON content
+                        logger.info(f"Valid JSON RAML file found: {full_path}")
+                        return json_obj
                 except Exception:
                     continue
     raise FileNotFoundError("No valid RAML file with example JSON found.")
@@ -104,9 +105,9 @@ def lambda_handler(event, context):
         if 'body' not in event or not event.get('isBase64Encoded', False):
             raise ValueError("Missing or invalid file content.")
 
-        # === Optional: Handle encrypted content if provided ===
+        # Optional encryption handling
         encrypted = event.get("headers", {}).get("x-encrypted", "false").lower() == "true"
-        aes_key = event.get("headers", {}).get("x-aes-key")  # Optional AES key
+        aes_key = event.get("headers", {}).get("x-aes-key")
 
         file_bytes = b64decode(event["body"])
 
@@ -116,13 +117,13 @@ def lambda_handler(event, context):
             decrypted_str = decrypt(file_bytes.decode(), aes_key)
             file_bytes = decrypted_str.encode()
 
-        # === Step 1: Unzip to temp ===
+        # Step 1: Unzip to /tmp
         extracted_dir = unzip_to_temp(file_bytes)
 
-        # === Step 2: Find JSON-only RAML file ===
-        template_json = find_json_raml_file(extracted_dir)
+        # Step 2: Search all .raml files for valid JSON content
+        template_json = find_first_valid_json_raml_file(extracted_dir)
 
-        # === Step 3: Generate output ===
+        # Step 3: Generate test data
         generated_output = generate_random_structure(template_json)
 
         return {
@@ -132,7 +133,7 @@ def lambda_handler(event, context):
         }
 
     except Exception as e:
-        logger.error(f"Error during Lambda execution: {e}")
+        logger.error(f"Error: {e}")
         return {
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
