@@ -85,7 +85,7 @@ def unzip_raml(zip_bytes, extract_dir="/tmp/temp_raml"):
 def find_main_raml_file(base_dir):
     for root, _, files in os.walk(base_dir):
         for file in files:
-            if file.endswith(".rml"):
+            if file.endswith(".raml"):
                 full_path = os.path.join(root, file)
                 with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
                     if "#%RAML 1.0" in f.readline():
@@ -166,77 +166,48 @@ def generate_test_payloads(raml_content):
         ]
     return result
 
-# ========== Event Header Extraction ==========
-def get_model_instance_name(event):
-    """Retrieve model instance name from headers or generate a random one."""
-    return event.get('headers', {}).get('model_instance_name', 'chatbot_' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=6)))
-
-def get_count_from_headers(event):
-    """Retrieve the count from headers or default to 1."""
-    try:
-        return max(1, int(event.get('headers', {}).get('count', '1')))
-    except Exception:
-        return 1
-
+# ========== Lambda Handler ==========
 def build_dynamic_prompt(model_instance_name):
     """Build a dynamic prompt based on the model instance name."""
     return (
         f"You are an expert RAML analyzer. Using the model instance '{model_instance_name}', "
-        "analyze the provided RAML content. Resolve all includes such as traits, resource types, and fragments. "
-        "Then generate realistic randomized test payloads for each endpoint while preserving the field names, "
-        "structure, and data types. Ensure the output is in clean JSON format without explanations."
+        "analyze the provided RAML content, focusing solely on POST methods. Resolve all references to "
+        "traits, resource types, and fragments. Identify and extract any required data from subfolder references. "
+        "Then generate realistic, randomized test payloads for each POST endpoint while strictly preserving the field names, "
+        "structure, and data types. Ensure that the output is clean, valid JSON without extra metadata or explanations, "
+        "and matches the exact structure from the reference `.rml` files."
     )
 
-# ========== Lambda Handler ==========
 def lambda_handler(event, context):
-    """Main Lambda function handler."""
     logger.info("Lambda function invoked.")
     try:
-        # Retrieve and decode file content (base64 or plain text)
-        body = event.get('body')
-        if not body:
-            raise ValueError("Missing file content in request.")
+        if 'body' not in event or not event.get('isBase64Encoded', False):
+            raise ValueError("File content is missing or not base64-encoded.")
 
-        if event.get('isBase64Encoded', False):
-            raw_content = base64.b64decode(body).decode('utf-8', errors='replace')
-        else:
-            raw_content = body
-
-        # Unzip and parse RAML files
-        zip_bytes = b64decode(raw_content)
+        zip_bytes = b64decode(event['body'])
         extracted_dir = unzip_raml(zip_bytes)
         main_raml_file = find_main_raml_file(extracted_dir)
         resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
 
-        # Extract POST endpoints and generate test data
-        post_endpoints = extract_endpoints_from_raml(resolved_raml)
-        post_payloads = {}
-        for endpoint in post_endpoints:
-            if 'POST' in endpoint:  # Only process POST endpoints
-                template = extract_fields_for_endpoint(endpoint, resolved_raml)
-                post_payloads[endpoint] = [
-                    generate_randomized_payload(template),
-                    generate_randomized_payload(template)
-                ]
+        # Get model_instance_name from request header
+        model_instance_name = event.get("headers", {}).get("model_instance_name", "default_instance")
 
-        # Extract model instance name and count from headers
-        model_instance_name = get_model_instance_name(event)
-        count = get_count_from_headers(event)
-        prompt = build_dynamic_prompt(model_instance_name)
+        # Build dynamic prompt
+        dynamic_prompt = build_dynamic_prompt(model_instance_name)
+        logger.info(f"Dynamic prompt built: {dynamic_prompt}")
 
-        logger.info(f"Model instance: {model_instance_name}, Dataset count: {count}")
-        logger.debug(f"Prompt: {prompt}")
+        # Generate test payloads based on the RAML content
+        payloads = generate_test_payloads(resolved_raml)
 
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"post_payloads": post_payloads})
+            "body": json.dumps(payloads, indent=2)
         }
 
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.error(f"Error during Lambda execution: {e}")
         return {
             "statusCode": 500,
-            "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"error": str(e)})
         }
