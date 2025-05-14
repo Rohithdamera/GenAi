@@ -1,24 +1,23 @@
-
+import os
+import shutil
+import zipfile
 import json
-import base64
 import logging
 import random
 import string
 from base64 import b64decode
 from Crypto.Cipher import AES
 
-# Initialize logger
+# Setup logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Utility Functions
+# ========== Decryption (if needed) ==========
 def unpad(data):
-    """Remove padding from decrypted data."""
     padding_length = data[-1]
     return data[:-padding_length]
 
 def decrypt(data, key):
-    """Decrypt data using AES encryption."""
     try:
         cipher = AES.new(b64decode(key), AES.MODE_ECB)
         decrypted_data = cipher.decrypt(b64decode(data))
@@ -28,35 +27,15 @@ def decrypt(data, key):
         logger.error(f"Error during decryption: {e}")
         raise ValueError(f"Error during decryption: {e}")
 
-def detect_and_extract_json(content):
-    """Try to parse content as JSON, handle edge cases."""
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        pass
-
-    json_start = content.find('{')
-    if json_start == -1:
-        raise ValueError("No JSON object found in file content.")
-
-    json_text = content[json_start:]
-    try:
-        return json.loads(json_text)
-    except json.JSONDecodeError:
-        raise ValueError("Embedded JSON block could not be parsed.")
-
-# Data Generation Helpers
+# ========== Data Generation ==========
 def random_datetime():
-    """Generate random datetime string."""
     return f"{random.randint(1,28):02}/{random.randint(1,12):02}/2025 {random.randint(0,23):02}:{random.randint(0,59):02}:{random.randint(0,59):02}"
 
 def random_uuid():
-    """Generate random UUID."""
     sections = [8, 4, 4, 4, 12]
     return '-'.join(''.join(random.choices(string.hexdigits.lower(), k=s)) for s in sections)
 
 def random_string_like(value):
-    """Generate random string matching the structure of the given value."""
     if isinstance(value, str):
         if any(sep in value for sep in ['/', '-', ':']):
             return random_datetime()
@@ -69,7 +48,6 @@ def random_string_like(value):
     return value
 
 def generate_random_value_by_sample(sample_value):
-    """Generate a random value based on the sample's type."""
     if isinstance(sample_value, int):
         return random.randint(1000, 9999)
     elif isinstance(sample_value, float):
@@ -83,14 +61,112 @@ def generate_random_value_by_sample(sample_value):
     return sample_value
 
 def generate_random_structure(template):
-    """Recursively generate a random structure based on the input template."""
     if isinstance(template, dict):
         return {k: generate_random_structure(v) for k, v in template.items()}
     elif isinstance(template, list):
         return [generate_random_structure(item) for item in template]
     return generate_random_value_by_sample(template)
 
-# Event Header Extraction
+# ========== RAML Unzipping and Parsing ==========
+def unzip_raml(zip_bytes, extract_dir="/tmp/temp_raml"):
+    if os.path.exists(extract_dir):
+        shutil.rmtree(extract_dir)
+    os.makedirs(extract_dir, exist_ok=True)
+
+    zip_path = "/tmp/uploaded.zip"
+    with open(zip_path, "wb") as f:
+        f.write(zip_bytes)
+
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_dir)
+
+    return extract_dir
+
+def find_main_raml_file(base_dir):
+    for root, _, files in os.walk(base_dir):
+        for file in files:
+            if file.endswith(".rml"):
+                full_path = os.path.join(root, file)
+                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    if "#%RAML 1.0" in f.readline():
+                        return full_path
+    raise FileNotFoundError("Main RAML file not found.")
+
+def resolve_include_path(include_path, root_dir, current_dir):
+    for base in [current_dir, root_dir, os.path.join(root_dir, 'examples', 'request')]:
+        full_path = os.path.normpath(os.path.join(base, include_path))
+        if os.path.isfile(full_path):
+            return full_path
+
+    for search_dir in [os.path.join(root_dir, 'examples', 'request'), root_dir]:
+        for root, _, files in os.walk(search_dir):
+            for f in files:
+                if f == os.path.basename(include_path):
+                    return os.path.join(root, f)
+    return None
+
+def resolve_includes_in_raml(file_path, root_dir):
+    resolved_lines = []
+    current_dir = os.path.dirname(file_path)
+
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
+        for line in file:
+            if "!include" in line:
+                parts = line.strip().split("!include")
+                prefix = parts[0].strip()
+                include_path = parts[1].strip()
+                include_file = resolve_include_path(include_path, root_dir, current_dir)
+
+                if include_file and os.path.exists(include_file):
+                    with open(include_file, 'r', encoding='utf-8', errors='ignore') as inc_file:
+                        resolved_lines.append(f"{prefix} |\n")
+                        for inc_line in inc_file.read().splitlines():
+                            resolved_lines.append(f"  {inc_line}")
+                else:
+                    resolved_lines.append(f"{line.strip()}  # Include not found")
+            else:
+                resolved_lines.append(line.rstrip())
+
+    return "\n".join(resolved_lines)
+
+# ========== RAML Test Payload Generation ==========
+def extract_endpoints_from_raml(raml_content):
+    endpoints = []
+    for line in raml_content.split('\n'):
+        if line.strip().startswith('/'):
+            endpoints.append(line.strip())
+    return endpoints
+
+def extract_fields_for_endpoint(endpoint, raml_content):
+    fields = {}
+    lines = raml_content.split('\n')
+    capture = False
+    for line in lines:
+        if line.strip() == endpoint:
+            capture = True
+        elif capture and line.startswith('/'):
+            break
+        elif capture and ':' in line:
+            parts = line.strip().split(':')
+            if len(parts) == 2:
+                fields[parts[0].strip()] = parts[1].strip() or "string"
+    return fields
+
+def generate_randomized_payload(field_template):
+    return {k: generate_random_value_by_sample(v) for k, v in field_template.items()}
+
+def generate_test_payloads(raml_content):
+    endpoints = extract_endpoints_from_raml(raml_content)
+    result = {}
+    for endpoint in endpoints:
+        template = extract_fields_for_endpoint(endpoint, raml_content)
+        result[endpoint] = [
+            generate_randomized_payload(template),
+            generate_randomized_payload(template)
+        ]
+    return result
+
+# ========== Event Header Extraction ==========
 def get_model_instance_name(event):
     """Retrieve model instance name from headers or generate a random one."""
     return event.get('headers', {}).get('model_instance_name', 'chatbot_' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=6)))
@@ -111,7 +187,7 @@ def build_dynamic_prompt(model_instance_name):
         "structure, and data types. Ensure the output is in clean JSON format without explanations."
     )
 
-# Lambda Handler
+# ========== Lambda Handler ==========
 def lambda_handler(event, context):
     """Main Lambda function handler."""
     logger.info("Lambda function invoked.")
@@ -126,8 +202,22 @@ def lambda_handler(event, context):
         else:
             raw_content = body
 
-        # Parse and extract JSON data from the content
-        original_data = detect_and_extract_json(raw_content)
+        # Unzip and parse RAML files
+        zip_bytes = b64decode(raw_content)
+        extracted_dir = unzip_raml(zip_bytes)
+        main_raml_file = find_main_raml_file(extracted_dir)
+        resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
+
+        # Extract POST endpoints and generate test data
+        post_endpoints = extract_endpoints_from_raml(resolved_raml)
+        post_payloads = {}
+        for endpoint in post_endpoints:
+            if 'POST' in endpoint:  # Only process POST endpoints
+                template = extract_fields_for_endpoint(endpoint, resolved_raml)
+                post_payloads[endpoint] = [
+                    generate_randomized_payload(template),
+                    generate_randomized_payload(template)
+                ]
 
         # Extract model instance name and count from headers
         model_instance_name = get_model_instance_name(event)
@@ -137,13 +227,10 @@ def lambda_handler(event, context):
         logger.info(f"Model instance: {model_instance_name}, Dataset count: {count}")
         logger.debug(f"Prompt: {prompt}")
 
-        # Generate the random datasets
-        datasets = [generate_random_structure(original_data) for _ in range(count)]
-
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"datasets": datasets})
+            "body": json.dumps({"post_payloads": post_payloads})
         }
 
     except Exception as e:
