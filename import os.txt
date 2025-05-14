@@ -6,196 +6,150 @@ import logging
 import random
 import string
 from base64 import b64decode
-from Crypto.Cipher import AES
 
 # Setup logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def unpad(data):
-    padding_length = data[-1]
-    return data[:-padding_length]
+# ========== Data Generation ==========
 
-def decrypt(data, key):
-    try:
-        cipher = AES.new(b64decode(key), AES.MODE_ECB)
-        decrypted_data = cipher.decrypt(b64decode(data))
-        decrypted_data = unpad(decrypted_data)
-        return decrypted_data.decode()
-    except Exception as e:
-        logger.error(f"Error during decryption: {e}")
-        raise ValueError(f"Error during decryption: {e}")
-
-def random_datetime():
-    return f"{random.randint(1,28):02}/{random.randint(1,12):02}/2025 {random.randint(0,23):02}:{random.randint(0,59):02}:{random.randint(0,59):02}"
-
-def random_uuid():
-    sections = [8, 4, 4, 4, 12]
-    return '-'.join(''.join(random.choices(string.hexdigits.lower(), k=s)) for s in sections)
-
-def random_string_like(value):
-    if isinstance(value, str):
-        if any(sep in value for sep in ['/', '-', ':']):
-            return random_datetime()
-        elif len(value) == 36 or len(value) == 32:
-            return random_uuid()
-        elif value.isdigit():
-            return ''.join(random.choices(string.digits, k=len(value)))
-        else:
-            return ''.join(random.choices(string.ascii_letters + string.digits, k=len(value)))
-    return value
-
-def generate_random_value_by_sample(sample_value):
-    if isinstance(sample_value, int):
+def random_value(template):
+    if isinstance(template, str):
+        if '/' in template or ':' in template:
+            return f"{random.randint(1, 28):02}/{random.randint(1, 12):02}/2025 {random.randint(0, 23):02}:{random.randint(0, 59):02}:{random.randint(0, 59):02}"
+        elif len(template) in (32, 36):
+            return ''.join(random.choices(string.hexdigits.lower(), k=36))
+        elif template.isdigit():
+            return ''.join(random.choices(string.digits, k=len(template)))
+        return ''.join(random.choices(string.ascii_letters + string.digits, k=len(template)))
+    elif isinstance(template, int):
         return random.randint(1000, 9999)
-    elif isinstance(sample_value, float):
-        return round(random.uniform(1.0, 10000.0), 2)
-    elif isinstance(sample_value, bool):
+    elif isinstance(template, float):
+        return round(random.uniform(1.0, 9999.0), 2)
+    elif isinstance(template, bool):
         return random.choice([True, False])
-    elif isinstance(sample_value, str):
-        return random_string_like(sample_value)
-    elif sample_value is None:
-        return None
-    return sample_value
-
-def generate_random_structure(template):
-    if isinstance(template, dict):
-        return {k: generate_random_structure(v) for k, v in template.items()}
     elif isinstance(template, list):
-        return [generate_random_structure(item) for item in template]
-    return generate_random_value_by_sample(template)
+        return [random_value(template[0]) if template else []]
+    elif isinstance(template, dict):
+        return {k: random_value(v) for k, v in template.items()}
+    return None
 
-def unzip_raml(zip_bytes, extract_dir="/tmp/temp_raml"):
+# ========== ZIP Extraction ==========
+
+def unzip_to_tmp(zip_bytes, extract_dir="/tmp/unzipped_raml"):
     if os.path.exists(extract_dir):
         shutil.rmtree(extract_dir)
     os.makedirs(extract_dir, exist_ok=True)
-
-    zip_path = "/tmp/uploaded.zip"
+    zip_path = "/tmp/input.zip"
     with open(zip_path, "wb") as f:
         f.write(zip_bytes)
-
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(extract_dir)
-
     return extract_dir
 
-def find_main_raml_file(base_dir):
-    for root, _, files in os.walk(base_dir):
-        for file in files:
-            if file.endswith(".raml"):
-                full_path = os.path.join(root, file)
-                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    if "#%RAML 1.0" in f.readline():
-                        return full_path
-    raise FileNotFoundError("Main RAML file not found.")
+# ========== Main RML File Detection ==========
 
-def resolve_include_path(include_path, root_dir, current_dir):
-    for base in [current_dir, root_dir, os.path.join(root_dir, 'examples', 'request')]:
-        full_path = os.path.normpath(os.path.join(base, include_path))
-        if os.path.isfile(full_path):
-            return full_path
-
-    for search_dir in [os.path.join(root_dir, 'examples', 'request'), root_dir]:
-        for root, _, files in os.walk(search_dir):
-            for f in files:
-                if f == os.path.basename(include_path):
-                    return os.path.join(root, f)
-    return None
-
-def extract_post_endpoints_with_examples(raml_path, root_dir):
-    endpoints = {}
-    current_endpoint = None
-    inside_post = False
-    current_dir = os.path.dirname(raml_path)
-
-    with open(raml_path, 'r', encoding='utf-8', errors='ignore') as file:
-        lines = file.readlines()
-
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith('/') and ':' not in stripped:
-            current_endpoint = stripped
-            inside_post = False
-        elif stripped.startswith('post:'):
-            inside_post = True
-        elif inside_post and 'body:' in stripped:
-            # Check for example or !include JSON
-            j = i
-            while j < len(lines):
-                if '!include' in lines[j]:
-                    parts = lines[j].split("!include")
-                    include_path = parts[1].strip()
-                    include_file = resolve_include_path(include_path, root_dir, current_dir)
-                    if include_file:
-                        try:
-                            with open(include_file, 'r', encoding='utf-8', errors='ignore') as inc_file:
-                                content = inc_file.read()
-                                json_obj = json.loads(content)
-                                endpoints[current_endpoint] = json_obj
-                        except Exception as e:
-                            logger.warning(f"Failed to parse JSON from {include_file}: {e}")
-                    break
-                j += 1
-
-    return endpoints
-
-def find_reference_rml_json(base_dir):
+def find_main_rml_file(base_dir):
     for root, _, files in os.walk(base_dir):
         for file in files:
             if file.endswith(".rml"):
-                file_path = os.path.join(root, file)
-                try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read()
-                        json_obj = json.loads(content)
-                        return json_obj
-                except Exception:
-                    continue
+                full_path = os.path.join(root, file)
+                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    header = f.readline()
+                    if "#%RAML 1.0" in header:
+                        return full_path
+    raise FileNotFoundError("Main .rml file not found.")
+
+# ========== Extract POST Paths ==========
+
+def extract_post_paths(rml_content):
+    post_paths = []
+    lines = rml_content.splitlines()
+    current_path = None
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('/'):
+            current_path = stripped
+        elif stripped.lower().startswith('post') and current_path:
+            post_paths.append(current_path)
+    return post_paths
+
+# ========== Find Reference RML Files ==========
+
+def find_reference_rml_files(base_dir):
+    rml_files = []
+    for root, _, files in os.walk(base_dir):
+        for file in files:
+            if file.endswith(".rml"):
+                rml_files.append(os.path.join(root, file))
+    return rml_files
+
+# ========== Extract JSON from RML ==========
+
+def extract_json_structure(file_path):
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        content = f.read()
+
+    # Try to find a JSON object in the file
+    try:
+        first_brace = content.index('{')
+        last_brace = content.rindex('}')
+        json_text = content[first_brace:last_brace + 1]
+        return json.loads(json_text)
+    except Exception as e:
+        logger.warning(f"JSON structure not found in: {file_path}")
+        return None
+
+# ========== Match Reference to POST Path ==========
+
+def match_reference_to_post(post_path, reference_files):
+    for ref_file in reference_files:
+        if post_path.strip("/").lower() in ref_file.lower().replace("\\", "/"):
+            json_data = extract_json_structure(ref_file)
+            if json_data:
+                return json_data
     return None
 
+# ========== Lambda Handler ==========
+
 def lambda_handler(event, context):
-    logger.info("Lambda function invoked.")
+    logger.info("Lambda function started.")
     try:
         if 'body' not in event or not event.get('isBase64Encoded', False):
-            raise ValueError("File content is missing or not base64-encoded.")
+            raise ValueError("Missing or invalid input zip file.")
 
         zip_bytes = b64decode(event['body'])
-        extracted_dir = unzip_raml(zip_bytes)
-        main_raml = find_main_raml_file(extracted_dir)
+        base_dir = unzip_to_tmp(zip_bytes)
 
-        endpoint_examples = extract_post_endpoints_with_examples(main_raml, extracted_dir)
+        main_rml_path = find_main_rml_file(base_dir)
+        with open(main_rml_path, 'r', encoding='utf-8', errors='ignore') as f:
+            main_rml_content = f.read()
 
-        # If no examples in RAML, try finding a standalone .rml file
-        if not endpoint_examples:
-            reference_json = find_reference_rml_json(extracted_dir)
-            if reference_json:
-                test_data = {
-                    "reference_rml_payload": [
-                        generate_random_structure(reference_json),
-                        generate_random_structure(reference_json)
-                    ]
-                }
-                return {
-                    "statusCode": 200,
-                    "headers": {"Content-Type": "application/json"},
-                    "body": json.dumps(test_data, indent=2)
-                }
+        post_paths = extract_post_paths(main_rml_content)
+        logger.info(f"POST endpoints found: {post_paths}")
 
-        test_data = {}
-        for endpoint, example_template in endpoint_examples.items():
-            test_data[endpoint] = [
-                generate_random_structure(example_template),
-                generate_random_structure(example_template)
-            ]
+        reference_files = find_reference_rml_files(base_dir)
+        logger.info(f"Reference RML files found: {len(reference_files)}")
+
+        result = {}
+        for post_path in post_paths:
+            structure = match_reference_to_post(post_path, reference_files)
+            if structure:
+                result[post_path] = [
+                    random_value(structure),
+                    random_value(structure)
+                ]
+            else:
+                logger.warning(f"No matching reference file for {post_path}")
 
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(test_data, indent=2)
+            "body": json.dumps(result, indent=2)
         }
 
     except Exception as e:
-        logger.error(f"Error during Lambda execution: {e}")
+        logger.error(f"Lambda execution failed: {e}")
         return {
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
