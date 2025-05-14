@@ -1,156 +1,155 @@
-import os
-import shutil
-import zipfile
+
 import json
+import base64
 import logging
 import random
 import string
 from base64 import b64decode
+from Crypto.Cipher import AES
 
-# Setup logger
+# Initialize logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========== Data Generation ==========
+# Utility Functions
+def unpad(data):
+    """Remove padding from decrypted data."""
+    padding_length = data[-1]
+    return data[:-padding_length]
 
-def random_value(template):
-    if isinstance(template, str):
-        if '/' in template or ':' in template:
-            return f"{random.randint(1, 28):02}/{random.randint(1, 12):02}/2025 {random.randint(0, 23):02}:{random.randint(0, 59):02}:{random.randint(0, 59):02}"
-        elif len(template) in (32, 36):
-            return ''.join(random.choices(string.hexdigits.lower(), k=36))
-        elif template.isdigit():
-            return ''.join(random.choices(string.digits, k=len(template)))
-        return ''.join(random.choices(string.ascii_letters + string.digits, k=len(template)))
-    elif isinstance(template, int):
-        return random.randint(1000, 9999)
-    elif isinstance(template, float):
-        return round(random.uniform(1.0, 9999.0), 2)
-    elif isinstance(template, bool):
-        return random.choice([True, False])
-    elif isinstance(template, list):
-        return [random_value(template[0]) if template else []]
-    elif isinstance(template, dict):
-        return {k: random_value(v) for k, v in template.items()}
-    return None
-
-# ========== ZIP Extraction ==========
-
-def unzip_to_tmp(zip_bytes, extract_dir="/tmp/unzipped_raml"):
-    if os.path.exists(extract_dir):
-        shutil.rmtree(extract_dir)
-    os.makedirs(extract_dir, exist_ok=True)
-    zip_path = "/tmp/input.zip"
-    with open(zip_path, "wb") as f:
-        f.write(zip_bytes)
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(extract_dir)
-    return extract_dir
-
-# ========== Main RML File Detection ==========
-
-def find_main_rml_file(base_dir):
-    for root, _, files in os.walk(base_dir):
-        for file in files:
-            if file.endswith(".rml"):
-                full_path = os.path.join(root, file)
-                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    header = f.readline()
-                    if "#%RAML 1.0" in header:
-                        return full_path
-    raise FileNotFoundError("Main .rml file not found.")
-
-# ========== Extract POST Paths ==========
-
-def extract_post_paths(rml_content):
-    post_paths = []
-    lines = rml_content.splitlines()
-    current_path = None
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith('/'):
-            current_path = stripped
-        elif stripped.lower().startswith('post') and current_path:
-            post_paths.append(current_path)
-    return post_paths
-
-# ========== Find Reference RML Files ==========
-
-def find_reference_rml_files(base_dir):
-    rml_files = []
-    for root, _, files in os.walk(base_dir):
-        for file in files:
-            if file.endswith(".rml"):
-                rml_files.append(os.path.join(root, file))
-    return rml_files
-
-# ========== Extract JSON from RML ==========
-
-def extract_json_structure(file_path):
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        content = f.read()
-
-    # Try to find a JSON object in the file
+def decrypt(data, key):
+    """Decrypt data using AES encryption."""
     try:
-        first_brace = content.index('{')
-        last_brace = content.rindex('}')
-        json_text = content[first_brace:last_brace + 1]
-        return json.loads(json_text)
+        cipher = AES.new(b64decode(key), AES.MODE_ECB)
+        decrypted_data = cipher.decrypt(b64decode(data))
+        decrypted_data = unpad(decrypted_data)
+        return decrypted_data.decode()
     except Exception as e:
-        logger.warning(f"JSON structure not found in: {file_path}")
-        return None
+        logger.error(f"Error during decryption: {e}")
+        raise ValueError(f"Error during decryption: {e}")
 
-# ========== Match Reference to POST Path ==========
-
-def match_reference_to_post(post_path, reference_files):
-    for ref_file in reference_files:
-        if post_path.strip("/").lower() in ref_file.lower().replace("\\", "/"):
-            json_data = extract_json_structure(ref_file)
-            if json_data:
-                return json_data
-    return None
-
-# ========== Lambda Handler ==========
-
-def lambda_handler(event, context):
-    logger.info("Lambda function started.")
+def detect_and_extract_json(content):
+    """Try to parse content as JSON, handle edge cases."""
     try:
-        if 'body' not in event or not event.get('isBase64Encoded', False):
-            raise ValueError("Missing or invalid input zip file.")
+        return json.loads(content)
+    except json.JSONDecodeError:
+        pass
 
-        zip_bytes = b64decode(event['body'])
-        base_dir = unzip_to_tmp(zip_bytes)
+    json_start = content.find('{')
+    if json_start == -1:
+        raise ValueError("No JSON object found in file content.")
 
-        main_rml_path = find_main_rml_file(base_dir)
-        with open(main_rml_path, 'r', encoding='utf-8', errors='ignore') as f:
-            main_rml_content = f.read()
+    json_text = content[json_start:]
+    try:
+        return json.loads(json_text)
+    except json.JSONDecodeError:
+        raise ValueError("Embedded JSON block could not be parsed.")
 
-        post_paths = extract_post_paths(main_rml_content)
-        logger.info(f"POST endpoints found: {post_paths}")
+# Data Generation Helpers
+def random_datetime():
+    """Generate random datetime string."""
+    return f"{random.randint(1,28):02}/{random.randint(1,12):02}/2025 {random.randint(0,23):02}:{random.randint(0,59):02}:{random.randint(0,59):02}"
 
-        reference_files = find_reference_rml_files(base_dir)
-        logger.info(f"Reference RML files found: {len(reference_files)}")
+def random_uuid():
+    """Generate random UUID."""
+    sections = [8, 4, 4, 4, 12]
+    return '-'.join(''.join(random.choices(string.hexdigits.lower(), k=s)) for s in sections)
 
-        result = {}
-        for post_path in post_paths:
-            structure = match_reference_to_post(post_path, reference_files)
-            if structure:
-                result[post_path] = [
-                    random_value(structure),
-                    random_value(structure)
-                ]
-            else:
-                logger.warning(f"No matching reference file for {post_path}")
+def random_string_like(value):
+    """Generate random string matching the structure of the given value."""
+    if isinstance(value, str):
+        if any(sep in value for sep in ['/', '-', ':']):
+            return random_datetime()
+        elif len(value) == 36 or len(value) == 32:
+            return random_uuid()
+        elif value.isdigit():
+            return ''.join(random.choices(string.digits, k=len(value)))
+        else:
+            return ''.join(random.choices(string.ascii_letters + string.digits, k=len(value)))
+    return value
+
+def generate_random_value_by_sample(sample_value):
+    """Generate a random value based on the sample's type."""
+    if isinstance(sample_value, int):
+        return random.randint(1000, 9999)
+    elif isinstance(sample_value, float):
+        return round(random.uniform(1.0, 10000.0), 2)
+    elif isinstance(sample_value, bool):
+        return random.choice([True, False])
+    elif isinstance(sample_value, str):
+        return random_string_like(sample_value)
+    elif sample_value is None:
+        return None
+    return sample_value
+
+def generate_random_structure(template):
+    """Recursively generate a random structure based on the input template."""
+    if isinstance(template, dict):
+        return {k: generate_random_structure(v) for k, v in template.items()}
+    elif isinstance(template, list):
+        return [generate_random_structure(item) for item in template]
+    return generate_random_value_by_sample(template)
+
+# Event Header Extraction
+def get_model_instance_name(event):
+    """Retrieve model instance name from headers or generate a random one."""
+    return event.get('headers', {}).get('model_instance_name', 'chatbot_' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=6)))
+
+def get_count_from_headers(event):
+    """Retrieve the count from headers or default to 1."""
+    try:
+        return max(1, int(event.get('headers', {}).get('count', '1')))
+    except Exception:
+        return 1
+
+def build_dynamic_prompt(model_instance_name):
+    """Build a dynamic prompt based on the model instance name."""
+    return (
+        f"You are an expert RAML analyzer. Using the model instance '{model_instance_name}', "
+        "analyze the provided RAML content. Resolve all includes such as traits, resource types, and fragments. "
+        "Then generate realistic randomized test payloads for each endpoint while preserving the field names, "
+        "structure, and data types. Ensure the output is in clean JSON format without explanations."
+    )
+
+# Lambda Handler
+def lambda_handler(event, context):
+    """Main Lambda function handler."""
+    logger.info("Lambda function invoked.")
+    try:
+        # Retrieve and decode file content (base64 or plain text)
+        body = event.get('body')
+        if not body:
+            raise ValueError("Missing file content in request.")
+
+        if event.get('isBase64Encoded', False):
+            raw_content = base64.b64decode(body).decode('utf-8', errors='replace')
+        else:
+            raw_content = body
+
+        # Parse and extract JSON data from the content
+        original_data = detect_and_extract_json(raw_content)
+
+        # Extract model instance name and count from headers
+        model_instance_name = get_model_instance_name(event)
+        count = get_count_from_headers(event)
+        prompt = build_dynamic_prompt(model_instance_name)
+
+        logger.info(f"Model instance: {model_instance_name}, Dataset count: {count}")
+        logger.debug(f"Prompt: {prompt}")
+
+        # Generate the random datasets
+        datasets = [generate_random_structure(original_data) for _ in range(count)]
 
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(result, indent=2)
+            "body": json.dumps({"datasets": datasets})
         }
 
     except Exception as e:
-        logger.error(f"Lambda execution failed: {e}")
+        logger.error(f"Error: {e}")
         return {
             "statusCode": 500,
+            "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"error": str(e)})
         }
