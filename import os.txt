@@ -1,3 +1,4 @@
+You said:
 import os
 import shutil
 import zipfile
@@ -27,7 +28,7 @@ def decrypt(data, key):
         logger.error(f"Error during decryption: {e}")
         raise ValueError(f"Error during decryption: {e}")
 
-# ========== Random Data Generation ==========
+# ========== Data Generation ==========
 def random_datetime():
     return f"{random.randint(1,28):02}/{random.randint(1,12):02}/2025 {random.randint(0,23):02}:{random.randint(0,59):02}:{random.randint(0,59):02}"
 
@@ -64,10 +65,10 @@ def generate_random_structure(template):
     if isinstance(template, dict):
         return {k: generate_random_structure(v) for k, v in template.items()}
     elif isinstance(template, list):
-        return [generate_random_structure(template[0])] if template else []
+        return [generate_random_structure(item) for item in template]
     return generate_random_value_by_sample(template)
 
-# ========== ZIP Extraction ==========
+# ========== RAML Unzipping and Parsing ==========
 def unzip_raml(zip_bytes, extract_dir="/tmp/temp_raml"):
     if os.path.exists(extract_dir):
         shutil.rmtree(extract_dir)
@@ -82,59 +83,93 @@ def unzip_raml(zip_bytes, extract_dir="/tmp/temp_raml"):
 
     return extract_dir
 
-# ========== .rml File Utilities ==========
-def find_all_rml_files(root_dir):
-    rml_files = []
-    for root, _, files in os.walk(root_dir):
+def find_main_raml_file(base_dir):
+    for root, _, files in os.walk(base_dir):
         for file in files:
-            if file.endswith(".rml"):
-                rml_files.append(os.path.join(root, file))
-    return rml_files
+            if file.endswith(".raml"):
+                full_path = os.path.join(root, file)
+                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    if "#%RAML 1.0" in f.readline():
+                        return full_path
+    raise FileNotFoundError("Main RAML file not found.")
 
-def extract_post_references(rml_path):
-    references = []
-    try:
-        with open(rml_path, 'r', encoding='utf-8', errors='ignore') as file:
-            lines = file.readlines()
-            for idx, line in enumerate(lines):
-                if 'post:' in line.lower():
-                    for next_line in lines[idx+1:]:
-                        if '.rml' in next_line:
-                            ref_path = next_line.strip().split()[-1].replace('"', '').replace("'", '')
-                            references.append(ref_path)
-                            break
-    except Exception as e:
-        logger.warning(f"Could not parse POST refs in {rml_path}: {e}")
-    return references
+def resolve_include_path(include_path, root_dir, current_dir):
+    for base in [current_dir, root_dir, os.path.join(root_dir, 'examples', 'request')]:
+        full_path = os.path.normpath(os.path.join(base, include_path))
+        if os.path.isfile(full_path):
+            return full_path
 
-def resolve_reference_path(ref, root_dir):
-    for root, _, files in os.walk(root_dir):
-        for f in files:
-            if f == os.path.basename(ref):
-                return os.path.join(root, f)
+    for search_dir in [os.path.join(root_dir, 'examples', 'request'), root_dir]:
+        for root, _, files in os.walk(search_dir):
+            for f in files:
+                if f == os.path.basename(include_path):
+                    return os.path.join(root, f)
     return None
 
-def extract_json_from_rml(rml_file):
-    try:
-        with open(rml_file, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-            json_start = content.find('{')
-            json_end = content.rfind('}')
-            if json_start != -1 and json_end != -1:
-                json_str = content[json_start:json_end+1]
-                return json.loads(json_str)
-    except Exception as e:
-        logger.warning(f"Failed to extract JSON from {rml_file}: {e}")
-    return {}
+def resolve_includes_in_raml(file_path, root_dir):
+    resolved_lines = []
+    current_dir = os.path.dirname(file_path)
 
-# ========== Final JSON Generation ==========
-def build_output_structure(structures):
-    return {
-        "datasets": [generate_random_structure(struct) for struct in structures]
-    }
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
+        for line in file:
+            if "!include" in line:
+                parts = line.strip().split("!include")
+                prefix = parts[0].strip()
+                include_path = parts[1].strip()
+                include_file = resolve_include_path(include_path, root_dir, current_dir)
 
-# ========== Prompt Builder ==========
+                if include_file and os.path.exists(include_file):
+                    with open(include_file, 'r', encoding='utf-8', errors='ignore') as inc_file:
+                        resolved_lines.append(f"{prefix} |\n")
+                        for inc_line in inc_file.read().splitlines():
+                            resolved_lines.append(f"  {inc_line}")
+                else:
+                    resolved_lines.append(f"{line.strip()}  # Include not found")
+            else:
+                resolved_lines.append(line.rstrip())
+
+    return "\n".join(resolved_lines)
+
+# ========== RAML Test Payload Generation ==========
+def extract_endpoints_from_raml(raml_content):
+    endpoints = []
+    for line in raml_content.split('\n'):
+        if line.strip().startswith('/'):
+            endpoints.append(line.strip())
+    return endpoints
+
+def extract_fields_for_endpoint(endpoint, raml_content):
+    fields = {}
+    lines = raml_content.split('\n')
+    capture = False
+    for line in lines:
+        if line.strip() == endpoint:
+            capture = True
+        elif capture and line.startswith('/'):
+            break
+        elif capture and ':' in line:
+            parts = line.strip().split(':')
+            if len(parts) == 2:
+                fields[parts[0].strip()] = parts[1].strip() or "string"
+    return fields
+
+def generate_randomized_payload(field_template):
+    return {k: generate_random_value_by_sample(v) for k, v in field_template.items()}
+
+def generate_test_payloads(raml_content):
+    endpoints = extract_endpoints_from_raml(raml_content)
+    result = {}
+    for endpoint in endpoints:
+        template = extract_fields_for_endpoint(endpoint, raml_content)
+        result[endpoint] = [
+            generate_randomized_payload(template),
+            generate_randomized_payload(template)
+        ]
+    return result
+
+# ========== Lambda Handler ==========
 def build_dynamic_prompt(model_instance_name):
+    """Build a dynamic prompt based on the model instance name."""
     return (
         f"You are an expert RAML analyzer. Using the model instance '{model_instance_name}', "
         "analyze the provided RAML content, focusing solely on POST methods. Resolve all references to "
@@ -144,7 +179,6 @@ def build_dynamic_prompt(model_instance_name):
         "and matches the exact structure from the reference .rml files."
     )
 
-# ========== Lambda Handler ==========
 def lambda_handler(event, context):
     logger.info("Lambda function invoked.")
     try:
@@ -153,35 +187,23 @@ def lambda_handler(event, context):
 
         zip_bytes = b64decode(event['body'])
         extracted_dir = unzip_raml(zip_bytes)
+        main_raml_file = find_main_raml_file(extracted_dir)
+        resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
 
+        # Get model_instance_name from request header
         model_instance_name = event.get("headers", {}).get("model_instance_name", "default_instance")
-        logger.info(f"Model instance: {model_instance_name}")
-        prompt = build_dynamic_prompt(model_instance_name)
-        logger.info(f"Prompt: {prompt}")
 
-        all_rml_files = find_all_rml_files(extracted_dir)
-        logger.info(f"Found {len(all_rml_files)} .rml files")
+        # Build dynamic prompt
+        dynamic_prompt = build_dynamic_prompt(model_instance_name)
+        logger.info(f"Dynamic prompt built: {dynamic_prompt}")
 
-        root_rml = next((f for f in all_rml_files if 'main' in f.lower() or 'root' in f.lower()), all_rml_files[0])
-        post_references = extract_post_references(root_rml)
-
-        resolved_structures = []
-        for ref in post_references:
-            ref_path = resolve_reference_path(ref, extracted_dir)
-            if ref_path:
-                struct = extract_json_from_rml(ref_path)
-                if struct:
-                    resolved_structures.append(struct)
-
-        if not resolved_structures:
-            raise ValueError("No valid JSON structures found in POST-related .rml files.")
-
-        final_output = build_output_structure(resolved_structures)
+        # Generate test payloads based on the RAML content
+        payloads = generate_test_payloads(resolved_raml)
 
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(final_output, indent=2)
+            "body": json.dumps(payloads, indent=2)
         }
 
     except Exception as e:
