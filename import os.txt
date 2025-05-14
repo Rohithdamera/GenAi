@@ -1,213 +1,711 @@
-import os
-import shutil
-import zipfile
-import json
-import logging
-import random
-import string
-from base64 import b64decode
-from Crypto.Cipher import AES
-
-# Setup logger
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# ========== Decryption (if needed) ==========
-def unpad(data):
-    padding_length = data[-1]
-    return data[:-padding_length]
-
-def decrypt(data, key):
-    try:
-        cipher = AES.new(b64decode(key), AES.MODE_ECB)
-        decrypted_data = cipher.decrypt(b64decode(data))
-        decrypted_data = unpad(decrypted_data)
-        return decrypted_data.decode()
-    except Exception as e:
-        logger.error(f"Error during decryption: {e}")
-        raise ValueError(f"Error during decryption: {e}")
-
-# ========== Data Generation ==========
-def random_datetime():
-    return f"{random.randint(1,28):02}/{random.randint(1,12):02}/2025 {random.randint(0,23):02}:{random.randint(0,59):02}:{random.randint(0,59):02}"
-
-def random_uuid():
-    sections = [8, 4, 4, 4, 12]
-    return '-'.join(''.join(random.choices(string.hexdigits.lower(), k=s)) for s in sections)
-
-def random_string_like(value):
-    if isinstance(value, str):
-        if any(sep in value for sep in ['/', '-', ':']):
-            return random_datetime()
-        elif len(value) == 36 or len(value) == 32:
-            return random_uuid()
-        elif value.isdigit():
-            return ''.join(random.choices(string.digits, k=len(value)))
-        else:
-            return ''.join(random.choices(string.ascii_letters + string.digits, k=len(value)))
-    return value
-
-def generate_random_value_by_sample(sample_value):
-    if isinstance(sample_value, int):
-        return random.randint(1000, 9999)
-    elif isinstance(sample_value, float):
-        return round(random.uniform(1.0, 10000.0), 2)
-    elif isinstance(sample_value, bool):
-        return random.choice([True, False])
-    elif isinstance(sample_value, str):
-        return random_string_like(sample_value)
-    elif sample_value is None:
-        return None
-    return sample_value
-
-def generate_random_structure(template):
-    if isinstance(template, dict):
-        return {k: generate_random_structure(v) for k, v in template.items()}
-    elif isinstance(template, list):
-        return [generate_random_structure(item) for item in template]
-    return generate_random_value_by_sample(template)
-
-# ========== RAML Unzipping and Parsing ==========
-def unzip_raml(zip_bytes, extract_dir="/tmp/temp_raml"):
-    if os.path.exists(extract_dir):
-        shutil.rmtree(extract_dir)
-    os.makedirs(extract_dir, exist_ok=True)
-
-    zip_path = "/tmp/uploaded.zip"
-    with open(zip_path, "wb") as f:
-        f.write(zip_bytes)
-
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(extract_dir)
-
-    return extract_dir
-
-def find_main_raml_file(base_dir):
-    for root, _, files in os.walk(base_dir):
-        for file in files:
-            if file.endswith(".raml"):
-                full_path = os.path.join(root, file)
-                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    if "#%RAML 1.0" in f.readline():
-                        return full_path
-    raise FileNotFoundError("Main RAML file not found.")
-
-def resolve_include_path(include_path, root_dir, current_dir):
-    for base in [current_dir, root_dir, os.path.join(root_dir, 'examples', 'request')]:
-        full_path = os.path.normpath(os.path.join(base, include_path))
-        if os.path.isfile(full_path):
-            return full_path
-
-    for search_dir in [os.path.join(root_dir, 'examples', 'request'), root_dir]:
-        for root, _, files in os.walk(search_dir):
-            for f in files:
-                if f == os.path.basename(include_path):
-                    return os.path.join(root, f)
-    return None
-
-def resolve_includes_in_raml(file_path, root_dir):
-    resolved_lines = []
-    current_dir = os.path.dirname(file_path)
-
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
-        for line in file:
-            if "!include" in line:
-                parts = line.strip().split("!include")
-                prefix = parts[0].strip()
-                include_path = parts[1].strip()
-                include_file = resolve_include_path(include_path, root_dir, current_dir)
-
-                if include_file and os.path.exists(include_file):
-                    with open(include_file, 'r', encoding='utf-8', errors='ignore') as inc_file:
-                        resolved_lines.append(f"{prefix} |\n")
-                        for inc_line in inc_file.read().splitlines():
-                            resolved_lines.append(f"  {inc_line}")
-                else:
-                    resolved_lines.append(f"{line.strip()}  # Include not found")
-            else:
-                resolved_lines.append(line.rstrip())
-
-    return "\n".join(resolved_lines)
-
-# ========== RAML Test Payload Generation ==========
-def extract_endpoints_from_raml(raml_content):
-    endpoints = []
-    for line in raml_content.split('\n'):
-        if line.strip().startswith('/'):
-            endpoints.append(line.strip())
-    return endpoints
-
-def extract_fields_for_endpoint(endpoint, raml_content):
-    fields = {}
-    lines = raml_content.split('\n')
-    capture = False
-    for line in lines:
-        if line.strip() == endpoint:
-            capture = True
-        elif capture and line.startswith('/'):
-            break
-        elif capture and ':' in line:
-            parts = line.strip().split(':')
-            if len(parts) == 2:
-                fields[parts[0].strip()] = parts[1].strip() or "string"
-    return fields
-
-def generate_randomized_payload(field_template):
-    return {k: generate_random_value_by_sample(v) for k, v in field_template.items()}
-
-def generate_test_payloads(raml_content):
-    endpoints = extract_endpoints_from_raml(raml_content)
-    result = {}
-    for endpoint in endpoints:
-        template = extract_fields_for_endpoint(endpoint, raml_content)
-        result[endpoint] = [
-            generate_randomized_payload(template),
-            generate_randomized_payload(template)
-        ]
-    return result
-
-# ========== Lambda Handler ==========
-def build_dynamic_prompt(model_instance_name):
-    """Build a dynamic prompt based on the model instance name."""
-    return (
-        f"You are an expert RAML analyzer. Using the model instance '{model_instance_name}', "
-        "analyze the provided RAML content, focusing solely on POST methods. Resolve all references to "
-        "traits, resource types, and fragments. Identify and extract any required data from subfolder references. "
-        "Then generate realistic, randomized test payloads for each POST endpoint while strictly preserving the field names, "
-        "structure, and data types. Ensure that the output is clean, valid JSON without extra metadata or explanations, "
-        "and matches the exact structure from the reference `.rml` files."
-    )
-
-def lambda_handler(event, context):
-    logger.info("Lambda function invoked.")
-    try:
-        if 'body' not in event or not event.get('isBase64Encoded', False):
-            raise ValueError("File content is missing or not base64-encoded.")
-
-        zip_bytes = b64decode(event['body'])
-        extracted_dir = unzip_raml(zip_bytes)
-        main_raml_file = find_main_raml_file(extracted_dir)
-        resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
-
-        # Get model_instance_name from request header
-        model_instance_name = event.get("headers", {}).get("model_instance_name", "default_instance")
-
-        # Build dynamic prompt
-        dynamic_prompt = build_dynamic_prompt(model_instance_name)
-        logger.info(f"Dynamic prompt built: {dynamic_prompt}")
-
-        # Generate test payloads based on the RAML content
-        payloads = generate_test_payloads(resolved_raml)
-
-        return {
-            "statusCode": 200,
-            "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(payloads, indent=2)
+{
+    "/heartbeat:": [
+        {
+            "is": "kV1R3aJKmNOQoJk5Pl1TrpbJ3y9IA",
+            "type": "MK0qV9",
+            "heartbeat-member": "bsfzdO",
+            "get-response-type": "0",
+            "applicationName": "08/02/2025 05:36:55",
+            "environment": "YM5ov",
+            "status": "Y9Vqy5pGD",
+            "get-response-error-type": "M",
+            "properties": "XDkfML",
+            "success": "6gSlFC",
+            "apiName": "skvU1P",
+            "version": "zya0TE",
+            "correlationId": "n0TNFp",
+            "timestamp": "7bY3aX",
+            "errorDetails": "dMjAC1",
+            "items": "D7jVFF",
+            "code": "6eXKnW",
+            "message": "VGN8E7",
+            "additionalInfo": "Ed3rgR",
+            "get-response-example": "K",
+            "get": "mVC7hw",
+            "description": "qZDL0jx2JruBpcN2cTRoTTr8jBjzWshgttcFqbw6P"
+        },
+        {
+            "is": "tjKO3FLjgiaGuMmX6lyzRLuSa0lgW",
+            "type": "BeD7MB",
+            "heartbeat-member": "QyxHV0",
+            "get-response-type": "b",
+            "applicationName": "15/04/2025 19:53:49",
+            "environment": "MSdOF",
+            "status": "J3psZAXwv",
+            "get-response-error-type": "g",
+            "properties": "7rlBlD",
+            "success": "3sFfl5",
+            "apiName": "UFuLzH",
+            "version": "oUH8NF",
+            "correlationId": "ksn6zN",
+            "timestamp": "cxbmzF",
+            "errorDetails": "6VMl0f",
+            "items": "ADI7iV",
+            "code": "wCTbaj",
+            "message": "OA8GqQ",
+            "additionalInfo": "kJi6Za",
+            "get-response-example": "s",
+            "get": "IOZmgX",
+            "description": "IAsPmJtjaxvPRD42l77jAXm7jaWFqMPs261llOXhg"
         }
-
-    except Exception as e:
-        logger.error(f"Error during Lambda execution: {e}")
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
+    ],
+    "/salesreturns:": [
+        {
+            "is": "b3k5H2udisMaTf0VR24iiO20kvP4tACpFV3AHwfcwwt",
+            "type": "disBpZ",
+            "member": "eYC7Fi",
+            "get-response-type": "l",
+            "\"correlationId\"": "15/02/2025 00:40:10",
+            "\"Transaction\"": "V",
+            "\"RetailStoreId\"": "qx4ZGn",
+            "\"TransactionTypeCode\"": "OKqbgnV",
+            "\"WorkstationId\"": "2QS3yM",
+            "\"TransactionNumber\"": "p36FXvQ3M2iWXvGL",
+            "\"Department\"": "NdJ",
+            "\"TransactionCurrency\"": "xKIWgE",
+            "\"CustomerInfo\"": "w",
+            "\"DataElementId\"": "vpM",
+            "\"DataElementValue\"": "tS",
+            "\"Tender\"": "0",
+            "\"TenderSequenceNumber\"": "UqiE",
+            "\"TenderTypeCode\"": "q44",
+            "\"TenderAmount\"": "m3L",
+            "\"TenderId\"": "fuMtcyVJ21OA0iC75",
+            "\"ReferenceId\"": "WyP",
+            "\"TenderCurrency\"": "TYz",
+            "\"CreditCard\"": "X",
+            "\"PaymentCard\"": "u3R",
+            "\"CardNumber\"": "6Z",
+            "\"RetailLineItem\"": "i",
+            "\"RetailLineNumber\"": "6jvX",
+            "\"RetailTypeCode\"": "dldHtFH",
+            "\"RetailReasonCode\"": "KHMVj",
+            "\"ItemId\"": "KCgar8RMNfJu0d",
+            "\"ItemIdIdentifier\"": "Didm",
+            "\"RetailsQuantity\"": "bgK0",
+            "\"SalesUOM\"": "f0u2QCQx",
+            "\"SalesAmount\"": "yS4z",
+            "\"NormalSalesAmt\"": "bgC3",
+            "\"Tax\"": "j",
+            "\"TaxSequenceNumber\"": "BFYj",
+            "\"TaxTypeCode\"": "lAXck9J",
+            "\"TaxAmount\"": "87",
+            "\"Discount\"": "E",
+            "\"DiscountTypeCode\"": "iyx8m",
+            "\"ReductionAmount\"": "Vr",
+            "\"DiscountId\"": "tJY0wbE",
+            "\"BonusBuyId\"": "ev29Da4zW",
+            "\"OfferId\"": "Bl",
+            "\"GoodsMovement\"": "c",
+            "\"GoodsMovementSequenceNumber\"": "6iM5",
+            "\"GoodsMovementTypeCode\"": "9pcjhEU",
+            "\"GoodsMovementReasonCode\"": "oLQJN",
+            "\"ShipmentSite\"": "3et",
+            "\"ToPartyId\"": "sk",
+            "get-response-example": "A",
+            "\"status\"": "KtDKD3b2oG",
+            "\"message\"": "h6Zd68TKHEUUFzd1m0pX0pQMZlN2iOSbaTFGJ94CKaGtTYQN9ZUpngUPPmxIRYUFBpb5osQLhLPDUbmdSMhq6Gk",
+            "get-response-error-type": "G",
+            "properties": "EAEWPu",
+            "success": "fSCOkg",
+            "apiName": "DFaiME",
+            "version": "Gogr4V",
+            "correlationId": "gY11jn",
+            "timestamp": "8pWZLZ",
+            "errorDetails": "9HUi3g",
+            "items": "lK7izu",
+            "code": "D12ND5",
+            "message": "2DfiJp",
+            "additionalInfo": "0Yz4uL",
+            "post-request-type": "V",
+            "post-response-type": "c",
+            "post-response-error-type": "t",
+            "post-request-example": "g",
+            "post-response-example": "d",
+            "post": "xEmcyS",
+            "description": "g2v2EmWJc5KKwfqOC9gJ7iNdcZssYnsCRlvs7ykZMFkVhLA8UfApo5BBVSLAVIOzzkz8dw4yedXZxzIZ3eLa0g94724O1w63RG",
+            "get": "YHTfF7"
+        },
+        {
+            "is": "H1SksBzHPuqcmPpEtBiR6eiHllnjtS0H4h0L0v4dmOJ",
+            "type": "oKx1Zo",
+            "member": "lVH1s8",
+            "get-response-type": "X",
+            "\"correlationId\"": "10/12/2025 03:46:21",
+            "\"Transaction\"": "X",
+            "\"RetailStoreId\"": "ED2xbL",
+            "\"TransactionTypeCode\"": "MgPrJfj",
+            "\"WorkstationId\"": "bdLe9o",
+            "\"TransactionNumber\"": "74OcxbK0n03qMWAn",
+            "\"Department\"": "1OM",
+            "\"TransactionCurrency\"": "emz2gz",
+            "\"CustomerInfo\"": "X",
+            "\"DataElementId\"": "Vu2",
+            "\"DataElementValue\"": "WS",
+            "\"Tender\"": "6",
+            "\"TenderSequenceNumber\"": "CG03",
+            "\"TenderTypeCode\"": "K2f",
+            "\"TenderAmount\"": "70Z",
+            "\"TenderId\"": "AS2Y8QS1l65s762L5",
+            "\"ReferenceId\"": "Av2",
+            "\"TenderCurrency\"": "5GV",
+            "\"CreditCard\"": "7",
+            "\"PaymentCard\"": "V34",
+            "\"CardNumber\"": "dT",
+            "\"RetailLineItem\"": "h",
+            "\"RetailLineNumber\"": "6CqG",
+            "\"RetailTypeCode\"": "etIl8co",
+            "\"RetailReasonCode\"": "8vxPy",
+            "\"ItemId\"": "9OU8OogdCUsGHI",
+            "\"ItemIdIdentifier\"": "2RNP",
+            "\"RetailsQuantity\"": "2ZR2",
+            "\"SalesUOM\"": "zA6pvMQI",
+            "\"SalesAmount\"": "cbHa",
+            "\"NormalSalesAmt\"": "HDnb",
+            "\"Tax\"": "u",
+            "\"TaxSequenceNumber\"": "MF6u",
+            "\"TaxTypeCode\"": "lnMPJ8d",
+            "\"TaxAmount\"": "73",
+            "\"Discount\"": "S",
+            "\"DiscountTypeCode\"": "vxo19",
+            "\"ReductionAmount\"": "pm",
+            "\"DiscountId\"": "O3afnDv",
+            "\"BonusBuyId\"": "FomdtDUnJ",
+            "\"OfferId\"": "cI",
+            "\"GoodsMovement\"": "V",
+            "\"GoodsMovementSequenceNumber\"": "U1RK",
+            "\"GoodsMovementTypeCode\"": "9Z2ismg",
+            "\"GoodsMovementReasonCode\"": "zxtrA",
+            "\"ShipmentSite\"": "MAn",
+            "\"ToPartyId\"": "UY",
+            "get-response-example": "0",
+            "\"status\"": "tDIndHWFC2",
+            "\"message\"": "y9rQAuoFsqp9L1YlFG0j7lWVeOjRqIWFlIITa558mB3xa2nVc4y2CsuOKobnYRrWkIXNO691osnB0zwXVQtbFI0",
+            "get-response-error-type": "d",
+            "properties": "cErIsC",
+            "success": "ddcV8t",
+            "apiName": "3lQiGl",
+            "version": "sVR1q5",
+            "correlationId": "nUJf40",
+            "timestamp": "8xLETY",
+            "errorDetails": "4iTUys",
+            "items": "UDImoE",
+            "code": "0eurPo",
+            "message": "yUrjOH",
+            "additionalInfo": "siFlxt",
+            "post-request-type": "F",
+            "post-response-type": "h",
+            "post-response-error-type": "I",
+            "post-request-example": "Q",
+            "post-response-example": "J",
+            "post": "LEAOuS",
+            "description": "PSu7mOteitHlLDiSmkEBnVvu9QaN4zYEEA8kcqibKAeWwgvMeByFzmu59ZJ3eZX8o4yDOJyBWRKeIyEzSt11Fkgogbo6qg2Gj6",
+            "get": "9qtjo1"
         }
+    ]
+}
+
+
+
+{
+    "datasets": [
+        {
+            "correlationId": "15/07/2025 01:49:41",
+            "Transaction": [
+                {
+                    "RetailStoreId": "521",
+                    "BusinessDayDate": "06/12/2025 19:48:12",
+                    "TransactionTypeCode": "IvHp",
+                    "WorkstationId": "554",
+                    "TransactionNumber": "CZJYzElm1BQ8T",
+                    "BeginTimestamp": "16/06/2025 04:00:01",
+                    "EndTimestamp": "09/10/2025 15:41:24",
+                    "Department": "ElptG",
+                    "TransactionCurrency": "Mqm",
+                    "CustomerInfo": {
+                        "DataElementId": "1",
+                        "DataElementValue": "S7voX2Q"
+                    },
+                    "Tender": [
+                        {
+                            "TenderSequenceNumber": "4",
+                            "TenderTypeCode": "TTkScd",
+                            "TenderAmount": 2138,
+                            "TenderId": "67859520658887",
+                            "ReferenceId": "76255",
+                            "TenderCurrency": "Fv2",
+                            "CreditCard": {
+                                "PaymentCard": "RWlV",
+                                "CardNumber": "3226994367713"
+                            }
+                        },
+                        {
+                            "TenderSequenceNumber": "1",
+                            "TenderTypeCode": "GjUK",
+                            "TenderAmount": 2892,
+                            "TenderId": "31184764786192",
+                            "ReferenceId": "1449150",
+                            "TenderCurrency": "IHv",
+                            "CreditCard": {
+                                "PaymentCard": "",
+                                "CardNumber": ""
+                            }
+                        }
+                    ],
+                    "RetailLineItem": [
+                        {
+                            "RetailLineNumber": "5",
+                            "RetailTypeCode": "1329",
+                            "RetailReasonCode": "8g",
+                            "ItemId": "72624229358",
+                            "ItemIdIdentifier": "5",
+                            "RetailsQuantity": "3",
+                            "SalesUOM": "W5s55",
+                            "SalesAmount": 5139,
+                            "NormalSalesAmt": 5955,
+                            "Tax": {
+                                "TaxSequenceNumber": "2",
+                                "TaxTypeCode": "0nzG",
+                                "TaxAmount": 4903
+                            },
+                            "Discount": {
+                                "DiscountTypeCode": "E9",
+                                "ReductionAmount": 5248,
+                                "DiscountId": "3",
+                                "BonusBuyId": "132",
+                                "OfferId": "22"
+                            },
+                            "GoodsMovement": {
+                                "GoodsMovementSequenceNumber": "7",
+                                "GoodsMovementTypeCode": "1950",
+                                "GoodsMovementReasonCode": "73",
+                                "ShipmentSite": "",
+                                "ToPartyId": ""
+                            }
+                        },
+                        {
+                            "RetailLineNumber": "4",
+                            "RetailTypeCode": "3724",
+                            "RetailReasonCode": "zY",
+                            "ItemId": "352339698745",
+                            "RetailsQuantity": "9",
+                            "SalesUOM": "YAMnL",
+                            "SalesAmount": 8169,
+                            "NormalSalesAmt": 7162,
+                            "Tax": {
+                                "TaxSequenceNumber": "7",
+                                "TaxTypeCode": "scfJ",
+                                "TaxAmount": 4117
+                            },
+                            "Discount": {
+                                "DiscountTypeCode": "6U",
+                                "ReductionAmount": 6416,
+                                "DiscountId": "1601",
+                                "BonusBuyId": "397272",
+                                "OfferId": ""
+                            },
+                            "GoodsMovement": {
+                                "GoodsMovementSequenceNumber": "4",
+                                "GoodsMovementTypeCode": "0489",
+                                "GoodsMovementReasonCode": "89",
+                                "ShipmentSite": "",
+                                "ToPartyId": ""
+                            }
+                        }
+                    ]
+                },
+                {
+                    "RetailStoreId": "966",
+                    "BusinessDayDate": "14/02/2025 21:47:29",
+                    "WorkstationId": "729",
+                    "TransactionNumber": "VL8U2k0bPFr4x",
+                    "BeginTimestamp": "16/09/2025 10:40:29",
+                    "EndTimestamp": "02/11/2025 13:08:52",
+                    "Department": "",
+                    "TransactionCurrency": "iKt",
+                    "CustomerInfo": {
+                        "DataElementId": "",
+                        "DataElementValue": ""
+                    },
+                    "Tender": [
+                        {
+                            "TenderSequenceNumber": "8",
+                            "TenderTypeCode": "",
+                            "TenderAmount": 9540,
+                            "TenderId": "07253415501156",
+                            "TenderCurrency": "",
+                            "ReferenceId": "",
+                            "CreditCard": {
+                                "PaymentCard": "",
+                                "CardNumber": ""
+                            }
+                        }
+                    ],
+                    "RetailLineItem": [
+                        {
+                            "RetailLineNumber": "2",
+                            "RetailTypeCode": "4343",
+                            "RetailReasonCode": "PP",
+                            "ItemId": "09553324040",
+                            "RetailsQuantity": "9",
+                            "SalesUOM": "popMV",
+                            "SalesAmount": 9551,
+                            "NormalSalesAmt": 2188,
+                            "Tax": {
+                                "TaxSequenceNumber": "6",
+                                "TaxTypeCode": "AhMt",
+                                "TaxAmount": 7073
+                            },
+                            "Discount": {
+                                "DiscountTypeCode": "UB",
+                                "ReductionAmount": 8077,
+                                "DiscountId": "7554",
+                                "BonusBuyId": "050616",
+                                "OfferId": ""
+                            },
+                            "GoodsMovement": {
+                                "GoodsMovementSequenceNumber": "5",
+                                "GoodsMovementTypeCode": "7850",
+                                "GoodsMovementReasonCode": "12",
+                                "ShipmentSite": "",
+                                "ToPartyId": ""
+                            }
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "correlationId": "25/12/2025 16:13:14",
+            "Transaction": [
+                {
+                    "RetailStoreId": "605",
+                    "BusinessDayDate": "09/10/2025 04:41:50",
+                    "TransactionTypeCode": "bCIX",
+                    "WorkstationId": "813",
+                    "TransactionNumber": "AlLQQUlL0yFdt",
+                    "BeginTimestamp": "19/02/2025 10:19:48",
+                    "EndTimestamp": "20/11/2025 20:42:49",
+                    "Department": "dggDU",
+                    "TransactionCurrency": "6iw",
+                    "CustomerInfo": {
+                        "DataElementId": "9",
+                        "DataElementValue": "rcaO0nr"
+                    },
+                    "Tender": [
+                        {
+                            "TenderSequenceNumber": "5",
+                            "TenderTypeCode": "Kt6yjz",
+                            "TenderAmount": 2389,
+                            "TenderId": "91181836876254",
+                            "ReferenceId": "42844",
+                            "TenderCurrency": "7ZD",
+                            "CreditCard": {
+                                "PaymentCard": "HyxH",
+                                "CardNumber": "5601715942139"
+                            }
+                        },
+                        {
+                            "TenderSequenceNumber": "2",
+                            "TenderTypeCode": "MBMa",
+                            "TenderAmount": 6993,
+                            "TenderId": "72370602489061",
+                            "ReferenceId": "4544548",
+                            "TenderCurrency": "jug",
+                            "CreditCard": {
+                                "PaymentCard": "",
+                                "CardNumber": ""
+                            }
+                        }
+                    ],
+                    "RetailLineItem": [
+                        {
+                            "RetailLineNumber": "7",
+                            "RetailTypeCode": "5515",
+                            "RetailReasonCode": "0H",
+                            "ItemId": "03700452945",
+                            "ItemIdIdentifier": "2",
+                            "RetailsQuantity": "3",
+                            "SalesUOM": "HxHnj",
+                            "SalesAmount": 9442,
+                            "NormalSalesAmt": 5311,
+                            "Tax": {
+                                "TaxSequenceNumber": "1",
+                                "TaxTypeCode": "y7ld",
+                                "TaxAmount": 8200
+                            },
+                            "Discount": {
+                                "DiscountTypeCode": "Zg",
+                                "ReductionAmount": 2794,
+                                "DiscountId": "9",
+                                "BonusBuyId": "161",
+                                "OfferId": "10"
+                            },
+                            "GoodsMovement": {
+                                "GoodsMovementSequenceNumber": "0",
+                                "GoodsMovementTypeCode": "1708",
+                                "GoodsMovementReasonCode": "08",
+                                "ShipmentSite": "",
+                                "ToPartyId": ""
+                            }
+                        },
+                        {
+                            "RetailLineNumber": "4",
+                            "RetailTypeCode": "7746",
+                            "RetailReasonCode": "2A",
+                            "ItemId": "719450301120",
+                            "RetailsQuantity": "4",
+                            "SalesUOM": "vMVvo",
+                            "SalesAmount": 4242,
+                            "NormalSalesAmt": 9097,
+                            "Tax": {
+                                "TaxSequenceNumber": "1",
+                                "TaxTypeCode": "2Drc",
+                                "TaxAmount": 3481
+                            },
+                            "Discount": {
+                                "DiscountTypeCode": "si",
+                                "ReductionAmount": 7789,
+                                "DiscountId": "4138",
+                                "BonusBuyId": "966737",
+                                "OfferId": ""
+                            },
+                            "GoodsMovement": {
+                                "GoodsMovementSequenceNumber": "7",
+                                "GoodsMovementTypeCode": "9638",
+                                "GoodsMovementReasonCode": "40",
+                                "ShipmentSite": "",
+                                "ToPartyId": ""
+                            }
+                        }
+                    ]
+                },
+                {
+                    "RetailStoreId": "167",
+                    "BusinessDayDate": "27/04/2025 07:33:44",
+                    "WorkstationId": "698",
+                    "TransactionNumber": "zR15yrgJbUDlk",
+                    "BeginTimestamp": "20/09/2025 03:46:54",
+                    "EndTimestamp": "26/10/2025 05:03:06",
+                    "Department": "",
+                    "TransactionCurrency": "g1b",
+                    "CustomerInfo": {
+                        "DataElementId": "",
+                        "DataElementValue": ""
+                    },
+                    "Tender": [
+                        {
+                            "TenderSequenceNumber": "9",
+                            "TenderTypeCode": "",
+                            "TenderAmount": 1540,
+                            "TenderId": "77038773690261",
+                            "TenderCurrency": "",
+                            "ReferenceId": "",
+                            "CreditCard": {
+                                "PaymentCard": "",
+                                "CardNumber": ""
+                            }
+                        }
+                    ],
+                    "RetailLineItem": [
+                        {
+                            "RetailLineNumber": "6",
+                            "RetailTypeCode": "3871",
+                            "RetailReasonCode": "sV",
+                            "ItemId": "81130463974",
+                            "RetailsQuantity": "4",
+                            "SalesUOM": "In4TC",
+                            "SalesAmount": 4567,
+                            "NormalSalesAmt": 5667,
+                            "Tax": {
+                                "TaxSequenceNumber": "8",
+                                "TaxTypeCode": "9ed5",
+                                "TaxAmount": 6726
+                            },
+                            "Discount": {
+                                "DiscountTypeCode": "Bm",
+                                "ReductionAmount": 5759,
+                                "DiscountId": "9250",
+                                "BonusBuyId": "664851",
+                                "OfferId": ""
+                            },
+                            "GoodsMovement": {
+                                "GoodsMovementSequenceNumber": "5",
+                                "GoodsMovementTypeCode": "6945",
+                                "GoodsMovementReasonCode": "06",
+                                "ShipmentSite": "",
+                                "ToPartyId": ""
+                            }
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "correlationId": "07/11/2025 10:38:37",
+            "Transaction": [
+                {
+                    "RetailStoreId": "442",
+                    "BusinessDayDate": "15/09/2025 11:11:18",
+                    "TransactionTypeCode": "oXxW",
+                    "WorkstationId": "233",
+                    "TransactionNumber": "iusQY92nANx2n",
+                    "BeginTimestamp": "16/09/2025 15:24:37",
+                    "EndTimestamp": "10/04/2025 03:08:25",
+                    "Department": "9lJSk",
+                    "TransactionCurrency": "ldT",
+                    "CustomerInfo": {
+                        "DataElementId": "1",
+                        "DataElementValue": "J1NK7dG"
+                    },
+                    "Tender": [
+                        {
+                            "TenderSequenceNumber": "7",
+                            "TenderTypeCode": "Pgvr7H",
+                            "TenderAmount": 7335,
+                            "TenderId": "71858056355468",
+                            "ReferenceId": "70396",
+                            "TenderCurrency": "Ud4",
+                            "CreditCard": {
+                                "PaymentCard": "ZE0z",
+                                "CardNumber": "4502930418121"
+                            }
+                        },
+                        {
+                            "TenderSequenceNumber": "2",
+                            "TenderTypeCode": "XZxp",
+                            "TenderAmount": 7650,
+                            "TenderId": "65129705115581",
+                            "ReferenceId": "9756521",
+                            "TenderCurrency": "OPb",
+                            "CreditCard": {
+                                "PaymentCard": "",
+                                "CardNumber": ""
+                            }
+                        }
+                    ],
+                    "RetailLineItem": [
+                        {
+                            "RetailLineNumber": "4",
+                            "RetailTypeCode": "2512",
+                            "RetailReasonCode": "uc",
+                            "ItemId": "06158711374",
+                            "ItemIdIdentifier": "8",
+                            "RetailsQuantity": "7",
+                            "SalesUOM": "XBFkc",
+                            "SalesAmount": 2310,
+                            "NormalSalesAmt": 5431,
+                            "Tax": {
+                                "TaxSequenceNumber": "1",
+                                "TaxTypeCode": "KAnO",
+                                "TaxAmount": 9601
+                            },
+                            "Discount": {
+                                "DiscountTypeCode": "XC",
+                                "ReductionAmount": 9327,
+                                "DiscountId": "3",
+                                "BonusBuyId": "356",
+                                "OfferId": "36"
+                            },
+                            "GoodsMovement": {
+                                "GoodsMovementSequenceNumber": "3",
+                                "GoodsMovementTypeCode": "5205",
+                                "GoodsMovementReasonCode": "46",
+                                "ShipmentSite": "",
+                                "ToPartyId": ""
+                            }
+                        },
+                        {
+                            "RetailLineNumber": "9",
+                            "RetailTypeCode": "5620",
+                            "RetailReasonCode": "7Y",
+                            "ItemId": "509169519947",
+                            "RetailsQuantity": "6",
+                            "SalesUOM": "v6TP8",
+                            "SalesAmount": 5210,
+                            "NormalSalesAmt": 4287,
+                            "Tax": {
+                                "TaxSequenceNumber": "6",
+                                "TaxTypeCode": "vEsv",
+                                "TaxAmount": 8212
+                            },
+                            "Discount": {
+                                "DiscountTypeCode": "Kr",
+                                "ReductionAmount": 5211,
+                                "DiscountId": "0437",
+                                "BonusBuyId": "494436",
+                                "OfferId": ""
+                            },
+                            "GoodsMovement": {
+                                "GoodsMovementSequenceNumber": "6",
+                                "GoodsMovementTypeCode": "5708",
+                                "GoodsMovementReasonCode": "54",
+                                "ShipmentSite": "",
+                                "ToPartyId": ""
+                            }
+                        }
+                    ]
+                },
+                {
+                    "RetailStoreId": "693",
+                    "BusinessDayDate": "10/04/2025 14:24:44",
+                    "WorkstationId": "402",
+                    "TransactionNumber": "TcQrBOxle2UFb",
+                    "BeginTimestamp": "18/07/2025 13:48:50",
+                    "EndTimestamp": "03/06/2025 14:31:46",
+                    "Department": "",
+                    "TransactionCurrency": "EQZ",
+                    "CustomerInfo": {
+                        "DataElementId": "",
+                        "DataElementValue": ""
+                    },
+                    "Tender": [
+                        {
+                            "TenderSequenceNumber": "1",
+                            "TenderTypeCode": "",
+                            "TenderAmount": 3174,
+                            "TenderId": "87874285371067",
+                            "TenderCurrency": "",
+                            "ReferenceId": "",
+                            "CreditCard": {
+                                "PaymentCard": "",
+                                "CardNumber": ""
+                            }
+                        }
+                    ],
+                    "RetailLineItem": [
+                        {
+                            "RetailLineNumber": "8",
+                            "RetailTypeCode": "0350",
+                            "RetailReasonCode": "sY",
+                            "ItemId": "34769686915",
+                            "RetailsQuantity": "9",
+                            "SalesUOM": "NIgJQ",
+                            "SalesAmount": 4313,
+                            "NormalSalesAmt": 1493,
+                            "Tax": {
+                                "TaxSequenceNumber": "7",
+                                "TaxTypeCode": "nT5P",
+                                "TaxAmount": 5790
+                            },
+                            "Discount": {
+                                "DiscountTypeCode": "0l",
+                                "ReductionAmount": 3711,
+                                "DiscountId": "9658",
+                                "BonusBuyId": "176235",
+                                "OfferId": ""
+                            },
+                            "GoodsMovement": {
+                                "GoodsMovementSequenceNumber": "4",
+                                "GoodsMovementTypeCode": "5764",
+                                "GoodsMovementReasonCode": "63",
+                                "ShipmentSite": "",
+                                "ToPartyId": ""
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}
