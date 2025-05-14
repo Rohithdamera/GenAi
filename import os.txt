@@ -7,16 +7,16 @@ import random
 import string
 from base64 import b64decode
 from Crypto.Cipher import AES
-
+ 
 # Setup logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# ===== Decryption Utils (if needed) =====
+ 
+# ========== Decryption (if needed) ==========
 def unpad(data):
     padding_length = data[-1]
     return data[:-padding_length]
-
+ 
 def decrypt(data, key):
     try:
         cipher = AES.new(b64decode(key), AES.MODE_ECB)
@@ -26,27 +26,28 @@ def decrypt(data, key):
     except Exception as e:
         logger.error(f"Error during decryption: {e}")
         raise ValueError(f"Error during decryption: {e}")
-
-# ===== Random Value Generator =====
+ 
+# ========== Data Generation ==========
+ 
 def random_datetime():
     return f"{random.randint(1,28):02}/{random.randint(1,12):02}/2025 {random.randint(0,23):02}:{random.randint(0,59):02}:{random.randint(0,59):02}"
-
+ 
 def random_uuid():
     sections = [8, 4, 4, 4, 12]
     return '-'.join(''.join(random.choices(string.hexdigits.lower(), k=s)) for s in sections)
-
+ 
 def random_string_like(value):
     if isinstance(value, str):
         if any(sep in value for sep in ['/', '-', ':']):
             return random_datetime()
-        elif len(value) in [36, 32]:
+        elif len(value) == 36 or len(value) == 32:
             return random_uuid()
         elif value.isdigit():
             return ''.join(random.choices(string.digits, k=len(value)))
         else:
             return ''.join(random.choices(string.ascii_letters + string.digits, k=len(value)))
     return value
-
+ 
 def generate_random_value_by_sample(sample_value):
     if isinstance(sample_value, int):
         return random.randint(1000, 9999)
@@ -56,120 +57,143 @@ def generate_random_value_by_sample(sample_value):
         return random.choice([True, False])
     elif isinstance(sample_value, str):
         return random_string_like(sample_value)
-    elif isinstance(sample_value, list):
-        return [generate_random_structure(sample_value[0]) if sample_value else {}]
-    elif isinstance(sample_value, dict):
-        return generate_random_structure(sample_value)
-    return None
-
+    elif sample_value is None:
+        return None
+    return sample_value
+ 
 def generate_random_structure(template):
     if isinstance(template, dict):
         return {k: generate_random_structure(v) for k, v in template.items()}
     elif isinstance(template, list):
         return [generate_random_structure(item) for item in template]
-    else:
-        return generate_random_value_by_sample(template)
-
-# ===== ZIP Extraction =====
+    return generate_random_value_by_sample(template)
+ 
+# ========== RAML Unzipping and Parsing ==========
+ 
 def unzip_raml(zip_bytes, extract_dir="/tmp/temp_raml"):
     if os.path.exists(extract_dir):
         shutil.rmtree(extract_dir)
     os.makedirs(extract_dir, exist_ok=True)
-
+ 
     zip_path = "/tmp/uploaded.zip"
     with open(zip_path, "wb") as f:
         f.write(zip_bytes)
-
+ 
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(extract_dir)
-
+ 
     return extract_dir
-
-# ===== Reference RAML File Discovery =====
-def find_reference_raml_file(base_dir):
+ 
+def find_main_raml_file(base_dir):
     for root, _, files in os.walk(base_dir):
         for file in files:
             if file.endswith(".raml"):
                 full_path = os.path.join(root, file)
                 with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-                    if "#%RAML 1.0" in content and "example:" in content:
+                    if "#%RAML 1.0" in f.readline():
                         return full_path
-    raise FileNotFoundError("Reference RAML file with example not found.")
-
-# ===== Resolve Includes & Extract Example JSON =====
+    raise FileNotFoundError("Main RAML file not found.")
+ 
 def resolve_include_path(include_path, root_dir, current_dir):
-    search_paths = [
-        os.path.join(current_dir, include_path),
-        os.path.join(root_dir, include_path)
-    ]
-    for path in search_paths:
-        if os.path.isfile(path):
-            return path
+    for base in [current_dir, root_dir, os.path.join(root_dir, 'examples', 'request')]:
+        full_path = os.path.normpath(os.path.join(base, include_path))
+        if os.path.isfile(full_path):
+            return full_path
+ 
+    for search_dir in [os.path.join(root_dir, 'examples', 'request'), root_dir]:
+        for root, _, files in os.walk(search_dir):
+            for f in files:
+                if f == os.path.basename(include_path):
+                    return os.path.join(root, f)
     return None
-
-def extract_json_from_raml(raml_file, root_dir):
-    with open(raml_file, 'r', encoding='utf-8', errors='ignore') as file:
-        lines = file.readlines()
-
-    example_lines = []
-    capture = False
-    include_path = None
-    current_dir = os.path.dirname(raml_file)
-
-    for line in lines:
-        if 'example:' in line:
-            if '!include' in line:
-                include_path = line.split('!include')[-1].strip()
-                break
+ 
+def resolve_includes_in_raml(file_path, root_dir):
+    resolved_lines = []
+    current_dir = os.path.dirname(file_path)
+ 
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
+        for line in file:
+            if "!include" in line:
+                parts = line.strip().split("!include")
+                prefix = parts[0].strip()
+                include_path = parts[1].strip()
+                include_file = resolve_include_path(include_path, root_dir, current_dir)
+ 
+                if include_file and os.path.exists(include_file):
+                    with open(include_file, 'r', encoding='utf-8', errors='ignore') as inc_file:
+                        resolved_lines.append(f"{prefix} |\n")
+                        for inc_line in inc_file.read().splitlines():
+                            resolved_lines.append(f"  {inc_line}")
+                else:
+                    resolved_lines.append(f"{line.strip()}  # Include not found")
             else:
-                capture = True
-                continue
-        if capture:
-            if line.strip() == '':
-                break
-            example_lines.append(line.strip())
-
-    if include_path:
-        include_file_path = resolve_include_path(include_path, root_dir, current_dir)
-        if not include_file_path:
-            raise FileNotFoundError(f"Included example file not found: {include_path}")
-        with open(include_file_path, 'r', encoding='utf-8', errors='ignore') as inc:
-            return json.load(inc)
-
-    example_str = '\n'.join(example_lines)
-    try:
-        return json.loads(example_str)
-    except Exception as e:
-        raise ValueError(f"Failed to parse inline example JSON: {e}")
-
-# ===== Lambda Handler =====
+                resolved_lines.append(line.rstrip())
+ 
+    return "\n".join(resolved_lines)
+ 
+# ========== RAML Test Payload Generation ==========
+ 
+def extract_endpoints_from_raml(raml_content):
+    endpoints = []
+    for line in raml_content.split('\n'):
+        if line.strip().startswith('/'):
+            endpoints.append(line.strip())
+    return endpoints
+ 
+def extract_fields_for_endpoint(endpoint, raml_content):
+    fields = {}
+    lines = raml_content.split('\n')
+    capture = False
+    for line in lines:
+        if line.strip() == endpoint:
+            capture = True
+        elif capture and line.startswith('/'):
+            break
+        elif capture and ':' in line:
+            parts = line.strip().split(':')
+            if len(parts) == 2:
+                fields[parts[0].strip()] = parts[1].strip() or "string"
+    return fields
+ 
+def generate_randomized_payload(field_template):
+    return {k: generate_random_value_by_sample(v) for k, v in field_template.items()}
+ 
+def generate_test_payloads(raml_content):
+    endpoints = extract_endpoints_from_raml(raml_content)
+    result = {}
+    for endpoint in endpoints:
+        template = extract_fields_for_endpoint(endpoint, raml_content)
+        result[endpoint] = [
+            generate_randomized_payload(template),
+            generate_randomized_payload(template)
+        ]
+    return result
+ 
+# ========== Lambda Handler ==========
+ 
 def lambda_handler(event, context):
     logger.info("Lambda function invoked.")
     try:
         if 'body' not in event or not event.get('isBase64Encoded', False):
             raise ValueError("File content is missing or not base64-encoded.")
-
+ 
         zip_bytes = b64decode(event['body'])
         extracted_dir = unzip_raml(zip_bytes)
-
-        reference_raml = find_reference_raml_file(extracted_dir)
-        logger.info(f"Reference RAML found: {reference_raml}")
-
-        example_json = extract_json_from_raml(reference_raml, extracted_dir)
-        logger.info(f"Example JSON structure extracted.")
-
-        randomized_data = generate_random_structure(example_json)
-
+        main_raml_file = find_main_raml_file(extracted_dir)
+        resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
+ 
+        payloads = generate_test_payloads(resolved_raml)
+ 
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(randomized_data, indent=2)
+            "body": json.dumps(payloads, indent=2)
         }
-
+ 
     except Exception as e:
         logger.error(f"Error during Lambda execution: {e}")
         return {
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
         }
+ 
