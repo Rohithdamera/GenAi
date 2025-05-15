@@ -1,214 +1,181 @@
-You said:
 import os
-import shutil
-import zipfile
-import json
 import logging
-import random
-import string
+import json
+import shutil
 from base64 import b64decode
 from Crypto.Cipher import AES
+from langchain_community.chat_models import AzureChatOpenAI
+from langchain.schema import HumanMessage
 
-# Setup logger
+# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========== Decryption (if needed) ==========
 def unpad(data):
-    padding_length = data[-1]
+    """Remove padding from decrypted data."""
+    padding_length = data[-1]  # The last byte indicates the padding length
     return data[:-padding_length]
 
 def decrypt(data, key):
+    """Decrypt the data using AES and remove padding."""
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)  # Using ECB mode for simplicity
+    decrypted_data = cipher.decrypt(b64decode(data))
+    decrypted_data = unpad(decrypted_data)  # Remove padding
+    return decrypted_data.decode()
+
+def get_openai_client(agent_name, model_instance_name):
+    """Initialize Azure OpenAI client using decrypted API credentials."""
     try:
-        cipher = AES.new(b64decode(key), AES.MODE_ECB)
-        decrypted_data = cipher.decrypt(b64decode(data))
-        decrypted_data = unpad(decrypted_data)
-        return decrypted_data.decode()
+        aes_key_base64 = os.environ['AES_KEY']
+        encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+        encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+        api_version = os.environ['AZURE_API_VERSION']
+
+        # Decrypt credentials
+        decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+        decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+
+        # Ensure the base URL ends with a slash
+        if not decrypted_api_base.endswith('/'):
+            decrypted_api_base += '/'
+
+        # Log the constructed request URL for debugging purposes
+        request_url = f"{decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}"
+        logger.info(f"Constructed Request URL: {request_url}")
+
+        # Return OpenAI client
+        return AzureChatOpenAI(
+            deployment_name=model_instance_name,
+            openai_api_base=decrypted_api_base,
+            openai_api_key=decrypted_api_key,
+            openai_api_version=api_version
+        )
     except Exception as e:
-        logger.error(f"Error during decryption: {e}")
-        raise ValueError(f"Error during decryption: {e}")
+        logger.error(f"Error initializing OpenAI client: {e}")
+        raise ValueError(f"Error initializing OpenAI client: {e}")
 
-# ========== Data Generation ==========
-def random_datetime():
-    return f"{random.randint(1,28):02}/{random.randint(1,12):02}/2025 {random.randint(0,23):02}:{random.randint(0,59):02}:{random.randint(0,59):02}"
-
-def random_uuid():
-    sections = [8, 4, 4, 4, 12]
-    return '-'.join(''.join(random.choices(string.hexdigits.lower(), k=s)) for s in sections)
-
-def random_string_like(value):
-    if isinstance(value, str):
-        if any(sep in value for sep in ['/', '-', ':']):
-            return random_datetime()
-        elif len(value) == 36 or len(value) == 32:
-            return random_uuid()
-        elif value.isdigit():
-            return ''.join(random.choices(string.digits, k=len(value)))
+def process_with_openai(client, file_content, agent_name):
+    """Process file content using OpenAI based on Agent_name."""
+    try:
+        if agent_name == "dwl_json":
+            prompt = (
+                "You are an expert in analyzing and converting DataWeave scripts into JSON structures. "
+                "Analyze the attached dwl logic and generate the input payloads for that. "
+                "The output should be a well-structured JSON array or object, *without any extra labels or keywords*. "
+                "Only return the raw JSON array or object. Do not include the words 'result', 'json', 'output', or any other labels."
+            )
+        elif agent_name == "raml_json":
+            prompt = (
+                '''You are an expert in analysing the RAML and generating the payload from the RAML.
+                 I am providing the RAML which will be used as an asset for designing my API.
+                 Please analyze the RAML and generate the sample payload with example data which will honor all the rules inside the RAML.
+                 You can refer the link for any doubts related to RAML https://raml.org/developers/raml-100-tutorial.
+                 Only return the raw JSON array or object. Do not include the words 'result', 'json', 'output', or any other labels.'''
+            )
+        elif agent_name == "xsd_json":
+            prompt = (
+                '''You are an expert in analysing the XSD and generating the payload from the XSD.
+                 I am providing the XSD which will be used as an asset for designing my API.
+                  Please analyze the XSD and generate the sample payload which will honor all the rules inside the XSD.
+                  You can refer the link for any doubts related to XSD https://www.tutorialspoint.com/xsd/index.html
+                  Only return the raw JSON array or object. Do not include the words 'result', 'json', 'output', or any other labels.'''
+            )
+        elif agent_name == "swagger_json":
+            prompt = (
+                '''You are an expert in analysing the Swagger and generating the payload from the Swagger.
+                I am providing the Swagger which will be used as an asset for designing my API.
+                Please analyze the Swagger and generate the sample payload which will honor all the rules inside the Swagger.
+                You can refer the link for any doubts related to Swagger https://swagger.io/solutions/api-design/
+                https://editor.swagger.io/
+                Only return the raw JSON array or object. Do not include the words 'result', 'json', 'output', or any other labels.'''
+            )
         else:
-            return ''.join(random.choices(string.ascii_letters + string.digits, k=len(value)))
-    return value
+            raise ValueError(f"Unsupported Agent_name: {agent_name}")
 
-def generate_random_value_by_sample(sample_value):
-    if isinstance(sample_value, int):
-        return random.randint(1000, 9999)
-    elif isinstance(sample_value, float):
-        return round(random.uniform(1.0, 10000.0), 2)
-    elif isinstance(sample_value, bool):
-        return random.choice([True, False])
-    elif isinstance(sample_value, str):
-        return random_string_like(sample_value)
-    elif sample_value is None:
-        return None
-    return sample_value
+        # Get OpenAI response
+        response = client.invoke([HumanMessage(content=prompt + "\n\n" + file_content)])
+        return response.content
+    except Exception as e:
+        logger.error(f"Error in OpenAI API call: {e}")
+        raise
 
-def generate_random_structure(template):
-    if isinstance(template, dict):
-        return {k: generate_random_structure(v) for k, v in template.items()}
-    elif isinstance(template, list):
-        return [generate_random_structure(item) for item in template]
-    return generate_random_value_by_sample(template)
+def process_file_content(agent_name, file_content, model_instance_name):
+    """Process the file content based on the agent name."""
+    try:
+        # Initialize OpenAI client
+        client = get_openai_client(agent_name, model_instance_name)
+        # Process the content using OpenAI
+        result = process_with_openai(client, file_content, agent_name)
+        return result
+    except Exception as e:
+        logger.error(f"Error processing file content: {e}")
+        raise
 
-# ========== RAML Unzipping and Parsing ==========
-def unzip_raml(zip_bytes, extract_dir="/tmp/temp_raml"):
-    if os.path.exists(extract_dir):
-        shutil.rmtree(extract_dir)
-    os.makedirs(extract_dir, exist_ok=True)
-
-    zip_path = "/tmp/uploaded.zip"
-    with open(zip_path, "wb") as f:
-        f.write(zip_bytes)
-
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(extract_dir)
-
-    return extract_dir
-
-def find_main_raml_file(base_dir):
-    for root, _, files in os.walk(base_dir):
-        for file in files:
-            if file.endswith(".raml"):
-                full_path = os.path.join(root, file)
-                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    if "#%RAML 1.0" in f.readline():
-                        return full_path
-    raise FileNotFoundError("Main RAML file not found.")
-
-def resolve_include_path(include_path, root_dir, current_dir):
-    for base in [current_dir, root_dir, os.path.join(root_dir, 'examples', 'request')]:
-        full_path = os.path.normpath(os.path.join(base, include_path))
-        if os.path.isfile(full_path):
-            return full_path
-
-    for search_dir in [os.path.join(root_dir, 'examples', 'request'), root_dir]:
-        for root, _, files in os.walk(search_dir):
-            for f in files:
-                if f == os.path.basename(include_path):
-                    return os.path.join(root, f)
-    return None
-
-def resolve_includes_in_raml(file_path, root_dir):
-    resolved_lines = []
-    current_dir = os.path.dirname(file_path)
-
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
-        for line in file:
-            if "!include" in line:
-                parts = line.strip().split("!include")
-                prefix = parts[0].strip()
-                include_path = parts[1].strip()
-                include_file = resolve_include_path(include_path, root_dir, current_dir)
-
-                if include_file and os.path.exists(include_file):
-                    with open(include_file, 'r', encoding='utf-8', errors='ignore') as inc_file:
-                        resolved_lines.append(f"{prefix} |\n")
-                        for inc_line in inc_file.read().splitlines():
-                            resolved_lines.append(f"  {inc_line}")
-                else:
-                    resolved_lines.append(f"{line.strip()}  # Include not found")
-            else:
-                resolved_lines.append(line.rstrip())
-
-    return "\n".join(resolved_lines)
-
-# ========== RAML Test Payload Generation ==========
-def extract_endpoints_from_raml(raml_content):
-    endpoints = []
-    for line in raml_content.split('\n'):
-        if line.strip().startswith('/'):
-            endpoints.append(line.strip())
-    return endpoints
-
-def extract_fields_for_endpoint(endpoint, raml_content):
-    fields = {}
-    lines = raml_content.split('\n')
-    capture = False
-    for line in lines:
-        if line.strip() == endpoint:
-            capture = True
-        elif capture and line.startswith('/'):
-            break
-        elif capture and ':' in line:
-            parts = line.strip().split(':')
-            if len(parts) == 2:
-                fields[parts[0].strip()] = parts[1].strip() or "string"
-    return fields
-
-def generate_randomized_payload(field_template):
-    return {k: generate_random_value_by_sample(v) for k, v in field_template.items()}
-
-def generate_test_payloads(raml_content):
-    endpoints = extract_endpoints_from_raml(raml_content)
-    result = {}
-    for endpoint in endpoints:
-        template = extract_fields_for_endpoint(endpoint, raml_content)
-        result[endpoint] = [
-            generate_randomized_payload(template),
-            generate_randomized_payload(template)
-        ]
-    return result
-
-# ========== Lambda Handler ==========
-def build_dynamic_prompt(model_instance_name):
-    """Build a dynamic prompt based on the model instance name."""
-    return (
-        f"You are an expert RAML analyzer. Using the model instance '{model_instance_name}', "
-        "analyze the provided RAML content, focusing solely on POST methods. Resolve all references to "
-        "traits, resource types, and fragments. Identify and extract any required data from subfolder references. "
-        "Then generate realistic, randomized test payloads for each POST endpoint while strictly preserving the field names, "
-        "structure, and data types. Ensure that the output is clean, valid JSON without extra metadata or explanations, "
-        "and matches the exact structure from the reference .rml files."
-    )
+def validate_file_type(agent_name, file_content):
+    """Validate the file type based on the agent name."""
+    if agent_name == "dwl_json" and not file_content.strip().startswith("%dw"):
+        raise ValueError("Invalid file type for agent 'dwl_json'. Expected a DataWeave (dwl) file.")
+    elif agent_name == "raml_json" and not file_content.strip().startswith("#%RAML"):
+        raise ValueError("Invalid file type for agent 'raml_json'. Expected a RAML file.")
+    elif agent_name == "xsd_json" and not file_content.strip().startswith("<?xml"):
+        raise ValueError("Invalid file type for agent 'xsd_json'. Expected an XSD file.")
+    elif agent_name == "swagger_json" and not file_content.strip().startswith("swagger:"):
+        raise ValueError("Invalid file type for agent 'swagger_json'. Expected a Swagger (JSON) file.")
 
 def lambda_handler(event, context):
-    logger.info("Lambda function invoked.")
+    """AWS Lambda entry point."""
+    logger.info(f"Received event: {json.dumps(event)}")  # Log the entire event
+
     try:
-        if 'body' not in event or not event.get('isBase64Encoded', False):
-            raise ValueError("File content is missing or not base64-encoded.")
+        # Check if the file is uploaded in binary format
+        if 'body' not in event or 'isBase64Encoded' not in event or not event['isBase64Encoded']:
+            raise ValueError("File content is missing or not base64-encoded in the event.")
 
-        zip_bytes = b64decode(event['body'])
-        extracted_dir = unzip_raml(zip_bytes)
-        main_raml_file = find_main_raml_file(extracted_dir)
-        resolved_raml = resolve_includes_in_raml(main_raml_file, extracted_dir)
+        # Decode the binary file content
+        file_content = b64decode(event['body']).decode('utf-8')
 
-        # Get model_instance_name from request header
-        model_instance_name = event.get("headers", {}).get("model_instance_name", "default_instance")
+        # Extract query parameters to determine the Agent_name
+        query_params = event.get('queryStringParameters', {})
+        agent_name = query_params.get('Agent_name')
+        if not agent_name:
+            raise ValueError("'Agent_name' is missing in the query parameters.")
 
-        # Build dynamic prompt
-        dynamic_prompt = build_dynamic_prompt(model_instance_name)
-        logger.info(f"Dynamic prompt built: {dynamic_prompt}")
+        # Validate agent_name
+        valid_agent_names = ["dwl_json", "raml_json", "xsd_json", "swagger_json"]
+        if agent_name not in valid_agent_names:
+            raise ValueError(f"Unsupported Agent_name specified: {agent_name}. Valid values are: {', '.join(valid_agent_names)}")
 
-        # Generate test payloads based on the RAML content
-        payloads = generate_test_payloads(resolved_raml)
+        # Validate file type
+        validate_file_type(agent_name, file_content)
 
+        # Extract model_instance_name from headers
+        model_instance_name = event['headers'].get('model_instance_name', None)
+        if not model_instance_name:
+            raise ValueError("'model_instance_name' is missing in the headers.")
+
+        # Process the file content
+        processed_result = process_file_content(agent_name, file_content, model_instance_name)
+
+        # Return response in the appropriate format
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(payloads, indent=2)
+            "body": processed_result  # JSON response
         }
 
     except Exception as e:
-        logger.error(f"Error during Lambda execution: {e}")
+        logger.error(f"An error occurred: {e}")
         return {
             "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
+            "body": json.dumps({
+                "error": str(e)
+            })
         }
+
+
+
+
+
+
+
+
