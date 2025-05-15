@@ -6,11 +6,9 @@ import string
 from base64 import b64decode
 from Crypto.Cipher import AES
 
-# Logger setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Decryption helpers
 def unpad(data):
     return data[:-data[-1]]
 
@@ -23,7 +21,6 @@ def decrypt(data, key):
         logger.error(f"Decryption error: {e}")
         raise ValueError(f"Decryption error: {e}")
 
-# JSON extraction
 def detect_and_extract_json(content):
     try:
         return json.loads(content)
@@ -33,12 +30,13 @@ def detect_and_extract_json(content):
             raise ValueError("No JSON found.")
         return json.loads(content[json_start:])
 
-# Random generators
 def random_datetime():
     return f"{random.randint(1,28):02}/{random.randint(1,12):02}/2025 {random.randint(0,23):02}:{random.randint(0,59):02}:{random.randint(0,59):02}"
 
-def random_uuid():
-    return '-'.join(''.join(random.choices(string.hexdigits.lower(), k=s)) for s in [8, 4, 4, 4, 12])
+def random_uuid_like():
+    # Format similar to UUID but purely random alphanumeric sections, length based on standard UUID parts
+    sections = [8, 4, 4, 4, 12]
+    return '-'.join(''.join(random.choices(string.ascii_lowercase + string.digits, k=s)) for s in sections)
 
 def random_string(length):
     return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
@@ -49,57 +47,66 @@ def generate_id(length):
 def random_currency_code():
     return ''.join(random.choices(string.ascii_uppercase, k=3))
 
-# Enhanced string analyzer
-def smart_string_generator(field, value):
-    if isinstance(value, str):
-        if value.isdigit():
-            return ''.join(random.choices(string.digits, k=len(value)))
-        elif len(value) == 3 and value.isalpha() and value.isupper():
-            return random_currency_code()
-        elif any(sep in value for sep in ['/', '-', ':']):
-            return random_datetime()
-        elif len(value) >= 10 and field.lower().endswith("id"):
-            return generate_id(len(value))
-        elif any(c.isdigit() for c in value) and any(c.isalpha() for c in value):
-            return ''.join(random.choices(string.ascii_uppercase + string.digits, k=len(value)))
-        else:
-            return random_string(len(value))
-    return value
+def looks_like_uuid(value):
+    # Heuristic: contains dashes and hex digits, length >= 20, etc.
+    if not isinstance(value, str):
+        return False
+    dash_count = value.count('-')
+    if dash_count >= 3 and all(c in string.hexdigits + '-' for c in value):
+        return True
+    if len(value) == 32 and all(c in string.hexdigits for c in value):
+        return True
+    return False
 
-def generate_random_value_by_sample(field, value):
+def generate_value_for_field(field, value):
+    field_lower = field.lower() if isinstance(field, str) else ""
+    
+    # Priority 1: If field looks like an ID field or value looks like UUID -> generate UUID-like string
+    if ("id" in field_lower or "instance" in field_lower or "uuid" in field_lower) or looks_like_uuid(value):
+        # generate UUID-like string regardless of input length for better format consistency
+        return random_uuid_like()
+    
+    # Priority 2: Currency code (3-letter uppercase)
+    if isinstance(value, str) and len(value) == 3 and value.isalpha() and value.isupper():
+        return random_currency_code()
+    
+    # Priority 3: If value is string and looks like a date (contains / or :) and field is NOT ID-like, generate date
+    if (isinstance(value, str) and any(sep in value for sep in ['/', '-', ':']) 
+        and not ("id" in field_lower or "instance" in field_lower)):
+        return random_datetime()
+    
+    # Priority 4: Numeric strings -> generate new numeric strings of same length
+    if isinstance(value, str) and value.isdigit():
+        return ''.join(random.choices(string.digits, k=len(value)))
+    
+    # Priority 5: Alphanumeric strings with digits & letters
+    if isinstance(value, str) and any(c.isdigit() for c in value) and any(c.isalpha() for c in value):
+        return ''.join(random.choices(string.ascii_uppercase + string.digits, k=len(value)))
+    
+    # Priority 6: Default string of same length
+    if isinstance(value, str):
+        return random_string(len(value))
+    
+    # Numbers, bools, None
     if isinstance(value, int):
         return random.randint(1000, 999999)
-    elif isinstance(value, float):
+    if isinstance(value, float):
         return round(random.uniform(10.0, 99999.9), 2)
-    elif isinstance(value, bool):
+    if isinstance(value, bool):
         return random.choice([True, False])
-    elif isinstance(value, str):
-        if value.isdigit():
-            return ''.join(random.choices(string.digits, k=len(value)))
-        return smart_string_generator(field, value)
+    if value is None:
+        return None
+    
     return value
-
-def generate_random_structure(template):
-    if isinstance(template, dict):
-        return {k: generate_random_structure(v) for k, v in template.items()}
-    elif isinstance(template, list):
-        return [generate_random_structure(item) for item in template]
-    return generate_random_value_by_sample("", template)
 
 def generate_random_structure_with_fields(template, parent_key=""):
     if isinstance(template, dict):
-        return {
-            k: generate_random_structure_with_fields(v, k)
-            for k, v in template.items()
-        }
+        return {k: generate_random_structure_with_fields(v, k) for k, v in template.items()}
     elif isinstance(template, list):
-        return [
-            generate_random_structure_with_fields(v, parent_key)
-            for v in template
-        ]
-    return generate_random_value_by_sample(parent_key, template)
+        return [generate_random_structure_with_fields(v, parent_key) for v in template]
+    else:
+        return generate_value_for_field(parent_key, template)
 
-# Header extractors
 def get_model_instance_name(event):
     return event.get('headers', {}).get('model_instance_name', 'chatbot_' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=6)))
 
@@ -112,14 +119,14 @@ def get_count_from_headers(event):
 def build_dynamic_prompt(model_instance_name):
     return (
         f"You are a smart JSON data generator named '{model_instance_name}'. "
-        "Generate diverse and realistic JSON data based on the structure and type. "
-        "For string values that look numeric, generate new string numbers. "
-        "For ID-like fields, create realistic unique IDs. "
-        "For currency fields, use random 3-letter codes like USD, EUR, etc. "
-        "Ensure each data set is different based on structure, format, and type."
+        "Generate realistic randomized JSON data preserving the input structure and data types. "
+        "For fields whose names or values look like IDs or UUIDs, generate random UUID-like strings (e.g. '4fv62g5r2-ccq2-1b5t-129007'). "
+        "For currency fields, generate random 3-letter uppercase currency codes. "
+        "For date/time strings that are NOT IDs, generate random realistic datetime strings. "
+        "For numeric strings, generate numeric strings of the same length. "
+        "Ensure all outputs match the input field types and formats as closely as possible, with no hardcoded values."
     )
 
-# Lambda Handler
 def lambda_handler(event, context):
     logger.info("Lambda triggered")
 
@@ -137,6 +144,7 @@ def lambda_handler(event, context):
         prompt = build_dynamic_prompt(model_instance)
 
         logger.info(f"Generating {count} datasets using model: {model_instance}")
+        logger.debug(f"Prompt: {prompt}")
 
         result = [generate_random_structure_with_fields(json_input) for _ in range(count)]
 
