@@ -1,165 +1,155 @@
-import os
-import logging
+
 import json
+import base64
+import logging
 import random
 import string
 from base64 import b64decode
 from Crypto.Cipher import AES
-from langchain_community.chat_models import AzureChatOpenAI
-from langchain.schema import HumanMessage
 
-# Set up logging
+# Initialize logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Utility Functions
 def unpad(data):
+    """Remove padding from decrypted data."""
     padding_length = data[-1]
     return data[:-padding_length]
 
 def decrypt(data, key):
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted_data = cipher.decrypt(b64decode(data))
-    return unpad(decrypted_data).decode()
-
-def get_openai_client(agent_name, model_instance_name):
+    """Decrypt data using AES encryption."""
     try:
-        aes_key_base64 = os.environ['AES_KEY']
-        encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-        encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-        api_version = os.environ['AZURE_API_VERSION']
-
-        decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-        decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
-
-        if not decrypted_api_base.endswith('/'):
-            decrypted_api_base += '/'
-
-        logger.info(f"Request URL: {decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}")
-
-        return AzureChatOpenAI(
-            deployment_name=model_instance_name,
-            openai_api_base=decrypted_api_base,
-            openai_api_key=decrypted_api_key,
-            openai_api_version=api_version
-        )
+        cipher = AES.new(b64decode(key), AES.MODE_ECB)
+        decrypted_data = cipher.decrypt(b64decode(data))
+        decrypted_data = unpad(decrypted_data)
+        return decrypted_data.decode()
     except Exception as e:
-        logger.error(f"OpenAI client initialization failed: {e}")
-        raise ValueError(f"OpenAI client initialization failed: {e}")
+        logger.error(f"Error during decryption: {e}")
+        raise ValueError(f"Error during decryption: {e}")
 
-def detect_agent_name(file_content):
-    file_content = file_content.strip()
-    if file_content.startswith("%dw"):
-        return "dwl_json"
-    elif file_content.startswith("#%RAML"):
-        return "raml_json"
-    elif file_content.startswith("<?xml"):
-        if "xsl:stylesheet" in file_content or "<xsl:stylesheet" in file_content:
-            return "xslt_json"
+def detect_and_extract_json(content):
+    """Try to parse content as JSON, handle edge cases."""
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        pass
+
+    json_start = content.find('{')
+    if json_start == -1:
+        raise ValueError("No JSON object found in file content.")
+
+    json_text = content[json_start:]
+    try:
+        return json.loads(json_text)
+    except json.JSONDecodeError:
+        raise ValueError("Embedded JSON block could not be parsed.")
+
+# Data Generation Helpers
+def random_datetime():
+    """Generate random datetime string."""
+    return f"{random.randint(1,28):02}/{random.randint(1,12):02}/2025 {random.randint(0,23):02}:{random.randint(0,59):02}:{random.randint(0,59):02}"
+
+def random_uuid():
+    """Generate random UUID."""
+    sections = [8, 4, 4, 4, 12]
+    return '-'.join(''.join(random.choices(string.hexdigits.lower(), k=s)) for s in sections)
+
+def random_string_like(value):
+    """Generate random string matching the structure of the given value."""
+    if isinstance(value, str):
+        if any(sep in value for sep in ['/', '-', ':']):
+            return random_datetime()
+        elif len(value) == 36 or len(value) == 32:
+            return random_uuid()
+        elif value.isdigit():
+            return ''.join(random.choices(string.digits, k=len(value)))
         else:
-            return "xsd_json"
-    elif file_content.startswith("swagger:") or "openapi:" in file_content:
-        return "swagger_json"
-    else:
-        raise ValueError("Unsupported or unrecognized file type.")
+            return ''.join(random.choices(string.ascii_letters + string.digits, k=len(value)))
+    return value
 
-def get_prompt(agent_name, file_content, iteration=None, total=None):
-    base_instruction = ""
-    type_instruction = (
-        "Generate a realistic JSON dataset based on the structure in the file. "
-        "If a field is of type string, generate a sample string. "
-        "If a field is of type integer, use a valid integer. "
-        "Respect the types exactly. Output only valid JSON. "
+def generate_random_value_by_sample(sample_value):
+    """Generate a random value based on the sample's type."""
+    if isinstance(sample_value, int):
+        return random.randint(1000, 9999)
+    elif isinstance(sample_value, float):
+        return round(random.uniform(1.0, 10000.0), 2)
+    elif isinstance(sample_value, bool):
+        return random.choice([True, False])
+    elif isinstance(sample_value, str):
+        return random_string_like(sample_value)
+    elif sample_value is None:
+        return None
+    return sample_value
+
+def generate_random_structure(template):
+    """Recursively generate a random structure based on the input template."""
+    if isinstance(template, dict):
+        return {k: generate_random_structure(v) for k, v in template.items()}
+    elif isinstance(template, list):
+        return [generate_random_structure(item) for item in template]
+    return generate_random_value_by_sample(template)
+
+# Event Header Extraction
+def get_model_instance_name(event):
+    """Retrieve model instance name from headers or generate a random one."""
+    return event.get('headers', {}).get('model_instance_name', 'chatbot_' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=6)))
+
+def get_count_from_headers(event):
+    """Retrieve the count from headers or default to 1."""
+    try:
+        return max(1, int(event.get('headers', {}).get('count', '1')))
+    except Exception:
+        return 1
+
+def build_dynamic_prompt(model_instance_name):
+    """Build a dynamic prompt based on the model instance name."""
+    return (
+        f"You are an expert RAML analyzer. Using the model instance '{model_instance_name}', "
+        "analyze the provided RAML content. Resolve all includes such as traits, resource types, and fragments. "
+        "Then generate realistic randomized test payloads for each endpoint while preserving the field names, "
+        "structure, and data types. Ensure the output is in clean JSON format without explanations."
     )
 
-    # Add specific agent prompts
-    if agent_name == "dwl_json":
-        base_instruction = "You are an expert in analyzing DataWeave (.dwl) scripts."
-    elif agent_name == "raml_json":
-        base_instruction = "You are an expert in RAML. Analyze the RAML file and generate realistic example JSON data."
-    elif agent_name == "xsd_json":
-        base_instruction = "You are an expert in XML Schema. Analyze the schema and generate valid JSON samples."
-    elif agent_name == "swagger_json":
-        base_instruction = "You are an expert in Swagger/OpenAPI. Generate valid request JSON based on the spec."
-    elif agent_name == "xslt_json":
-        base_instruction = "You are an expert in XSLT and JSON transformation. Generate a sample input JSON based on the .xslt file."
-    else:
-        raise ValueError(f"Unsupported agent name: {agent_name}")
-
-    variation_instruction = ""
-    if iteration is not None and total is not None:
-        variation_instruction = f"This is sample {iteration + 1} of {total}. Ensure this sample is different from others."
-
-    full_prompt = f"""{base_instruction}
-{type_instruction}
-{variation_instruction}
-
-Content:
-{file_content}
-
-Only return JSON. No explanations.
-"""
-    return full_prompt
-
-def parse_response_as_json(response_content):
-    try:
-        return json.loads(response_content)
-    except json.JSONDecodeError:
-        cleaned = response_content.strip()
-        try:
-            # Try fixing common non-JSON issues (like triple backticks)
-            if cleaned.startswith("```json"):
-                cleaned = cleaned.replace("```json", "").replace("```", "").strip()
-            return json.loads(cleaned)
-        except Exception as e:
-            raise ValueError(f"Invalid JSON from model: {e}\nRaw output:\n{response_content}")
-
-def process_with_openai(client, file_content, agent_name, count):
-    results = []
-
-    for i in range(count):
-        prompt = get_prompt(agent_name, file_content, i, count)
-        try:
-            response = client.invoke([HumanMessage(content=prompt)])
-            parsed = parse_response_as_json(response.content)
-            results.append(parsed)
-        except Exception as e:
-            logger.error(f"OpenAI call failed at iteration {i+1}: {e}")
-            raise
-
-    return results if count > 1 else results[0]
-
-def process_file_content(file_content, model_instance_name, count):
-    agent_name = detect_agent_name(file_content)
-    client = get_openai_client(agent_name, model_instance_name)
-    return process_with_openai(client, file_content, agent_name, count)
-
+# Lambda Handler
 def lambda_handler(event, context):
-    logger.info(f"Received event: {json.dumps(event)}")
-
+    """Main Lambda function handler."""
+    logger.info("Lambda function invoked.")
     try:
-        if 'body' not in event or not event['isBase64Encoded']:
-            raise ValueError("Missing or invalid file content.")
+        # Retrieve and decode file content (base64 or plain text)
+        body = event.get('body')
+        if not body:
+            raise ValueError("Missing file content in request.")
 
-        file_content = b64decode(event['body']).decode('utf-8')
-        headers = event.get('headers', {})
+        if event.get('isBase64Encoded', False):
+            raw_content = base64.b64decode(body).decode('utf-8', errors='replace')
+        else:
+            raw_content = body
 
-        model_instance_name = headers.get('model_instance_name')
-        if not model_instance_name:
-            raise ValueError("Missing 'model_instance_name' in headers.")
+        # Parse and extract JSON data from the content
+        original_data = detect_and_extract_json(raw_content)
 
-        count = int(headers.get('count', 1))  # default to 1 if not passed
+        # Extract model instance name and count from headers
+        model_instance_name = get_model_instance_name(event)
+        count = get_count_from_headers(event)
+        prompt = build_dynamic_prompt(model_instance_name)
 
-        result = process_file_content(file_content, model_instance_name, count)
+        logger.info(f"Model instance: {model_instance_name}, Dataset count: {count}")
+        logger.debug(f"Prompt: {prompt}")
+
+        # Generate the random datasets
+        datasets = [generate_random_structure(original_data) for _ in range(count)]
 
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(result, indent=2)
+            "body": json.dumps({"datasets": datasets})
         }
 
     except Exception as e:
-        logger.error(f"Processing failed: {e}")
+        logger.error(f"Error: {e}")
         return {
             "statusCode": 500,
+            "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"error": str(e)})
         }
