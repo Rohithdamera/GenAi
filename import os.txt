@@ -48,7 +48,6 @@ def get_openai_client(agent_name, model_instance_name):
 
 def detect_agent_name(file_content):
     file_content = file_content.strip()
-
     if file_content.startswith("%dw"):
         return "dwl_json"
     elif file_content.startswith("#%RAML"):
@@ -63,60 +62,68 @@ def detect_agent_name(file_content):
     else:
         raise ValueError("Unsupported or unrecognized file type.")
 
-def get_prompt(agent_name, iteration=None, total=None):
+def get_prompt(agent_name, file_content, iteration=None, total=None):
     base_instruction = ""
+    type_instruction = (
+        "Generate a realistic JSON dataset based on the structure in the file. "
+        "If a field is of type string, generate a sample string. "
+        "If a field is of type integer, use a valid integer. "
+        "Respect the types exactly. Output only valid JSON. "
+    )
 
+    # Add specific agent prompts
     if agent_name == "dwl_json":
-        base_instruction = (
-            "You are an expert in analyzing and converting DataWeave scripts into JSON structures. "
-            "Analyze the attached dwl logic and generate a realistic sample input payload. "
-            "Ensure the output is a different JSON data set for each request. "
-        )
+        base_instruction = "You are an expert in analyzing DataWeave (.dwl) scripts."
     elif agent_name == "raml_json":
-        base_instruction = (
-            "You are an expert in RAML and generating realistic example JSON payloads. "
-            "Analyze the RAML content and create a realistic sample input JSON. "
-            "Ensure each output is different when multiple sets are requested. "
-        )
+        base_instruction = "You are an expert in RAML. Analyze the RAML file and generate realistic example JSON data."
     elif agent_name == "xsd_json":
-        base_instruction = (
-            "You are an expert in XSD and can generate realistic JSON structures. "
-            "Analyze the XML schema and produce one valid example JSON input. "
-            "Ensure the generated JSON is different for each sample in repeated requests. "
-        )
+        base_instruction = "You are an expert in XML Schema. Analyze the schema and generate valid JSON samples."
     elif agent_name == "swagger_json":
-        base_instruction = (
-            "You are an expert in Swagger/OpenAPI and can generate realistic JSON request bodies. "
-            "Based on the Swagger spec, generate one valid and varied JSON object. "
-            "Ensure output varies with each request when count > 1. "
-        )
+        base_instruction = "You are an expert in Swagger/OpenAPI. Generate valid request JSON based on the spec."
     elif agent_name == "xslt_json":
-        base_instruction = (
-            "You are an expert in XSLT and JSON test generation. "
-            "Analyze the transformation rules and generate a realistic input JSON "
-            "that would match expected transformation patterns. "
-            "If multiple examples are needed, each must be different. "
-        )
+        base_instruction = "You are an expert in XSLT and JSON transformation. Generate a sample input JSON based on the .xslt file."
     else:
         raise ValueError(f"Unsupported agent name: {agent_name}")
 
-    # Append count-specific instructions
+    variation_instruction = ""
     if iteration is not None and total is not None:
-        base_instruction += f"\nThis is sample {iteration + 1} of {total}. Make this dataset different from others."
+        variation_instruction = f"This is sample {iteration + 1} of {total}. Ensure this sample is different from others."
 
-    return base_instruction
+    full_prompt = f"""{base_instruction}
+{type_instruction}
+{variation_instruction}
+
+Content:
+{file_content}
+
+Only return JSON. No explanations.
+"""
+    return full_prompt
+
+def parse_response_as_json(response_content):
+    try:
+        return json.loads(response_content)
+    except json.JSONDecodeError:
+        cleaned = response_content.strip()
+        try:
+            # Try fixing common non-JSON issues (like triple backticks)
+            if cleaned.startswith("```json"):
+                cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+            return json.loads(cleaned)
+        except Exception as e:
+            raise ValueError(f"Invalid JSON from model: {e}\nRaw output:\n{response_content}")
 
 def process_with_openai(client, file_content, agent_name, count):
     results = []
 
     for i in range(count):
-        prompt = get_prompt(agent_name, i, count)
-        full_prompt = prompt + "\n\n" + file_content
+        prompt = get_prompt(agent_name, file_content, i, count)
         try:
-            response = client.invoke([HumanMessage(content=full_prompt)])
-            results.append(json.loads(response.content))
+            response = client.invoke([HumanMessage(content=prompt)])
+            parsed = parse_response_as_json(response.content)
+            results.append(parsed)
         except Exception as e:
-            logger.error(f"OpenAI call failed on iteration {i+1}: {e}")
+            logger.error(f"OpenAI call failed at iteration {i+1}: {e}")
             raise
 
     return results if count > 1 else results[0]
