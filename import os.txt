@@ -1,7 +1,6 @@
 import os
 import logging
 import json
-import shutil
 from base64 import b64decode
 from Crypto.Cipher import AES
 from langchain_community.chat_models import AzureChatOpenAI
@@ -12,16 +11,19 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def unpad(data):
+    """Remove padding from decrypted data."""
     padding_length = data[-1]
     return data[:-padding_length]
 
 def decrypt(data, key):
+    """Decrypt the data using AES and remove padding."""
     cipher = AES.new(b64decode(key), AES.MODE_ECB)
     decrypted_data = cipher.decrypt(b64decode(data))
     decrypted_data = unpad(decrypted_data)
     return decrypted_data.decode()
 
-def get_openai_client(model_instance_name):
+def get_openai_client(agent_name, model_instance_name):
+    """Initialize Azure OpenAI client using decrypted credentials."""
     try:
         aes_key_base64 = os.environ['AES_KEY']
         encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
@@ -34,8 +36,7 @@ def get_openai_client(model_instance_name):
         if not decrypted_api_base.endswith('/'):
             decrypted_api_base += '/'
 
-        request_url = f"{decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}"
-        logger.info(f"Constructed Request URL: {request_url}")
+        logger.info(f"Constructed Request URL: {decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}")
 
         return AzureChatOpenAI(
             deployment_name=model_instance_name,
@@ -47,45 +48,60 @@ def get_openai_client(model_instance_name):
         logger.error(f"Error initializing OpenAI client: {e}")
         raise ValueError(f"Error initializing OpenAI client: {e}")
 
-def detect_agent_type(file_content):
-    stripped = file_content.strip()
-    if stripped.startswith("%dw"):
+def detect_agent_name(file_content):
+    """Detect the agent name automatically based on file content."""
+    file_content = file_content.strip()
+
+    if file_content.startswith("%dw"):
         return "dwl_json"
-    elif stripped.startswith("#%RAML"):
+    elif file_content.startswith("#%RAML"):
         return "raml_json"
-    elif stripped.startswith("<?xml"):
-        return "xsd_json"
-    elif "swagger:" in stripped or "openapi:" in stripped:
+    elif file_content.startswith("<?xml"):
+        if "xsl:stylesheet" in file_content or "<xsl:stylesheet" in file_content:
+            return "xslt_json"
+        else:
+            return "xsd_json"
+    elif file_content.startswith("swagger:") or "openapi:" in file_content:
         return "swagger_json"
     else:
-        raise ValueError("Could not automatically detect file type. Please verify file content.")
+        raise ValueError("Unsupported or unrecognized file type. Cannot detect file format.")
 
 def process_with_openai(client, file_content, agent_name):
+    """Call OpenAI with a prompt based on the agent name."""
     try:
         if agent_name == "dwl_json":
             prompt = (
                 "You are an expert in analyzing and converting DataWeave scripts into JSON structures. "
-                "Analyze the attached dwl logic and generate the input payloads for that. "
-                "The output should be a well-structured JSON array or object, *without any extra labels or keywords*. "
-                "Only return the raw JSON array or object."
+                "Analyze the attached dwl logic and generate the input payloads. "
+                "Only return the raw JSON array or object without any labels or keywords."
             )
         elif agent_name == "raml_json":
             prompt = (
-                "You are an expert in analysing the RAML and generating the payload from the RAML. "
-                "Please analyze the RAML and generate the sample payload with example data which will honor all the rules inside the RAML. "
+                "You are an expert in analyzing RAML to generate example JSON payloads. "
+                "Analyze the RAML and generate a sample payload honoring all rules. "
+                "Refer to https://raml.org/developers/raml-100-tutorial if needed. "
                 "Only return the raw JSON array or object."
             )
         elif agent_name == "xsd_json":
             prompt = (
-                "You are an expert in analysing the XSD and generating the payload from the XSD. "
-                "Please analyze the XSD and generate the sample payload which will honor all the rules inside the XSD. "
+                "You are an expert in analyzing XSD and generating JSON payloads. "
+                "Analyze the XSD and generate a sample JSON structure following all rules. "
+                "Refer: https://www.tutorialspoint.com/xsd/index.htm. "
                 "Only return the raw JSON array or object."
             )
         elif agent_name == "swagger_json":
             prompt = (
-                "You are an expert in analysing the Swagger file and generating the payload from the Swagger. "
-                "Please analyze the Swagger and generate the sample payload which will honor all the rules inside the Swagger. "
+                "You are an expert in analyzing Swagger or OpenAPI specs and generating JSON payloads. "
+                "Analyze the Swagger spec and generate a valid JSON payload. "
+                "Refer: https://swagger.io/solutions/api-design/. "
                 "Only return the raw JSON array or object."
+            )
+        elif agent_name == "xslt_json":
+            prompt = (
+                "You are an expert in analyzing XSLT and generating JSON test data. "
+                "Analyze the XSLT rules and transform logic, then generate an example input JSON "
+                "structure that could be used for testing the XSLT transformation. "
+                "Only return the raw JSON array or object without any labels or explanations."
             )
         else:
             raise ValueError(f"Unsupported Agent_name: {agent_name}")
@@ -96,34 +112,38 @@ def process_with_openai(client, file_content, agent_name):
         logger.error(f"Error in OpenAI API call: {e}")
         raise
 
+def process_file_content(file_content, model_instance_name):
+    """Detect agent type, then process the file."""
+    try:
+        agent_name = detect_agent_name(file_content)
+        client = get_openai_client(agent_name, model_instance_name)
+        result = process_with_openai(client, file_content, agent_name)
+        return result
+    except Exception as e:
+        logger.error(f"Error processing file content: {e}")
+        raise
+
 def lambda_handler(event, context):
+    """AWS Lambda handler."""
     logger.info(f"Received event: {json.dumps(event)}")
 
     try:
         if 'body' not in event or 'isBase64Encoded' not in event or not event['isBase64Encoded']:
-            raise ValueError("File content is missing or not base64-encoded in the event.")
+            raise ValueError("File content is missing or not base64-encoded.")
 
-        # Decode the binary file content
         file_content = b64decode(event['body']).decode('utf-8')
 
-        # Automatically detect the agent name from the file content
-        agent_name = detect_agent_type(file_content)
-
-        # Extract model_instance_name from headers
-        model_instance_name = event['headers'].get('model_instance_name')
+        headers = event.get('headers', {})
+        model_instance_name = headers.get('model_instance_name')
         if not model_instance_name:
-            raise ValueError("'model_instance_name' is missing in the headers.")
+            raise ValueError("'model_instance_name' is missing in headers.")
 
-        # Initialize OpenAI client
-        client = get_openai_client(model_instance_name)
-
-        # Process file content using OpenAI
-        result = process_with_openai(client, file_content, agent_name)
+        processed_result = process_file_content(file_content, model_instance_name)
 
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": result
+            "body": processed_result
         }
 
     except Exception as e:
