@@ -1,9 +1,9 @@
-
 import json
 import base64
 import logging
 import random
 import string
+import re
 from base64 import b64decode
 from Crypto.Cipher import AES
 
@@ -11,7 +11,9 @@ from Crypto.Cipher import AES
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ------------------------------
 # Utility Functions
+# ------------------------------
 def unpad(data):
     """Remove padding from decrypted data."""
     padding_length = data[-1]
@@ -29,7 +31,7 @@ def decrypt(data, key):
         raise ValueError(f"Error during decryption: {e}")
 
 def detect_and_extract_json(content):
-    """Try to parse content as JSON, handle edge cases."""
+    """Try to parse content as JSON, handling edge cases."""
     try:
         return json.loads(content)
     except json.JSONDecodeError:
@@ -45,31 +47,31 @@ def detect_and_extract_json(content):
     except json.JSONDecodeError:
         raise ValueError("Embedded JSON block could not be parsed.")
 
+# ------------------------------
 # Data Generation Helpers
+# ------------------------------
 def random_datetime():
-    """Generate random datetime string."""
+    """Generate a random date/time string in dd/mm/yyyy hh:mm:ss format."""
     return f"{random.randint(1,28):02}/{random.randint(1,12):02}/2025 {random.randint(0,23):02}:{random.randint(0,59):02}:{random.randint(0,59):02}"
 
-def random_uuid():
-    """Generate random UUID."""
-    sections = [8, 4, 4, 4, 12]
-    return '-'.join(''.join(random.choices(string.hexdigits.lower(), k=s)) for s in sections)
+def random_id():
+    """Generate a random identifier string of 24 lowercase alphanumerics."""
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=24))
 
 def random_string_like(value):
-    """Generate random string matching the structure of the given value."""
+    """Generate a random string with the same length as the sample value.
+       If the sample contains special date-like characters, generate a random date.
+    """
     if isinstance(value, str):
-        if any(sep in value for sep in ['/', '-', ':']):
+        # If the value contains a slash or dash and matches a date-like pattern, produce a date.
+        if re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', value):
             return random_datetime()
-        elif len(value) == 36 or len(value) == 32:
-            return random_uuid()
-        elif value.isdigit():
-            return ''.join(random.choices(string.digits, k=len(value)))
         else:
             return ''.join(random.choices(string.ascii_letters + string.digits, k=len(value)))
     return value
 
 def generate_random_value_by_sample(sample_value):
-    """Generate a random value based on the sample's type."""
+    """Generate a random value based on the type of sample_value."""
     if isinstance(sample_value, int):
         return random.randint(1000, 9999)
     elif isinstance(sample_value, float):
@@ -83,17 +85,37 @@ def generate_random_value_by_sample(sample_value):
     return sample_value
 
 def generate_random_structure(template):
-    """Recursively generate a random structure based on the input template."""
+    """Recursively generate a random structure that mimics the template.
+       This generator inspects key names (if available) to decide if a special format is needed.
+    """
     if isinstance(template, dict):
-        return {k: generate_random_structure(v) for k, v in template.items()}
+        new_dict = {}
+        for k, v in template.items():
+            # For simple (non-container) values, check for field-specific names.
+            if not isinstance(v, (dict, list)):
+                lowered = k.lower()
+                if "date" in lowered:
+                    new_dict[k] = random_datetime()
+                elif "id" in lowered:
+                    new_dict[k] = random_id()
+                else:
+                    new_dict[k] = generate_random_value_by_sample(v)
+            else:
+                new_dict[k] = generate_random_structure(v)
+        return new_dict
     elif isinstance(template, list):
         return [generate_random_structure(item) for item in template]
-    return generate_random_value_by_sample(template)
+    else:
+        return generate_random_value_by_sample(template)
 
+# ------------------------------
 # Event Header Extraction
+# ------------------------------
 def get_model_instance_name(event):
-    """Retrieve model instance name from headers or generate a random one."""
-    return event.get('headers', {}).get('model_instance_name', 'chatbot_' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=6)))
+    """Retrieve model instance name from headers or generate a random one if not provided."""
+    headers = event.get('headers', {})
+    return headers.get('model_instance_name',
+                       'chatbot_' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=6)))
 
 def get_count_from_headers(event):
     """Retrieve the count from headers or default to 1."""
@@ -103,15 +125,20 @@ def get_count_from_headers(event):
         return 1
 
 def build_dynamic_prompt(model_instance_name):
-    """Build a dynamic prompt based on the model instance name."""
+    """Build a dynamic prompt describing the requirements for the JSON payload generation."""
     return (
-        f"You are an expert RAML analyzer. Using the model instance '{model_instance_name}', "
-        "analyze the provided RAML content. Resolve all includes such as traits, resource types, and fragments. "
-        "Then generate realistic randomized test payloads for each endpoint while preserving the field names, "
-        "structure, and data types. Ensure the output is in clean JSON format without explanations."
+        f"You are an expert RAML analyzer working with the model instance '{model_instance_name}'. "
+        "Analyze the provided RAML (or similar JSON template) content and generate realistic randomized "
+        "test payloads. The generated payload must preserve the field names, structure, and data types. "
+        "For integer fields generate a valid integer, for string fields generate a string of similar length. "
+        "If a field name contains 'id', generate a unique 24-character identifier (lowercase letters and digits). "
+        "If a field name contains 'date', generate a date string in dd/mm/yyyy hh:mm:ss format. "
+        "Return only valid, clean JSON without any explanations."
     )
 
+# ------------------------------
 # Lambda Handler
+# ------------------------------
 def lambda_handler(event, context):
     """Main Lambda function handler."""
     logger.info("Lambda function invoked.")
@@ -137,13 +164,19 @@ def lambda_handler(event, context):
         logger.info(f"Model instance: {model_instance_name}, Dataset count: {count}")
         logger.debug(f"Prompt: {prompt}")
 
-        # Generate the random datasets
+        # Generate the random datasets based on the template
         datasets = [generate_random_structure(original_data) for _ in range(count)]
+
+        # Return the generated datasets along with the dynamic prompt that was used
+        response_body = {
+            "prompt": prompt,
+            "datasets": datasets
+        }
 
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"datasets": datasets})
+            "body": json.dumps(response_body, indent=2)
         }
 
     except Exception as e:
