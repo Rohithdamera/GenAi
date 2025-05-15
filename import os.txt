@@ -63,57 +63,60 @@ def detect_agent_name(file_content):
     else:
         raise ValueError("Unsupported or unrecognized file type.")
 
-def get_prompt(agent_name):
+def get_prompt(agent_name, iteration=None, total=None):
+    base_instruction = ""
+
     if agent_name == "dwl_json":
-        return (
+        base_instruction = (
             "You are an expert in analyzing and converting DataWeave scripts into JSON structures. "
-            "Analyze the attached dwl logic and generate the input payloads. "
-            "Only return the raw JSON array or object without any labels or keywords."
+            "Analyze the attached dwl logic and generate a realistic sample input payload. "
+            "Ensure the output is a different JSON data set for each request. "
         )
     elif agent_name == "raml_json":
-        return (
-            "You are an expert in analyzing RAML to generate example JSON payloads. "
-            "Analyze the RAML and generate a sample payload honoring all rules. "
-            "Only return the raw JSON array or object."
+        base_instruction = (
+            "You are an expert in RAML and generating realistic example JSON payloads. "
+            "Analyze the RAML content and create a realistic sample input JSON. "
+            "Ensure each output is different when multiple sets are requested. "
         )
     elif agent_name == "xsd_json":
-        return (
-            "You are an expert in analyzing XSD and generating JSON payloads. "
-            "Analyze the XSD and generate a sample JSON structure following all rules. "
-            "Only return the raw JSON array or object."
+        base_instruction = (
+            "You are an expert in XSD and can generate realistic JSON structures. "
+            "Analyze the XML schema and produce one valid example JSON input. "
+            "Ensure the generated JSON is different for each sample in repeated requests. "
         )
     elif agent_name == "swagger_json":
-        return (
-            "You are an expert in analyzing Swagger or OpenAPI specs and generating JSON payloads. "
-            "Analyze the Swagger spec and generate a valid JSON payload. "
-            "Only return the raw JSON array or object."
+        base_instruction = (
+            "You are an expert in Swagger/OpenAPI and can generate realistic JSON request bodies. "
+            "Based on the Swagger spec, generate one valid and varied JSON object. "
+            "Ensure output varies with each request when count > 1. "
         )
     elif agent_name == "xslt_json":
-        return (
-            "You are an expert in analyzing XSLT and generating JSON test data. "
-            "Analyze the XSLT rules and transform logic, then generate an example input JSON "
-            "structure that could be used for testing the XSLT transformation. "
-            "Only return the raw JSON array or object without any labels or explanations."
+        base_instruction = (
+            "You are an expert in XSLT and JSON test generation. "
+            "Analyze the transformation rules and generate a realistic input JSON "
+            "that would match expected transformation patterns. "
+            "If multiple examples are needed, each must be different. "
         )
     else:
         raise ValueError(f"Unsupported agent name: {agent_name}")
 
-def add_random_context():
-    # Add some random non-intrusive variation to the prompt
-    suffix = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-    return f"\n<!-- variation:{suffix} -->"
+    # Append count-specific instructions
+    if iteration is not None and total is not None:
+        base_instruction += f"\nThis is sample {iteration + 1} of {total}. Make this dataset different from others."
+
+    return base_instruction
 
 def process_with_openai(client, file_content, agent_name, count):
-    prompt = get_prompt(agent_name)
     results = []
 
-    for _ in range(count):
-        unique_prompt = prompt + "\n\n" + file_content + add_random_context()
+    for i in range(count):
+        prompt = get_prompt(agent_name, i, count)
+        full_prompt = prompt + "\n\n" + file_content
         try:
-            response = client.invoke([HumanMessage(content=unique_prompt)])
+            response = client.invoke([HumanMessage(content=full_prompt)])
             results.append(json.loads(response.content))
         except Exception as e:
-            logger.error(f"OpenAI call failed: {e}")
+            logger.error(f"OpenAI call failed on iteration {i+1}: {e}")
             raise
 
     return results if count > 1 else results[0]
