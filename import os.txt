@@ -1,6 +1,8 @@
 import os
 import logging
 import json
+import random
+import string
 from base64 import b64decode
 from Crypto.Cipher import AES
 from langchain_community.chat_models import AzureChatOpenAI
@@ -72,21 +74,18 @@ def get_prompt(agent_name):
         return (
             "You are an expert in analyzing RAML to generate example JSON payloads. "
             "Analyze the RAML and generate a sample payload honoring all rules. "
-            "Refer to https://raml.org/developers/raml-100-tutorial if needed. "
             "Only return the raw JSON array or object."
         )
     elif agent_name == "xsd_json":
         return (
             "You are an expert in analyzing XSD and generating JSON payloads. "
             "Analyze the XSD and generate a sample JSON structure following all rules. "
-            "Refer: https://www.tutorialspoint.com/xsd/index.htm. "
             "Only return the raw JSON array or object."
         )
     elif agent_name == "swagger_json":
         return (
             "You are an expert in analyzing Swagger or OpenAPI specs and generating JSON payloads. "
             "Analyze the Swagger spec and generate a valid JSON payload. "
-            "Refer: https://swagger.io/solutions/api-design/. "
             "Only return the raw JSON array or object."
         )
     elif agent_name == "xslt_json":
@@ -99,14 +98,19 @@ def get_prompt(agent_name):
     else:
         raise ValueError(f"Unsupported agent name: {agent_name}")
 
+def add_random_context():
+    # Add some random non-intrusive variation to the prompt
+    suffix = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+    return f"\n<!-- variation:{suffix} -->"
+
 def process_with_openai(client, file_content, agent_name, count):
     prompt = get_prompt(agent_name)
-    full_prompt = prompt + "\n\n" + file_content
     results = []
 
     for _ in range(count):
+        unique_prompt = prompt + "\n\n" + file_content + add_random_context()
         try:
-            response = client.invoke([HumanMessage(content=full_prompt)])
+            response = client.invoke([HumanMessage(content=unique_prompt)])
             results.append(json.loads(response.content))
         except Exception as e:
             logger.error(f"OpenAI call failed: {e}")
