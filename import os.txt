@@ -11,29 +11,33 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def unpad(data):
-    padding_length = data[-1]
+    """Remove padding from decrypted data."""
+    padding_length = data[-1]  # The last byte indicates the padding length
     return data[:-padding_length]
 
 def decrypt(data, key):
+    """Decrypt the data using AES and remove padding."""
     cipher = AES.new(b64decode(key), AES.MODE_ECB)
     decrypted_data = cipher.decrypt(b64decode(data))
     decrypted_data = unpad(decrypted_data)
     return decrypted_data.decode()
 
 def get_openai_client(model_instance_name):
+    """Initialize Azure OpenAI client using decrypted API credentials."""
     try:
         aes_key_base64 = os.environ['AES_KEY']
         encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
         encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
         api_version = os.environ['AZURE_API_VERSION']
 
+        # Decrypt credentials
         decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
         decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
 
         if not decrypted_api_base.endswith('/'):
             decrypted_api_base += '/'
 
-        logger.info(f"Using OpenAI base: {decrypted_api_base}")
+        logger.info(f"Constructed Request URL: {decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}")
 
         return AzureChatOpenAI(
             deployment_name=model_instance_name,
@@ -42,56 +46,62 @@ def get_openai_client(model_instance_name):
             openai_api_version=api_version
         )
     except Exception as e:
-        logger.error(f"Failed to initialize OpenAI client: {e}")
-        raise ValueError(f"OpenAI client init error: {e}")
-
-def validate_xsd(file_content):
-    """Ensure it's a valid XSD file by checking for <xsd:schema or <xs:schema."""
-    if not file_content.strip().startswith("<xsd:schema") and not file_content.strip().startswith("<xs:schema"):
-        raise ValueError("Invalid file type. Expected an XSD file starting with <xsd:schema> or <xs:schema>.")
+        logger.error(f"Error initializing OpenAI client: {e}")
+        raise ValueError(f"Error initializing OpenAI client: {e}")
 
 def process_with_openai(client, file_content):
-    """Send file content to OpenAI with specific prompt and instruction."""
+    """Call OpenAI with fixed instruction and prompt for RAML analysis."""
     try:
         instruction = (
-            "You are an expert in analysing the XSD and generating the payload from the XSD. "
-            "I am providing the XSD which will be used as an asset for designing my API. "
-            "Please analyse the XSD and generate the sample payload which will honour all the rules inside the XSD. "
-            "You can refer the link for any doubts related to XSD https://www.tutorialspoint.com/xsd/index.htm"
+            "You are an expert in analysing the RAML and generating the payload from the RAML. "
+            "I am providing the RAML which will be used as an asset for designing my API. "
+            "Please anlayze the RAML and generate the sample payload which will honour all the rules inside the RAML. "
+            "You can refer the link for any doubts related to RAML https://raml.org/developers/raml-100-tutorial"
         )
-        prompt = "Please generate the payloads for the given XSD."
+
+        prompt = (
+            "Please generate the payloads for all the endpoint in the RAML"
+        )
 
         full_prompt = f"{instruction}\n\n{prompt}\n\n{file_content}"
         response = client.invoke([HumanMessage(content=full_prompt)])
         return response.content
     except Exception as e:
-        logger.error(f"OpenAI processing error: {e}")
+        logger.error(f"Error during OpenAI invocation: {e}")
         raise
 
+def validate_raml_file(file_content):
+    """Ensure the uploaded file is a RAML file."""
+    if not file_content.strip().startswith("#%RAML"):
+        raise ValueError("Invalid file type. Expected a RAML file starting with '#%RAML'.")
+
 def lambda_handler(event, context):
+    """AWS Lambda entry point."""
     logger.info(f"Received event: {json.dumps(event)}")
 
     try:
-        if 'body' not in event or not event.get('isBase64Encoded', False):
-            raise ValueError("File content missing or not base64 encoded.")
+        if 'body' not in event or 'isBase64Encoded' not in event or not event['isBase64Encoded']:
+            raise ValueError("File content is missing or not base64-encoded in the event.")
 
+        # Decode the file
         file_content = b64decode(event['body']).decode('utf-8')
 
-        # Validate input path
+        # Validate that it's a RAML file
+        validate_raml_file(file_content)
+
+        # Get 'input' param (e.g., /sampleforrml)
         query_params = event.get('queryStringParameters', {})
         input_path = query_params.get('input')
-        if input_path != "/sampleforxsd":
-            raise ValueError("Unsupported input value. Expected 'input=/sampleforxsd'.")
+        if not input_path:
+            raise ValueError("'input' query parameter is missing.")
+        logger.info(f"Input path provided: {input_path}")
 
-        # Validate XSD file structure
-        validate_xsd(file_content)
-
-        # Get model instance from headers
+        # Extract model instance name from headers
         model_instance_name = event['headers'].get('model_instance_name')
         if not model_instance_name:
-            raise ValueError("'model_instance_name' header is required.")
+            raise ValueError("'model_instance_name' is missing in the headers.")
 
-        # Initialize OpenAI and process
+        # Get OpenAI client and generate result
         client = get_openai_client(model_instance_name)
         result = process_with_openai(client, file_content)
 
@@ -102,8 +112,10 @@ def lambda_handler(event, context):
         }
 
     except Exception as e:
-        logger.error(f"Error occurred: {e}")
+        logger.error(f"An error occurred: {e}")
         return {
             "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
+            "body": json.dumps({
+                "error": str(e)
+            })
         }
