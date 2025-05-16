@@ -1,8 +1,6 @@
 import os
 import logging
 import json
-import random
-import string
 from base64 import b64decode
 from Crypto.Cipher import AES
 from langchain_community.chat_models import AzureChatOpenAI
@@ -46,21 +44,23 @@ def get_openai_client(model_instance_name):
         logger.error(f"OpenAI client initialization failed: {e}")
         raise ValueError(f"OpenAI client initialization failed: {e}")
 
-def build_prompt(file_content, input_name=None, iteration=None, total=None):
-    base_instruction = (
+def get_prompt(file_content, input_param, iteration=None, total=None):
+    instruction = (
         "You are an expert in analysing the RAML and generating the payload from the RAML. "
         "I am providing the RAML which will be used as an asset for designing my API. "
-        "Please analyze the RAML and generate the sample payload which will honour all the rules inside the RAML. "
+        "Please analyse the RAML and generate the sample payload which will honour all the rules inside the RAML. "
         "You can refer the link for any doubts related to RAML: https://raml.org/developers/raml-100-tutorial"
     )
 
-    user_instruction = "Please generate the payloads for all the endpoints in the RAML."
-    if input_name:
-        user_instruction += f" Use the context: {input_name}"
-    if iteration is not None and total is not None:
-        user_instruction += f" This is sample {iteration + 1} of {total}. Make it different from the others."
+    prompt = (
+        f"{instruction}\n"
+        f"User Input: {input_param}\n"
+        f"{'This is sample ' + str(iteration + 1) + ' of ' + str(total) + '. Ensure it is different from others.' if iteration is not None else ''}\n"
+        f"RAML Content:\n{file_content}\n\n"
+        f"Please generate the payloads for all the endpoint in the RAML.\nOnly return valid JSON. No explanations."
+    )
 
-    return f"{base_instruction}\n\n{user_instruction}\n\nRAML:\n{file_content}"
+    return prompt
 
 def parse_response_as_json(response_content):
     try:
@@ -69,16 +69,12 @@ def parse_response_as_json(response_content):
         cleaned = response_content.strip()
         if cleaned.startswith("```json"):
             cleaned = cleaned.replace("```json", "").replace("```", "").strip()
-        try:
-            return json.loads(cleaned)
-        except Exception as e:
-            raise ValueError(f"Invalid JSON from model: {e}\nRaw output:\n{response_content}")
+        return json.loads(cleaned)
 
-def process_with_openai(client, file_content, input_name, count):
+def process_with_openai(client, file_content, model_instance_name, input_param, count):
     results = []
-
     for i in range(count):
-        prompt = build_prompt(file_content, input_name, i, count)
+        prompt = get_prompt(file_content, input_param, i, count)
         try:
             response = client.invoke([HumanMessage(content=prompt)])
             parsed = parse_response_as_json(response.content)
@@ -86,14 +82,13 @@ def process_with_openai(client, file_content, input_name, count):
         except Exception as e:
             logger.error(f"OpenAI call failed at iteration {i+1}: {e}")
             raise
-
     return results if count > 1 else results[0]
 
 def lambda_handler(event, context):
     logger.info(f"Received event: {json.dumps(event)}")
 
     try:
-        if 'body' not in event or not event.get('isBase64Encoded'):
+        if 'body' not in event or not event['isBase64Encoded']:
             raise ValueError("Missing or invalid file content.")
 
         file_content = b64decode(event['body']).decode('utf-8')
@@ -104,11 +99,11 @@ def lambda_handler(event, context):
         if not model_instance_name:
             raise ValueError("Missing 'model_instance_name' in headers.")
 
+        input_param = query_params.get('input', '/defaultinput')
         count = int(headers.get('count', 1))
-        input_name = query_params.get('input', '')
 
         client = get_openai_client(model_instance_name)
-        result = process_with_openai(client, file_content, input_name, count)
+        result = process_with_openai(client, file_content, model_instance_name, input_param, count)
 
         return {
             "statusCode": 200,
