@@ -32,8 +32,7 @@ def get_openai_client(model_instance_name):
         if not decrypted_api_base.endswith('/'):
             decrypted_api_base += '/'
 
-        request_url = f"{decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}"
-        logger.info(f"Constructed Request URL: {request_url}")
+        logger.info(f"Using OpenAI base: {decrypted_api_base}")
 
         return AzureChatOpenAI(
             deployment_name=model_instance_name,
@@ -43,58 +42,56 @@ def get_openai_client(model_instance_name):
         )
     except Exception as e:
         logger.error(f"Error initializing OpenAI client: {e}")
-        raise ValueError(f"Error initializing OpenAI client: {e}")
-
-def process_with_openai(client, file_content, prompt_text):
-    try:
-        response = client.invoke([HumanMessage(content=prompt_text + "\n\n" + file_content)])
-        return response.content
-    except Exception as e:
-        logger.error(f"Error in OpenAI API call: {e}")
         raise
 
 def validate_raml_file(file_content):
     if not file_content.strip().startswith("#%RAML"):
-        raise ValueError("Invalid file type. Expected a RAML file.")
+        raise ValueError("Invalid RAML file. Expected file to start with '#%RAML'.")
 
 def lambda_handler(event, context):
     logger.info(f"Received event: {json.dumps(event)}")
 
     try:
-        if 'body' not in event or 'isBase64Encoded' not in event or not event['isBase64Encoded']:
-            raise ValueError("File content is missing or not base64-encoded.")
+        if 'body' not in event or not event.get('isBase64Encoded', False):
+            raise ValueError("Binary file content is missing or not base64-encoded.")
 
         file_content = b64decode(event['body']).decode('utf-8')
 
-        # Extract query parameters
+        # Query param: input=sampleforraml
         query_params = event.get('queryStringParameters', {})
-        input_type = query_params.get('input')
-        if input_type != "sampleforraml":
-            raise ValueError("Invalid or missing 'input' parameter. Expected 'sampleforraml'.")
+        input_param = query_params.get('input')
+        if not input_param:
+            raise ValueError("Missing 'input' query parameter.")
 
-        # Validate file is a RAML file
+        if input_param != "sampleforraml":
+            raise ValueError(f"Unsupported input value: {input_param}. Expected 'sampleforraml'.")
+
+        # Validate it's a RAML file
         validate_raml_file(file_content)
 
-        # Extract model_instance_name from headers
+        # Header param: model_instance_name
         model_instance_name = event['headers'].get('model_instance_name')
         if not model_instance_name:
-            raise ValueError("'model_instance_name' header is required.")
+            raise ValueError("Missing 'model_instance_name' in headers.")
 
-        # Define instructions and prompt
+        # Instructions and prompt
         instructions = (
             "You are an expert in analysing the RAML and generating the payload from the RAML. "
             "I am providing the RAML which will be used as an asset for designing my API. "
-            "Please analyse the RAML and generate the sample payload which will honour all the rules inside the RAML. "
+            "Please anlayze the RAML and generate the sample payload which will honour all the rules inside the RAML. "
             "You can refer the link for any doubts related to RAML https://raml.org/developers/raml-100-tutorial"
         )
+        prompt = (
+            "Please generate the payloads for all the endpoint in the RAML.\n\n"
+            "Only return the raw JSON array or object. Do not include the words 'result', 'json', 'output', or any other labels."
+        )
 
-        prompt = "Please generate the payloads for all the endpoint in the RAML."
+        full_prompt = f"{instructions}\n\n{prompt}\n\n{file_content}"
 
-        full_prompt = f"{instructions}\n\n{prompt}\n\nOnly return the raw JSON array or object. Do not include the words 'result', 'json', 'output', or any other labels."
-
-        # Get client and process
+        # Call OpenAI
         client = get_openai_client(model_instance_name)
-        result = process_with_openai(client, file_content, full_prompt)
+        response = client.invoke([HumanMessage(content=full_prompt)])
+        result = response.content
 
         return {
             "statusCode": 200,
