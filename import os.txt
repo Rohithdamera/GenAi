@@ -1,6 +1,7 @@
 import os
-import logging
 import json
+import logging
+import traceback
 import random
 import string
 from base64 import b64decode
@@ -8,7 +9,7 @@ from Crypto.Cipher import AES
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage
 
-# Set up logging
+# Logger setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ def get_openai_client(model_instance_name):
         if not decrypted_api_base.endswith('/'):
             decrypted_api_base += '/'
 
-        logger.info(f"Request URL: {decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}")
+        logger.info(f"Requesting from: {decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}")
 
         return AzureChatOpenAI(
             deployment_name=model_instance_name,
@@ -44,79 +45,66 @@ def get_openai_client(model_instance_name):
         )
     except Exception as e:
         logger.error(f"OpenAI client initialization failed: {e}")
-        raise ValueError(f"OpenAI client initialization failed: {e}")
+        raise
 
-def get_prompt(file_content, input_param, iteration=None, total=None):
-    base_instruction = (
-        "You are an expert in analysing the RAML and generating the payload from the RAML. "
-        "I am providing the RAML which will be used as an asset for designing my API. "
-        "Please analyse the RAML and generate the sample payload which will honour all the rules inside the RAML. "
-        "You can refer the link for any doubts related to RAML: https://raml.org/developers/raml-100-tutorial"
-    )
+def get_prompt(file_content, user_input, iteration=None, total=None):
+    prompt = f"""
+You are an expert in analysing the RAML and generating the payload from the RAML. I am providing the RAML which will be used as an asset for designing my API. Please anlayze the RAML and generate the sample payload which will honour all the rules inside the RAML. You can refer the link for any doubts related to RAML:
+https://raml.org/developers/raml-100-tutorial
 
-    variation_instruction = f"\nThis is variation {iteration + 1} of {total}. Please generate a different dataset." if iteration is not None and total is not None else ""
+Please generate the payloads for all the endpoints in the RAML. Use the input "{user_input}" to understand where the request should be targeted.
 
-    full_prompt = f"""
-{base_instruction}
+This is sample {iteration+1} of {total}. Ensure this sample is different from others. Vary string contents, numbers, and date values randomly.
 
-Input: {input_param}
-
-Please generate the payloads for all the endpoint in the RAML.{variation_instruction}
-
-RAML Content:
+Here is the RAML file content:
 {file_content}
 
-Only return JSON. No explanations.
+Only return valid JSON. No explanation, no text.
 """
-    return full_prompt
+    return prompt.strip()
 
 def parse_response_as_json(response_content):
     try:
         return json.loads(response_content)
     except json.JSONDecodeError:
         cleaned = response_content.strip()
-        try:
-            if cleaned.startswith("```json"):
-                cleaned = cleaned.replace("```json", "").replace("```", "").strip()
-            return json.loads(cleaned)
-        except Exception as e:
-            raise ValueError(f"Invalid JSON from model: {e}\nRaw output:\n{response_content}")
+        if cleaned.startswith("```json"):
+            cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+        return json.loads(cleaned)
 
-def process_with_openai(client, file_content, input_param, count):
+def generate_payloads(client, file_content, user_input, count):
     results = []
-
     for i in range(count):
-        prompt = get_prompt(file_content, input_param, i, count)
+        prompt = get_prompt(file_content, user_input, i, count)
         try:
             response = client.invoke([HumanMessage(content=prompt)])
             parsed = parse_response_as_json(response.content)
             results.append(parsed)
         except Exception as e:
-            logger.error(f"OpenAI call failed at iteration {i+1}: {e}")
+            logger.error(f"Failed during generation {i+1}: {e}")
             raise
-
     return results if count > 1 else results[0]
 
 def lambda_handler(event, context):
-    logger.info(f"Received event: {json.dumps(event)}")
-
     try:
-        if 'body' not in event or not event['isBase64Encoded']:
+        logger.info(f"Received event: {json.dumps(event)[:500]}")
+
+        if 'body' not in event or not event.get('isBase64Encoded', False):
             raise ValueError("Missing or invalid file content.")
 
         file_content = b64decode(event['body']).decode('utf-8')
         headers = event.get('headers', {})
-        query_params = event.get('queryStringParameters', {})
+        params = event.get('queryStringParameters', {})
 
         model_instance_name = headers.get('model_instance_name')
         if not model_instance_name:
             raise ValueError("Missing 'model_instance_name' in headers.")
 
-        input_param = query_params.get('input', '')
         count = int(headers.get('count', 1))
+        user_input = params.get('input', '/default')
 
         client = get_openai_client(model_instance_name)
-        result = process_with_openai(client, file_content, input_param, count)
+        result = generate_payloads(client, file_content, user_input, count)
 
         return {
             "statusCode": 200,
@@ -125,7 +113,8 @@ def lambda_handler(event, context):
         }
 
     except Exception as e:
-        logger.error(f"Processing failed: {e}")
+        logger.error("Processing failed:")
+        logger.error(traceback.format_exc())
         return {
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
