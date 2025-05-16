@@ -35,8 +35,6 @@ def get_openai_client(model_instance_name):
         if not decrypted_api_base.endswith('/'):
             decrypted_api_base += '/'
 
-        logger.info(f"Request URL: {decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}")
-
         return AzureChatOpenAI(
             deployment_name=model_instance_name,
             openai_api_base=decrypted_api_base,
@@ -47,9 +45,13 @@ def get_openai_client(model_instance_name):
         logger.error(f"OpenAI client init error: {e}")
         raise ValueError(f"OpenAI client init error: {e}")
 
-# Prompt builder
-def get_instruction_and_prompt(input_value):
+# Prompt builder with validation
+def get_instruction_and_prompt(input_value, filename):
+    file_ext = os.path.splitext(filename)[-1].lower()
+    
     if input_value == "/sampleforraml":
+        if file_ext != ".yml":
+            raise ValueError("Only /sampleforraml command is allowed for .yml files.")
         instruction = (
             "You are an expert in analysing the RAML and generating the payload from the RAML. "
             "I am providing the RAML which will be used as an asset for designing my API. "
@@ -59,7 +61,10 @@ def get_instruction_and_prompt(input_value):
         )
         prompt = "Please generate the payloads for all the endpoint in the RAML."
         content_type = "application/json"
+
     elif input_value == "/sampleforxsd":
+        if file_ext != ".xsd":
+            raise ValueError("Only /sampleforxsd command is allowed for .xsd files.")
         instruction = (
             "You are an expert in analysing the XSD and generating the payload from the XSD. "
             "I am providing the XSD which will be used as an asset for designing my API. "
@@ -69,39 +74,46 @@ def get_instruction_and_prompt(input_value):
         )
         prompt = "Please generate the payloads for the given XSD."
         content_type = "application/xml"
+
     else:
         raise ValueError(f"Unsupported input value: {input_value}")
-    
+
     return instruction, prompt, content_type
 
-# Main Lambda handler
+# Lambda entry
 def lambda_handler(event, context):
     logger.info(f"Incoming event: {json.dumps(event)}")
 
     try:
-        if 'body' not in event or 'isBase64Encoded' not in event or not event['isBase64Encoded']:
+        if 'body' not in event or not event['isBase64Encoded']:
             raise ValueError("File content is missing or not base64-encoded.")
 
-        file_content = b64decode(event['body']).decode('utf-8')
+        file_bytes = b64decode(event['body'])
+        file_content = file_bytes.decode('utf-8')
 
+        # Extract filename from headers or fallback
+        headers = event.get('headers', {})
+        filename = headers.get('filename', 'uploaded_file')
+
+        # Required parameters
         query_params = event.get('queryStringParameters', {})
         input_value = query_params.get('input')
         if not input_value:
             raise ValueError("'input' query param is required.")
 
-        headers = event.get('headers', {})
         model_instance_name = headers.get('model_instance_name')
         if not model_instance_name:
-            raise ValueError("'model_instance_name' is required in headers.")
+            raise ValueError("'model_instance_name' header is required.")
 
         count = int(headers.get('count', '1'))
 
-        instruction, prompt, content_type = get_instruction_and_prompt(input_value)
+        # Validate input vs file type and get prompts
+        instruction, prompt, content_type = get_instruction_and_prompt(input_value, filename)
         client = get_openai_client(model_instance_name)
 
         responses = []
         for i in range(count):
-            logger.info(f"Generating sample {i+1} of {count}")
+            logger.info(f"Generating payload {i+1} of {count}")
             combined_prompt = instruction + "\n\n" + prompt + "\n\n" + file_content
             result = client.invoke([HumanMessage(content=combined_prompt)])
             responses.append(result.content.strip())
@@ -113,16 +125,15 @@ def lambda_handler(event, context):
                 "body": json.dumps(responses, indent=2)
             }
         elif input_value == "/sampleforxsd":
-            combined_xml = "\n\n".join(responses)
             return {
                 "statusCode": 200,
                 "headers": {"Content-Type": content_type},
-                "body": combined_xml
+                "body": "\n\n".join(responses)
             }
 
     except Exception as e:
-        logger.error(f"Error occurred: {e}")
+        logger.error(f"Error: {e}")
         return {
-            "statusCode": 500,
+            "statusCode": 400,
             "body": json.dumps({"error": str(e)})
         }
