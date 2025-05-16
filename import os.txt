@@ -1,3 +1,141 @@
-[
-    "Below are the sample payloads for each endpoint defined in the RAML:\n\n### Endpoint: GET /orders\n**Response Payload:**\n```json\n[\n  {\n    \"orderId\": \"order123\",\n    \"orderDate\": \"2021-08-20T14:30:00Z\",\n    \"shippingAddress\": {\n      \"street\": \"123 Elm St\",\n      \"city\": \"Springfield\",\n      \"state\": \"IL\",\n      \"zipCode\": \"62704\",\n      \"country\": \"USA\"\n    },\n    \"billingAddress\": {\n      \"street\": \"456 Oak St\",\n      \"city\": \"Springfield\",\n      \"state\": \"IL\",\n      \"zipCode\": \"62705\",\n      \"country\": \"USA\"\n    },\n    \"items\": [\n      {\n        \"itemId\": \"item001\",\n        \"description\": \"Laptop\",\n        \"quantity\": 1,\n        \"price\": 1200.00\n      }\n    ],\n    \"totalAmount\": 1200.00\n  }\n]\n```\n\n### Endpoint: POST /orders\n**Request Payload:**\n```json\n{\n  \"orderId\": \"order123\",\n  \"orderDate\": \"2021-08-20T14:30:00Z\",\n  \"shippingAddress\": {\n    \"street\": \"123 Elm St\",\n    \"city\": \"Springfield\",\n    \"state\": \"IL\",\n    \"zipCode\": \"62704\",\n    \"country\": \"USA\"\n  },\n  \"billingAddress\": {\n    \"street\": \"456 Oak St\",\n    \"city\": \"Springfield\",\n    \"state\": \"IL\",\n    \"zipCode\": \"62705\",\n    \"country\": \"USA\"\n  },\n  \"items\": [\n    {\n      \"itemId\": \"item001\",\n      \"description\": \"Laptop\",\n      \"quantity\": 1,\n      \"price\": 1200.00\n    }\n  ],\n  \"totalAmount\": 1200.00\n}\n```\n**Response Payload:**\nAs above\n\n### Endpoint: GET /orders/{orderId}\n**Response Payload:**\nSame as GET /orders\n\n### Endpoint: GET /invoices\n**Response Payload:**\n```json\n[\n  {\n    \"invoiceId\": \"inv123\",\n    \"orderId\": \"order123\",\n    \"issueDate\": \"2021-08-21T00:00:00Z\",\n    \"dueDate\": \"2021-09-20T00:00:00Z\",\n    \"totalAmount\": 1200.00\n  }\n]\n```\n\n### Endpoint: GET /invoices/{invoiceId}\n**Response Payload:**\n```json\n{\n  \"invoiceId\": \"inv123\",\n  \"orderId\": \"order123\",\n  \"issueDate\": \"2021-08-21T00:00:00Z\",\n  \"dueDate\": \"2021-09-20T00:00:00Z\",\n  \"totalAmount\": 1200.00\n}\n```"
-]
+import os
+import logging
+import json
+from base64 import b64decode
+from Crypto.Cipher import AES
+from langchain_community.chat_models import AzureChatOpenAI
+from langchain.schema import HumanMessage
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def unpad(data):
+    padding_length = data[-1]
+    return data[:-padding_length]
+
+def decrypt(data, key):
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)
+    decrypted_data = cipher.decrypt(b64decode(data))
+    decrypted_data = unpad(decrypted_data)
+    return decrypted_data.decode()
+
+def get_openai_client(model_instance_name):
+    aes_key_base64 = os.environ['AES_KEY']
+    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+    api_version = os.environ['AZURE_API_VERSION']
+
+    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+
+    if not decrypted_api_base.endswith('/'):
+        decrypted_api_base += '/'
+
+    logger.info(f"Requesting from: {decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}")
+
+    return AzureChatOpenAI(
+        deployment_name=model_instance_name,
+        openai_api_base=decrypted_api_base,
+        openai_api_key=decrypted_api_key,
+        openai_api_version=api_version
+    )
+
+def get_instruction_and_prompt(input_value):
+    if input_value == "/sampleforraml":
+        return {
+            "instruction": (
+                "You are an expert in analysing the RAML and generating the payload from the RAML. "
+                "I am providing the RAML which will be used as an asset for designing my API. "
+                "Please anlayze the RAML and generate the sample payload which will honour all the rules inside the RAML. "
+                "You can refer the link for any doubts related to RAML https://raml.org/developers/raml-100-tutorial."
+            ),
+            "prompt": "Please generate the payloads for all the endpoint in the RAML.",
+            "allowed_extension": ".yml",
+            "content_type": "application/json"
+        }
+    elif input_value == "/sampleforxsd":
+        return {
+            "instruction": (
+                "You are an expert in analysing the XSD and generating the payload from the XSD. "
+                "I am providing the XSD which will be used as an asset for designing my API. "
+                "Please anlayze the XSD and generate the sample payload which will honour all the rules inside the XSD. "
+                "You can refer the link for any doubts related to XSD https://www.tutorialspoint.com/xsd/index.htm."
+            ),
+            "prompt": "Please generate the payloads for the given XSD.",
+            "allowed_extension": ".xsd",
+            "content_type": "application/xml"
+        }
+    else:
+        raise ValueError("Invalid input parameter. Only /sampleforraml or /sampleforxsd are supported.")
+
+def lambda_handler(event, context):
+    logger.info(f"Received event: {json.dumps(event)}")
+
+    try:
+        if 'body' not in event or 'isBase64Encoded' not in event or not event['isBase64Encoded']:
+            raise ValueError("File content is missing or not base64-encoded.")
+
+        query_params = event.get('queryStringParameters', {})
+        input_value = query_params.get('input')
+        if not input_value:
+            raise ValueError("Missing required parameter: 'input'.")
+
+        headers = event.get('headers', {})
+        model_instance_name = headers.get('model_instance_name')
+        if not model_instance_name:
+            raise ValueError("Missing required header: 'model_instance_name'.")
+
+        count = int(headers.get('count', '1'))
+        if count < 1 or count > 10:
+            raise ValueError("Header 'count' must be a number between 1 and 10.")
+
+        filename = headers.get('filename')
+        if not filename:
+            raise ValueError("Missing required header: 'filename'.")
+
+        file_extension = os.path.splitext(filename)[1].lower()
+        file_content = b64decode(event['body']).decode('utf-8')
+
+        config = get_instruction_and_prompt(input_value)
+        allowed_extension = config['allowed_extension']
+
+        if file_extension != allowed_extension:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({
+                    "error": f"Only {input_value} command is allowed for {allowed_extension} files."
+                })
+            }
+
+        # Get OpenAI client
+        client = get_openai_client(model_instance_name)
+
+        responses = []
+        for i in range(count):
+            logger.info(f"Generating sample {i + 1}/{count}")
+            messages = [
+                HumanMessage(content=config["instruction"]),
+                HumanMessage(content=config["prompt"] + "\n\n" + file_content)
+            ]
+            result = client.invoke(messages)
+            responses.append(result.content.strip())
+
+        if input_value == "/sampleforraml":
+            body = json.dumps(responses, indent=2)
+        elif input_value == "/sampleforxsd":
+            body = "\n\n".join(responses)
+        else:
+            body = json.dumps(responses, indent=2)
+
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": config['content_type']},
+            "body": body
+        }
+
+    except Exception as e:
+        logger.error(f"Error occurred: {e}")
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
