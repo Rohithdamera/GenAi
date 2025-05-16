@@ -1,13 +1,15 @@
 import os
 import logging
 import json
+import re
 from base64 import b64decode
 from Crypto.Cipher import AES
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Setup logger
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 def unpad(data):
     padding_length = data[-1]
@@ -20,121 +22,138 @@ def decrypt(data, key):
     return decrypted_data.decode()
 
 def get_openai_client(model_instance_name):
-    aes_key_base64 = os.environ['AES_KEY']
-    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-    api_version = os.environ['AZURE_API_VERSION']
+    try:
+        aes_key_base64 = os.environ['AES_KEY']
+        encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+        encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+        api_version = os.environ['AZURE_API_VERSION']
 
-    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+        decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+        decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
 
-    if not decrypted_api_base.endswith('/'):
-        decrypted_api_base += '/'
+        if not decrypted_api_base.endswith('/'):
+            decrypted_api_base += '/'
 
-    logger.info(f"Requesting from: {decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}")
+        return AzureChatOpenAI(
+            deployment_name=model_instance_name,
+            openai_api_base=decrypted_api_base,
+            openai_api_key=decrypted_api_key,
+            openai_api_version=api_version
+        )
+    except Exception as e:
+        logger.error(f"Error initializing OpenAI client: {e}")
+        raise
 
-    return AzureChatOpenAI(
-        deployment_name=model_instance_name,
-        openai_api_base=decrypted_api_base,
-        openai_api_key=decrypted_api_key,
-        openai_api_version=api_version
-    )
+def detect_file_type(file_content):
+    if re.search(r'^(%RAML)|(^#%RAML)', file_content.strip(), re.IGNORECASE):
+        return "yml"
+    elif "<xs:schema" in file_content or "http://www.w3.org/2001/XMLSchema" in file_content:
+        return "xsd"
+    return "unknown"
 
-def get_instruction_and_prompt(input_value):
-    if input_value == "/sampleforraml":
+def get_instruction_and_prompt(input_type):
+    if input_type == "/sampleforraml":
         return {
             "instruction": (
                 "You are an expert in analysing the RAML and generating the payload from the RAML. "
                 "I am providing the RAML which will be used as an asset for designing my API. "
                 "Please anlayze the RAML and generate the sample payload which will honour all the rules inside the RAML. "
-                "You can refer the link for any doubts related to RAML https://raml.org/developers/raml-100-tutorial."
+                "You can refer the link for any doubts related to RAML https://raml.org/developers/raml-100-tutorial"
             ),
             "prompt": "Please generate the payloads for all the endpoint in the RAML.",
-            "allowed_extension": ".yml",
             "content_type": "application/json"
         }
-    elif input_value == "/sampleforxsd":
+    elif input_type == "/sampleforxsd":
         return {
             "instruction": (
                 "You are an expert in analysing the XSD and generating the payload from the XSD. "
                 "I am providing the XSD which will be used as an asset for designing my API. "
                 "Please anlayze the XSD and generate the sample payload which will honour all the rules inside the XSD. "
-                "You can refer the link for any doubts related to XSD https://www.tutorialspoint.com/xsd/index.htm."
+                "You can refer the link for any doubts related to XSD https://www.tutorialspoint.com/xsd/index.htm"
             ),
             "prompt": "Please generate the payloads for the given XSD.",
-            "allowed_extension": ".xsd",
             "content_type": "application/xml"
         }
     else:
-        raise ValueError("Invalid input parameter. Only /sampleforraml or /sampleforxsd are supported.")
+        raise ValueError("Unsupported input type")
 
 def lambda_handler(event, context):
-    logger.info(f"Received event: {json.dumps(event)}")
-
     try:
-        if 'body' not in event or 'isBase64Encoded' not in event or not event['isBase64Encoded']:
-            raise ValueError("File content is missing or not base64-encoded.")
+        logger.info("Received event: %s", json.dumps(event)[:1000])
 
+        if 'body' not in event or 'isBase64Encoded' not in event or not event['isBase64Encoded']:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "File content is missing or not base64-encoded."})
+            }
+
+        file_content = b64decode(event['body']).decode('utf-8')
         query_params = event.get('queryStringParameters', {})
         input_value = query_params.get('input')
+
         if not input_value:
-            raise ValueError("Missing required parameter: 'input'.")
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "'input' parameter is missing in query string."})
+            }
 
         headers = event.get('headers', {})
         model_instance_name = headers.get('model_instance_name')
         if not model_instance_name:
-            raise ValueError("Missing required header: 'model_instance_name'.")
-
-        count = int(headers.get('count', '1'))
-        if count < 1 or count > 10:
-            raise ValueError("Header 'count' must be a number between 1 and 10.")
-
-        filename = headers.get('filename')
-        if not filename:
-            raise ValueError("Missing required header: 'filename'.")
-
-        file_extension = os.path.splitext(filename)[1].lower()
-        file_content = b64decode(event['body']).decode('utf-8')
-
-        config = get_instruction_and_prompt(input_value)
-        allowed_extension = config['allowed_extension']
-
-        if file_extension != allowed_extension:
             return {
                 "statusCode": 400,
-                "body": json.dumps({
-                    "error": f"Only {input_value} command is allowed for {allowed_extension} files."
-                })
+                "body": json.dumps({"error": "'model_instance_name' header is missing."})
             }
 
-        # Get OpenAI client
+        count = int(headers.get('count', '1'))
+
+        # Detect file type
+        file_type = detect_file_type(file_content)
+        logger.info(f"Detected file type: {file_type}")
+
+        if input_value == "/sampleforraml" and file_type != "yml":
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "Only /sampleforraml command is allowed for .yml (RAML) files."})
+            }
+        elif input_value == "/sampleforxsd" and file_type != "xsd":
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "Only /sampleforxsd command is allowed for .xsd (XSD) files."})
+            }
+
+        # Get instructions and prompts
+        instruction_data = get_instruction_and_prompt(input_value)
+
+        # Create OpenAI client
         client = get_openai_client(model_instance_name)
 
-        responses = []
+        results = []
         for i in range(count):
-            logger.info(f"Generating sample {i + 1}/{count}")
             messages = [
-                HumanMessage(content=config["instruction"]),
-                HumanMessage(content=config["prompt"] + "\n\n" + file_content)
+                HumanMessage(content=instruction_data["instruction"]),
+                HumanMessage(content=instruction_data["prompt"] + "\n\n" + file_content)
             ]
-            result = client.invoke(messages)
-            responses.append(result.content.strip())
+            response = client.invoke(messages)
+            results.append(response.content.strip())
 
+        # Prepare response
         if input_value == "/sampleforraml":
-            body = json.dumps(responses, indent=2)
+            return {
+                "statusCode": 200,
+                "headers": {"Content-Type": instruction_data["content_type"]},
+                "body": json.dumps(results, indent=2)
+            }
         elif input_value == "/sampleforxsd":
-            body = "\n\n".join(responses)
-        else:
-            body = json.dumps(responses, indent=2)
-
-        return {
-            "statusCode": 200,
-            "headers": {"Content-Type": config['content_type']},
-            "body": body
-        }
+            xml_output = "\n\n".join(results)
+            return {
+                "statusCode": 200,
+                "headers": {"Content-Type": instruction_data["content_type"]},
+                "body": xml_output
+            }
 
     except Exception as e:
-        logger.error(f"Error occurred: {e}")
+        logger.error("Unhandled exception: %s", str(e))
         return {
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
