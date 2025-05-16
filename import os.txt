@@ -6,7 +6,7 @@ from Crypto.Cipher import AES
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage
 
-# Setup logging
+# Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ def get_openai_client(model_instance_name):
         logger.error(f"OpenAI client initialization failed: {e}")
         raise ValueError(f"OpenAI client initialization failed: {e}")
 
-def get_raml_prompt(rml_content, iteration=None, total=None):
+def get_raml_prompt(file_content, iteration=None, total=None):
     base_instruction = (
         "You are an expert in analysing the RAML and generating the payload from the RAML. "
         "I am providing the RAML which will be used as an asset for designing my API. "
@@ -56,27 +56,34 @@ def get_raml_prompt(rml_content, iteration=None, total=None):
 
     variation_note = f" This is variation {iteration + 1} of {total}. Ensure different values from previous ones." if iteration is not None else ""
 
-    return f"{base_instruction}\n\n{main_prompt}{variation_note}\n\nContent:\n{rml_content}\n\nOnly return JSON."
-
-def clean_llm_response(response_text):
-    text = response_text.strip()
-    if text.startswith("```json"):
-        text = text.replace("```json", "").replace("```", "").strip()
-    elif text.startswith("```"):
-        text = text.replace("```", "").strip()
-    return text
+    return f"{base_instruction}\n\n{main_prompt}{variation_note}\n\nContent:\n{file_content}\n\nOnly return JSON."
 
 def parse_response_as_json(response_content):
-    cleaned = clean_llm_response(response_content)
+    """
+    Attempts to extract JSON from the model's raw output.
+    Handles cases like:
+    - ```json ... ```
+    - Triple quotes
+    - Markdown blocks
+    - Newline formatting
+    """
     try:
+        # Remove code fences if present
+        cleaned = response_content.strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+        elif cleaned.startswith("```"):
+            cleaned = cleaned.replace("```", "").strip()
+        # Try parsing
         return json.loads(cleaned)
     except Exception as e:
-        raise ValueError(f"Invalid JSON from model: {e}\nRaw output:\n{response_content}")
+        logger.error(f"Raw response content that failed parsing:\n{response_content}")
+        raise ValueError(f"Invalid JSON from model: {e}")
 
-def process_with_openai(client, rml_content, count):
+def process_with_openai(client, file_content, count):
     results = []
     for i in range(count):
-        prompt = get_raml_prompt(rml_content, i, count)
+        prompt = get_raml_prompt(file_content, i, count)
         try:
             response = client.invoke([HumanMessage(content=prompt)])
             parsed = parse_response_as_json(response.content)
@@ -87,12 +94,12 @@ def process_with_openai(client, rml_content, count):
     return results if count > 1 else results[0]
 
 def lambda_handler(event, context):
-    logger.info(f"Received event: {json.dumps(event)}")
+    logger.info(f"Received event: {json.dumps(event)[:1000]}")  # Limit log size
     try:
         if 'body' not in event or not event.get('isBase64Encoded', False):
             raise ValueError("Missing or invalid file content.")
 
-        file_content = b64decode(event['body']).decode('utf-8')
+        raw_body = b64decode(event['body']).decode('utf-8', errors='ignore')
         headers = event.get('headers', {})
         params = event.get('queryStringParameters', {})
 
@@ -106,8 +113,12 @@ def lambda_handler(event, context):
         if input_param != "/sampleforraml":
             raise ValueError("Unsupported input value. Only '/sampleforraml' is supported.")
 
+        content_type = headers.get("Content-Type") or headers.get("content-type")
+        if not content_type or "yaml" not in content_type.lower():
+            raise ValueError("Content-Type must be 'application/yaml' for .yml files.")
+
         client = get_openai_client(model_instance_name)
-        result = process_with_openai(client, file_content, count)
+        result = process_with_openai(client, raw_body, count)
 
         return {
             "statusCode": 200,
