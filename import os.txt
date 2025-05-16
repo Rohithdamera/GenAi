@@ -72,10 +72,11 @@ def lambda_handler(event, context):
         # Decode RAML content
         file_content = b64decode(event['body']).decode('utf-8')
 
-        params = event.get("queryStringParameters", {}) or {}
-        input_param = params.get("input")
-        model_instance_name = params.get("model_instance_name")
-        count = int(params.get("count", 1))
+        headers = event.get("headers", {}) or {}
+
+        input_param = headers.get("input")
+        model_instance_name = headers.get("model_instance_name")
+        count = int(headers.get("count", 1))
 
         if input_param != "/sampleforraml":
             raise ValueError("Invalid input param. expected 'input =/sampleforraml'.")
