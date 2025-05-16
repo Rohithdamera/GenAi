@@ -34,12 +34,10 @@ def random_datetime():
     return f"{random.randint(1,28):02}/{random.randint(1,12):02}/2025 {random.randint(0,23):02}:{random.randint(0,59):02}:{random.randint(0,59):02}"
 
 def random_uuid_like(value):
-    # Generate a string with same pattern as value (hex/digits + dashes)
     parts = value.split('-')
     new_parts = []
     for part in parts:
         length = len(part)
-        # hex digits lowercase + digits
         new_part = ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
         new_parts.append(new_part)
     return '-'.join(new_parts)
@@ -54,7 +52,6 @@ def random_currency_code():
     return ''.join(random.choices(string.ascii_uppercase, k=3))
 
 def looks_like_uuid(value):
-    # simple heuristic: hex digits and dashes, length between 10 and 50
     if not isinstance(value, str):
         return False
     if len(value) < 10 or len(value) > 50:
@@ -65,7 +62,6 @@ def looks_like_uuid(value):
     return False
 
 def looks_like_date(value):
-    # simple heuristic: contains / or :, but NOT looks_like_uuid
     if not isinstance(value, str):
         return False
     if ('/' in value or ':' in value) and not looks_like_uuid(value):
@@ -76,19 +72,14 @@ def smart_string_generator(field, value):
     if isinstance(value, str):
         if value.isdigit():
             return ''.join(random.choices(string.digits, k=len(value)))
-        # Currency code heuristic: 3-letter uppercase strings
         if len(value) == 3 and value.isalpha() and value.isupper():
             return random_currency_code()
-        # UUID-like values
         if looks_like_uuid(value):
             return random_uuid_like(value)
-        # Date-like values (only generate date if it looks like a date, but NOT UUID)
         if looks_like_date(value):
             return random_datetime()
-        # Alphanumeric mixed strings (like "ABC12CR23007")
         if any(c.isdigit() for c in value) and any(c.isalpha() for c in value):
             return ''.join(random.choices(string.ascii_uppercase + string.digits, k=len(value)))
-        # Default random string of same length
         return random_string(len(value))
     return value
 
@@ -125,6 +116,9 @@ def get_count_from_headers(event):
     except:
         return 1
 
+def get_format_from_headers(event):
+    return event.get('headers', {}).get('format', 'json').lower()
+
 def build_dynamic_prompt(model_instance_name):
     return (
         f"You are a smart JSON data generator named '{model_instance_name}'. "
@@ -135,6 +129,16 @@ def build_dynamic_prompt(model_instance_name):
         "For actual date-like strings (containing '/' or ':' but NOT UUIDs), generate random dates. "
         "Preserve field names and structure, and ensure outputs are clean JSON with realistic data."
     )
+
+def dict_to_xml(data, root_name="root"):
+    def to_xml(value, tag):
+        if isinstance(value, dict):
+            return f"<{tag}>" + "".join(to_xml(v, k) for k, v in value.items()) + f"</{tag}>"
+        elif isinstance(value, list):
+            return "".join(to_xml(item, tag) for item in value)
+        else:
+            return f"<{tag}>{str(value)}</{tag}>"
+    return f"<?xml version='1.0' encoding='UTF-8'?>\n<{root_name}>" + to_xml(data, "item") + f"</{root_name}>"
 
 def lambda_handler(event, context):
     logger.info("Lambda triggered")
@@ -150,17 +154,26 @@ def lambda_handler(event, context):
 
         model_instance = get_model_instance_name(event)
         count = get_count_from_headers(event)
+        format_type = get_format_from_headers(event)
         prompt = build_dynamic_prompt(model_instance)
 
-        logger.info(f"Generating {count} datasets using model: {model_instance}")
+        logger.info(f"Generating {count} datasets using model: {model_instance} with format: {format_type}")
 
-        result = [generate_random_structure_with_fields(json_input) for _ in range(count)]
+        datasets = [generate_random_structure_with_fields(json_input) for _ in range(count)]
 
-        return {
-            "statusCode": 200,
-            "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"datasets": result})
-        }
+        if format_type == "xml":
+            xml_body = "".join([dict_to_xml(ds, root_name=f"dataset_{i+1}") for i, ds in enumerate(datasets)])
+            return {
+                "statusCode": 200,
+                "headers": {"Content-Type": "application/xml"},
+                "body": xml_body
+            }
+        else:
+            return {
+                "statusCode": 200,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"datasets": datasets})
+            }
 
     except Exception as e:
         logger.error(f"Error occurred: {e}")
