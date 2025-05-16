@@ -1,198 +1,135 @@
 import os
-import logging
 import json
-import re
-from base64 import b64decode
-from Crypto.Cipher import AES
-from langchain_community.chat_models import AzureChatOpenAI
-from langchain.schema import HumanMessage
+import base64
+import logging
+import zipfile
+from io import BytesIO
 
+import openai  # Requires: pip install openai
+
+# OpenAI Azure settings from environment variables
+openai.api_type = "azure"
+openai.api_key = os.getenv("OPENAI_API_KEY")
+openai.api_base = os.getenv("OPENAI_API_BASE")
+openai.api_version = os.getenv("OPENAI_API_VERSION")
+
+# Set up logger
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-def unpad(data):
-    padding_length = data[-1]
-    return data[:-padding_length]
-
-def decrypt(data, key):
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted_data = cipher.decrypt(b64decode(data))
-    decrypted_data = unpad(decrypted_data)
-    return decrypted_data.decode()
-
-def get_openai_client(model_instance_name):
-    aes_key_base64 = os.environ['AES_KEY']
-    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-    api_version = os.environ['AZURE_API_VERSION']
-
-    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
-
-    if not decrypted_api_base.endswith('/'):
-        decrypted_api_base += '/'
-
-    return AzureChatOpenAI(
-        deployment_name=model_instance_name,
-        openai_api_base=decrypted_api_base,
-        openai_api_key=decrypted_api_key,
-        openai_api_version=api_version
-    )
-
-def detect_file_type(file_content):
-    if re.search(r'^(%RAML)|(^#%RAML)', file_content.strip(), re.IGNORECASE):
-        return "yml"
-    elif "<xs:schema" in file_content or "http://www.w3.org/2001/XMLSchema" in file_content:
-        return "xsd"
-    return "unknown"
-
-def get_instruction_and_prompt(input_type):
-    if input_type == "/sampleforraml":
-        return {
-            "instruction": (
-                "You are an expert in analysing the RAML and generating the payload from the RAML. "
-                "I am providing the RAML which will be used as an asset for designing my API. "
-                "Please analyze the RAML and generate the sample payload which will honor all the rules inside the RAML. "
-                "You can refer the link for any doubts related to RAML: https://raml.org/developers/raml-100-tutorial."
-            ),
-            "prompt": "Please generate the payloads for all the endpoints in the RAML ONLY as pure JSON.",
-            "content_type": "application/json"
-        }
-    elif input_type == "/sampleforxsd":
-        return {
-            "instruction": (
-                "You are an expert in analysing the XSD and generating the payload from the XSD. "
-                "I am providing the XSD which will be used as an asset for designing my API. "
-                "Please analyze the XSD and generate the sample payload which will honor all the rules inside the XSD. "
-                "You can refer the link for any doubts related to XSD: https://www.tutorialspoint.com/xsd/index.htm"
-            ),
-            "prompt": "Please generate the payloads for the given XSD.",
-            "content_type": "application/xml"
-        }
-    else:
-        raise ValueError("Unsupported input type")
-
-def extract_json_from_response(text):
-    try:
-        return json.loads(text)
-    except:
-        pass
-
-    json_blocks = re.findall(r"```json(.*?)```", text, re.DOTALL)
-    for block in json_blocks:
-        try:
-            return json.loads(block.strip())
-        except:
-            continue
-
-    json_blocks = re.findall(r"```(.*?)```", text, re.DOTALL)
-    for block in json_blocks:
-        try:
-            return json.loads(block.strip())
-        except:
-            continue
-
-    try:
-        obj_match = re.search(r"(\{.*\})", text, re.DOTALL)
-        if obj_match:
-            return json.loads(obj_match.group(1))
-    except:
-        pass
-
-    try:
-        arr_match = re.search(r"(\[.*\])", text, re.DOTALL)
-        if arr_match:
-            return json.loads(arr_match.group(1))
-    except:
-        pass
-
-    return None
-
 def lambda_handler(event, context):
     try:
-        logger.info("Received event")
+        # Get headers and query parameters
+        headers = event.get("headers", {})
+        query_params = event.get("queryStringParameters", {})
 
-        if 'body' not in event or not event['isBase64Encoded']:
-            return {
-                "statusCode": 400,
-                "body": json.dumps({"error": "Base64-encoded file content missing"})
-            }
+        model_instance_name = headers.get("model_instance_name")
+        count = int(headers.get("count", 1))
+        input_type = query_params.get("input", "").strip()
 
-        file_content = b64decode(event['body']).decode('utf-8')
-        query_params = event.get('queryStringParameters', {})
-        input_value = query_params.get('input')
-
-        if not input_value:
-            return {
-                "statusCode": 400,
-                "body": json.dumps({"error": "Missing 'input' query param"})
-            }
-
-        headers = event.get('headers', {})
-        model_instance_name = headers.get('model_instance_name')
         if not model_instance_name:
-            return {
-                "statusCode": 400,
-                "body": json.dumps({"error": "Missing 'model_instance_name' header"})
-            }
+            return respond(400, {"error": "Missing 'model_instance_name' in headers."})
 
-        count = int(headers.get('count', '1'))
-        file_type = detect_file_type(file_content)
+        if input_type not in ["/sampleforraml", "/sampleforxsd"]:
+            return respond(400, {"error": "Invalid input. Use /sampleforraml or /sampleforxsd."})
 
-        if input_value == "/sampleforraml" and file_type != "yml":
-            return {
-                "statusCode": 400,
-                "body": json.dumps({"error": "Only .yml files are allowed with /sampleforraml"})
-            }
-        elif input_value == "/sampleforxsd" and file_type != "xsd":
-            return {
-                "statusCode": 400,
-                "body": json.dumps({"error": "Only .xsd files are allowed with /sampleforxsd"})
-            }
+        # Decode base64 file from Postman
+        body = base64.b64decode(event["body"])
 
-        instruction_data = get_instruction_and_prompt(input_value)
-        client = get_openai_client(model_instance_name)
+        # Extract file and content
+        file_data, file_ext = extract_file(body)
 
-        if input_value == "/sampleforraml":
-            results = []
-            for i in range(count):
-                messages = [
-                    HumanMessage(content=instruction_data["instruction"]),
-                    HumanMessage(content=instruction_data["prompt"] + "\n\n" + file_content)
-                ]
-                response = client.invoke(messages)
-                result = extract_json_from_response(response.content.strip())
-                if result:
-                    results.append(result)
+        # Determine prompt/instruction based on input
+        if input_type == "/sampleforraml":
+            if file_ext != ".yml":
+                return respond(400, {"error": "Only .yml files are allowed for /sampleforraml"})
+            instruction = (
+                "You are an expert in analysing the RAML and generating the payload from the RAML. "
+                "I am providing the RAML which will be used as an asset for designing my API. "
+                "Please anlayze the RAML and generate the sample payload which will honour all the rules inside the RAML. "
+                "You can refer the link for any doubts related to RAML https://raml.org/developers/raml-100-tutorial"
+            )
+            prompt = f"Please generate {count} different payloads for all the endpoints in the RAML."
 
-            if len(results) < count:
-                logger.warning("Only generated %d of %d requested payloads", len(results), count)
+        elif input_type == "/sampleforxsd":
+            if file_ext != ".xsd":
+                return respond(400, {"error": "Only .xsd files are allowed for /sampleforxsd"})
+            instruction = (
+                "You are an expert in analysing the XSD and generating the payload from the XSD. "
+                "I am providing the XSD which will be used as an asset for designing my API. "
+                "Please anlayze the XSD and generate the sample payload which will honour all the rules inside the XSD. "
+                "You can refer the link for any doubts related to XSD https://www.tutorialspoint.com/xsd/index.htm"
+            )
+            prompt = f"Please generate {count} different payloads for the given XSD."
 
-            return {
-                "statusCode": 200,
-                "headers": {"Content-Type": instruction_data["content_type"]},
-                "body": json.dumps(results, indent=2)
-            }
+        # Compose messages for OpenAI
+        messages = [
+            {"role": "system", "content": instruction},
+            {"role": "user", "content": prompt},
+            {"role": "user", "content": file_data}
+        ]
 
-        elif input_value == "/sampleforxsd":
-            results = []
-            for _ in range(count):
-                messages = [
-                    HumanMessage(content=instruction_data["instruction"]),
-                    HumanMessage(content=instruction_data["prompt"] + "\n\n" + file_content)
-                ]
-                response = client.invoke(messages)
-                results.append(response.content.strip())
+        # Make OpenAI API call
+        response = openai.ChatCompletion.create(
+            engine=model_instance_name,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=3000
+        )
 
-            return {
-                "statusCode": 200,
-                "headers": {"Content-Type": instruction_data["content_type"]},
-                "body": "\n\n".join(results)
-            }
+        response_text = response["choices"][0]["message"]["content"]
+
+        # Extract JSON blocks
+        extracted_payloads = extract_json_blocks(response_text)
+
+        return respond(200, {
+            "instruction": instruction,
+            "prompt": prompt,
+            "payloads": extracted_payloads
+        })
 
     except Exception as e:
-        logger.exception("Unhandled error")
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
-        }
+        logger.error(f"Unhandled error: {e}")
+        return respond(500, {"error": "Internal Server Error", "details": str(e)})
+
+
+def extract_file(body_bytes):
+    zip_buffer = BytesIO(body_bytes)
+    with zipfile.ZipFile(zip_buffer, 'r') as zip_ref:
+        for file in zip_ref.namelist():
+            if file.lower().endswith((".yml", ".xsd")):
+                return zip_ref.read(file).decode('utf-8'), os.path.splitext(file)[1]
+    raise Exception("No valid .yml or .xsd file found in the uploaded zip.")
+
+
+def extract_json_blocks(text):
+    blocks = []
+    inside = False
+    current = []
+    for line in text.splitlines():
+        if line.strip().startswith("```json"):
+            inside = True
+            current = []
+            continue
+        if line.strip().startswith("```") and inside:
+            try:
+                json_obj = json.loads("\n".join(current))
+                blocks.append(json_obj)
+            except:
+                blocks.append("\n".join(current))  # Fallback if not valid JSON
+            inside = False
+            continue
+        if inside:
+            current.append(line)
+
+    if not blocks:
+        blocks.append(text)  # Fallback: return raw content
+    return blocks
+
+
+def respond(status_code, body_dict):
+    return {
+        "statusCode": status_code,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps(body_dict)
+    }
