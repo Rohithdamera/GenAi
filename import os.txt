@@ -1,29 +1,27 @@
 import os
 import logging
 import json
+import random
+import string
 from base64 import b64decode
 from Crypto.Cipher import AES
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage
 
-# Setup logging
+# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def unpad(data):
-    """Remove PKCS7 padding from decrypted data."""
     padding_length = data[-1]
     return data[:-padding_length]
 
 def decrypt(data, key):
-    """Decrypt base64 encoded AES ECB encrypted data."""
     cipher = AES.new(b64decode(key), AES.MODE_ECB)
     decrypted_data = cipher.decrypt(b64decode(data))
-    decrypted_data = unpad(decrypted_data)
-    return decrypted_data.decode()
+    return unpad(decrypted_data).decode()
 
-def get_openai_client(model_instance_name):
-    """Initialize Azure OpenAI client using decrypted credentials from env vars."""
+def get_openai_client(agent_name, model_instance_name):
     try:
         aes_key_base64 = os.environ['AES_KEY']
         encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
@@ -36,96 +34,133 @@ def get_openai_client(model_instance_name):
         if not decrypted_api_base.endswith('/'):
             decrypted_api_base += '/'
 
-        request_url = f"{decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}"
-        logger.info(f"Constructed Request URL: {request_url}")
+        logger.info(f"Request URL: {decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}")
 
-        client = AzureChatOpenAI(
+        return AzureChatOpenAI(
             deployment_name=model_instance_name,
             openai_api_base=decrypted_api_base,
             openai_api_key=decrypted_api_key,
             openai_api_version=api_version
         )
-        return client
     except Exception as e:
-        logger.error(f"Error initializing OpenAI client: {e}")
-        raise ValueError(f"Error initializing OpenAI client: {e}")
+        logger.error(f"OpenAI client initialization failed: {e}")
+        raise ValueError(f"OpenAI client initialization failed: {e}")
 
-def process_with_openai(client, file_content):
-    """Process RAML content with the prompt and call OpenAI."""
+def detect_agent_name(file_content):
+    file_content = file_content.strip()
+    if file_content.startswith("%dw"):
+        return "dwl_json"
+    elif file_content.startswith("#%RAML"):
+        return "raml_json"
+    elif file_content.startswith("<?xml"):
+        if "xsl:stylesheet" in file_content or "<xsl:stylesheet" in file_content:
+            return "xslt_json"
+        else:
+            return "xsd_json"
+    elif file_content.startswith("swagger:") or "openapi:" in file_content:
+        return "swagger_json"
+    else:
+        raise ValueError("Unsupported or unrecognized file type.")
+
+def get_prompt(agent_name, file_content, iteration=None, total=None):
+    base_instruction = ""
+    type_instruction = (
+        "Generate a realistic JSON dataset based on the structure in the file. "
+        "If a field is of type string, generate a sample string. "
+        "Generate different payloads for each sample in possible combination "
+        "If the same name is generating once again any were through out the data , generate with different name"
+        "If a field is of type integer, use a valid integer. "
+        "Respect the types exactly. Output only valid JSON. "
+    )
+
+    # Add specific agent prompts
+    if agent_name == "dwl_json":
+        base_instruction = "You are an expert in analyzing DataWeave (.dwl) scripts."
+    elif agent_name == "raml_json":
+        base_instruction = "You are an expert in RAML. Analyze the RAML file and generate realistic example JSON data."
+    elif agent_name == "xsd_json":
+        base_instruction = "You are an expert in XML Schema. Analyze the schema and generate valid JSON samples."
+    elif agent_name == "swagger_json":
+        base_instruction = "You are an expert in Swagger/OpenAPI. Generate valid request JSON based on the spec."
+    elif agent_name == "xslt_json":
+        base_instruction = "You are an expert in XSLT and JSON transformation. Generate a sample input JSON based on the .xslt file."
+    else:
+        raise ValueError(f"Unsupported agent name: {agent_name}")
+
+    variation_instruction = ""
+    if iteration is not None and total is not None:
+        variation_instruction = f"This is sample {iteration + 1} of {total}. Ensure this sample is different from others."
+
+    full_prompt = f"""{base_instruction}
+{type_instruction}
+{variation_instruction}
+
+Content:
+{file_content}
+
+Only return JSON. No explanations.
+"""
+    return full_prompt
+
+def parse_response_as_json(response_content):
     try:
-        instructions = (
-            "You are an expert in analysing the RAML and generating the payload from the RAML. "
-            "I am providing the RAML which will be used as an asset for designing my API. "
-            "Please analyze the RAML and generate the sample payload which will honor all the rules inside the RAML. "
-            "You can refer the link for any doubts related to RAML https://raml.org/developers/raml-100-tutorial"
-        )
-        prompt = (
-            instructions + "\n\nPlease generate the payloads for all the endpoints in the RAML."
-        )
-        # Call OpenAI client with the prompt + RAML content
-        response = client.invoke([HumanMessage(content=prompt + "\n\n" + file_content)])
-        return response.content
-    except Exception as e:
-        logger.error(f"Error in OpenAI API call: {e}")
-        raise
+        return json.loads(response_content)
+    except json.JSONDecodeError:
+        cleaned = response_content.strip()
+        try:
+            # Try fixing common non-JSON issues (like triple backticks)
+            if cleaned.startswith("```json"):
+                cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+            return json.loads(cleaned)
+        except Exception as e:
+            raise ValueError(f"Invalid JSON from model: {e}\nRaw output:\n{response_content}")
+
+def process_with_openai(client, file_content, agent_name, count):
+    results = []
+
+    for i in range(count):
+        prompt = get_prompt(agent_name, file_content, i, count)
+        try:
+            response = client.invoke([HumanMessage(content=prompt)])
+            parsed = parse_response_as_json(response.content)
+            results.append(parsed)
+        except Exception as e:
+            logger.error(f"OpenAI call failed at iteration {i+1}: {e}")
+            raise
+
+    return results if count > 1 else results[0]
+
+def process_file_content(file_content, model_instance_name, count):
+    agent_name = detect_agent_name(file_content)
+    client = get_openai_client(agent_name, model_instance_name)
+    return process_with_openai(client, file_content, agent_name, count)
 
 def lambda_handler(event, context):
-    import traceback
-    logger.info(f"Event keys: {list(event.keys())}")
-    logger.info(f"isBase64Encoded: {event.get('isBase64Encoded')}")
-    logger.info(f"Headers: {event.get('headers')}")
-    logger.info(f"Query params: {event.get('queryStringParameters')}")
+    logger.info(f"Received event: {json.dumps(event)}")
 
     try:
-        # Validate body presence
-        if 'body' not in event or not event['body']:
-            raise ValueError("Missing file content in request body")
+        if 'body' not in event or not event['isBase64Encoded']:
+            raise ValueError("Missing or invalid file content.")
 
-        # Decode body if base64 encoded
-        if event.get('isBase64Encoded', False):
-            logger.info("Body is base64 encoded; decoding")
-            file_content = b64decode(event['body']).decode('utf-8')
-        else:
-            logger.info("Body is plain text")
-            file_content = event['body']
-
-        logger.info(f"File content preview: {file_content[:200]}")
-
-        # Validate RAML file signature
-        if not (file_content.strip().startswith("#%RAML") or file_content.strip().startswith("# RAML")):
-            raise ValueError("Invalid RAML file format. Expected a RAML starting with '#%RAML'.")
-
-        # Validate query param 'input'
-        query_params = event.get('queryStringParameters', {})
-        input_param = query_params.get('input')
-        if not input_param:
-            raise ValueError("Missing 'input' query parameter")
-        if input_param != "sampleforraml":
-            raise ValueError(f"Unsupported input param: {input_param}. Expected 'sampleforraml'.")
-
-        # Validate model_instance_name in headers
+        file_content = b64decode(event['body']).decode('utf-8')
         headers = event.get('headers', {})
+
         model_instance_name = headers.get('model_instance_name')
         if not model_instance_name:
-            raise ValueError("Missing 'model_instance_name' header")
+            raise ValueError("Missing 'model_instance_name' in headers.")
 
-        logger.info(f"Using model_instance_name: {model_instance_name}")
+        count = int(headers.get('count', 1))  # default to 1 if not passed
 
-        # Initialize OpenAI client
-        client = get_openai_client(model_instance_name)
+        result = process_file_content(file_content, model_instance_name, count)
 
-        # Process file content with OpenAI
-        response = process_with_openai(client, file_content)
-
-        # Return response
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": response
+            "body": json.dumps(result, indent=2)
         }
+
     except Exception as e:
-        tb = traceback.format_exc()
-        logger.error(f"Exception caught: {e}\n{tb}")
+        logger.error(f"Processing failed: {e}")
         return {
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
