@@ -62,7 +62,21 @@ def detect_agent_name(file_content):
     else:
         raise ValueError("Unsupported or unrecognized file type.")
 
-def get_prompt(agent_name, file_content, iteration=None, total=None, input_param=None):
+def get_prompt(agent_name, file_content, input_path=None, iteration=None, total=None):
+    if input_path == "/sampleforraml" and agent_name == "raml_json":
+        base_instruction = (
+            "You are an expert in analysing the RAML and generating the payload from the RAML. "
+            "I am providing the RAML which will be used as an asset for designing my API. "
+            "Please analyze the RAML and generate the sample payload which will honour all the rules inside the RAML. "
+            "You can refer the link for any doubts related to RAML https://raml.org/developers/raml-100-tutorial"
+        )
+        prompt = (
+            f"{base_instruction}\n\n"
+            "Please generate the payloads for all the endpoint in the RAML\n\n"
+            f"RAML:\n{file_content}\n\nOnly return JSON. No explanations."
+        )
+        return prompt
+
     base_instruction = ""
     type_instruction = (
         "Generate a realistic JSON dataset based on the structure in the file. "
@@ -71,29 +85,19 @@ def get_prompt(agent_name, file_content, iteration=None, total=None, input_param
         "Respect the types exactly. Output only valid JSON. "
     )
 
-    # Special handling for input=/sampleforraml and agent is raml_json
-    if agent_name == "raml_json" and input_param == "/sampleforraml":
-        base_instruction = (
-            "You are an expert in analysing the RAML and generating the payload from the RAML. "
-            "I am providing the RAML which will be used as an asset for designing my API. "
-            "Please analyze the RAML and generate the sample payload which will honour all the rules inside the RAML. "
-            "You can refer the link for any doubts related to RAML: https://raml.org/developers/raml-100-tutorial"
-        )
-        type_instruction = "Please generate the payloads for all the endpoint in the RAML"
+    # Add specific agent prompts
+    if agent_name == "dwl_json":
+        base_instruction = "You are an expert in analyzing DataWeave (.dwl) scripts."
+    elif agent_name == "raml_json":
+        base_instruction = "You are an expert in RAML. Analyze the RAML file and generate realistic example JSON data."
+    elif agent_name == "xsd_json":
+        base_instruction = "You are an expert in XML Schema. Analyze the schema and generate valid JSON samples."
+    elif agent_name == "swagger_json":
+        base_instruction = "You are an expert in Swagger/OpenAPI. Generate valid request JSON based on the spec."
+    elif agent_name == "xslt_json":
+        base_instruction = "You are an expert in XSLT and JSON transformation. Generate a sample input JSON based on the .xslt file."
     else:
-        # Default base instruction per agent
-        if agent_name == "dwl_json":
-            base_instruction = "You are an expert in analyzing DataWeave (.dwl) scripts."
-        elif agent_name == "raml_json":
-            base_instruction = "You are an expert in RAML. Analyze the RAML file and generate realistic example JSON data."
-        elif agent_name == "xsd_json":
-            base_instruction = "You are an expert in XML Schema. Analyze the schema and generate valid JSON samples."
-        elif agent_name == "swagger_json":
-            base_instruction = "You are an expert in Swagger/OpenAPI. Generate valid request JSON based on the spec."
-        elif agent_name == "xslt_json":
-            base_instruction = "You are an expert in XSLT and JSON transformation. Generate a sample input JSON based on the .xslt file."
-        else:
-            raise ValueError(f"Unsupported agent name: {agent_name}")
+        raise ValueError(f"Unsupported agent name: {agent_name}")
 
     variation_instruction = ""
     if iteration is not None and total is not None:
@@ -122,11 +126,11 @@ def parse_response_as_json(response_content):
         except Exception as e:
             raise ValueError(f"Invalid JSON from model: {e}\nRaw output:\n{response_content}")
 
-def process_with_openai(client, file_content, agent_name, count, input_param=None):
+def process_with_openai(client, file_content, agent_name, count, input_path=None):
     results = []
 
     for i in range(count):
-        prompt = get_prompt(agent_name, file_content, i, count, input_param)
+        prompt = get_prompt(agent_name, file_content, input_path=input_path, iteration=i, total=count)
         try:
             response = client.invoke([HumanMessage(content=prompt)])
             parsed = parse_response_as_json(response.content)
@@ -137,10 +141,10 @@ def process_with_openai(client, file_content, agent_name, count, input_param=Non
 
     return results if count > 1 else results[0]
 
-def process_file_content(file_content, model_instance_name, count, input_param=None):
+def process_file_content(file_content, model_instance_name, count, input_path=None):
     agent_name = detect_agent_name(file_content)
     client = get_openai_client(agent_name, model_instance_name)
-    return process_with_openai(client, file_content, agent_name, count, input_param)
+    return process_with_openai(client, file_content, agent_name, count, input_path=input_path)
 
 def lambda_handler(event, context):
     logger.info(f"Received event: {json.dumps(event)}")
@@ -151,16 +155,16 @@ def lambda_handler(event, context):
 
         file_content = b64decode(event['body']).decode('utf-8')
         headers = event.get('headers', {})
-        query_params = event.get('queryStringParameters', {}) or {}
 
         model_instance_name = headers.get('model_instance_name')
         if not model_instance_name:
             raise ValueError("Missing 'model_instance_name' in headers.")
 
         count = int(headers.get('count', 1))  # default to 1 if not passed
-        input_param = query_params.get("input", None)
+        query_params = event.get('queryStringParameters', {})
+        input_path = query_params.get('input') if query_params else None
 
-        result = process_file_content(file_content, model_instance_name, count, input_param)
+        result = process_file_content(file_content, model_instance_name, count, input_path=input_path)
 
         return {
             "statusCode": 200,
