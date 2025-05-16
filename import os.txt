@@ -1,6 +1,8 @@
 import os
 import logging
 import json
+import random
+import string
 from base64 import b64decode
 from Crypto.Cipher import AES
 from langchain_community.chat_models import AzureChatOpenAI
@@ -45,34 +47,44 @@ def get_openai_client(model_instance_name):
         raise ValueError(f"OpenAI client initialization failed: {e}")
 
 def get_prompt(file_content, input_param, iteration=None, total=None):
-    instruction = (
+    base_instruction = (
         "You are an expert in analysing the RAML and generating the payload from the RAML. "
         "I am providing the RAML which will be used as an asset for designing my API. "
         "Please analyse the RAML and generate the sample payload which will honour all the rules inside the RAML. "
         "You can refer the link for any doubts related to RAML: https://raml.org/developers/raml-100-tutorial"
     )
 
-    prompt = (
-        f"{instruction}\n"
-        f"User Input: {input_param}\n"
-        f"{'This is sample ' + str(iteration + 1) + ' of ' + str(total) + '. Ensure it is different from others.' if iteration is not None else ''}\n"
-        f"RAML Content:\n{file_content}\n\n"
-        f"Please generate the payloads for all the endpoint in the RAML.\nOnly return valid JSON. No explanations."
-    )
+    variation_instruction = f"\nThis is variation {iteration + 1} of {total}. Please generate a different dataset." if iteration is not None and total is not None else ""
 
-    return prompt
+    full_prompt = f"""
+{base_instruction}
+
+Input: {input_param}
+
+Please generate the payloads for all the endpoint in the RAML.{variation_instruction}
+
+RAML Content:
+{file_content}
+
+Only return JSON. No explanations.
+"""
+    return full_prompt
 
 def parse_response_as_json(response_content):
     try:
         return json.loads(response_content)
     except json.JSONDecodeError:
         cleaned = response_content.strip()
-        if cleaned.startswith("```json"):
-            cleaned = cleaned.replace("```json", "").replace("```", "").strip()
-        return json.loads(cleaned)
+        try:
+            if cleaned.startswith("```json"):
+                cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+            return json.loads(cleaned)
+        except Exception as e:
+            raise ValueError(f"Invalid JSON from model: {e}\nRaw output:\n{response_content}")
 
-def process_with_openai(client, file_content, model_instance_name, input_param, count):
+def process_with_openai(client, file_content, input_param, count):
     results = []
+
     for i in range(count):
         prompt = get_prompt(file_content, input_param, i, count)
         try:
@@ -82,6 +94,7 @@ def process_with_openai(client, file_content, model_instance_name, input_param, 
         except Exception as e:
             logger.error(f"OpenAI call failed at iteration {i+1}: {e}")
             raise
+
     return results if count > 1 else results[0]
 
 def lambda_handler(event, context):
@@ -99,11 +112,11 @@ def lambda_handler(event, context):
         if not model_instance_name:
             raise ValueError("Missing 'model_instance_name' in headers.")
 
-        input_param = query_params.get('input', '/defaultinput')
+        input_param = query_params.get('input', '')
         count = int(headers.get('count', 1))
 
         client = get_openai_client(model_instance_name)
-        result = process_with_openai(client, file_content, model_instance_name, input_param, count)
+        result = process_with_openai(client, file_content, input_param, count)
 
         return {
             "statusCode": 200,
