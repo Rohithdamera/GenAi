@@ -5,6 +5,7 @@ from base64 import b64decode
 from Crypto.Cipher import AES
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage
+from urllib.parse import parse_qs
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -44,35 +45,29 @@ def get_openai_client(model_instance_name):
         logger.error(f"OpenAI client initialization failed: {e}")
         raise ValueError(f"OpenAI client initialization failed: {e}")
 
-def validate_raml(file_content):
-    file_content = file_content.strip()
-    if not file_content.startswith("#%RAML"):
-        raise ValueError("Provided file is not a valid RAML file.")
-    return True
-
 def build_prompt(file_content, iteration=None, total=None):
-    instruction = (
+    base_instruction = (
         "You are an expert in analysing the RAML and generating the payload from the RAML. "
-        "I am providing the RAML which will be used as an asset for designing my API. "
-        "Please analyze the RAML and generate the sample payload which will honour all the rules inside the RAML. "
-        "You can refer the link for any doubts related to RAML: https://raml.org/developers/raml-100-tutorial"
+        "I am providing the RAML which will be used as an asset for designing my API. Please anlayze the RAML "
+        "and generate the sample payload which will honour all the rules inside the RAML. "
+        "You can refer the link for any doubts related to RAML https://raml.org/developers/raml-100-tutorial"
     )
+    prompt_instruction = "Please generate the payloads for all the endpoint in the RAML"
 
     variation_instruction = ""
     if iteration is not None and total is not None:
         variation_instruction = f"This is sample {iteration + 1} of {total}. Ensure this sample is different from others."
 
-    prompt = f"""{instruction}
+    full_prompt = f"""{base_instruction}
+{prompt_instruction}
 {variation_instruction}
 
 Content:
 {file_content}
 
-Please generate the payloads for all the endpoint in the RAML.
-
 Only return JSON. No explanations.
 """
-    return prompt
+    return full_prompt
 
 def parse_response_as_json(response_content):
     try:
@@ -86,9 +81,9 @@ def parse_response_as_json(response_content):
         except Exception as e:
             raise ValueError(f"Invalid JSON from model: {e}\nRaw output:\n{response_content}")
 
-def process_with_openai(client, file_content, count):
+def process_file(file_content, model_instance_name, count):
+    client = get_openai_client(model_instance_name)
     results = []
-
     for i in range(count):
         prompt = build_prompt(file_content, i, count)
         try:
@@ -98,39 +93,32 @@ def process_with_openai(client, file_content, count):
         except Exception as e:
             logger.error(f"OpenAI call failed at iteration {i+1}: {e}")
             raise
-
     return results if count > 1 else results[0]
 
 def lambda_handler(event, context):
     logger.info(f"Received event: {json.dumps(event)}")
-
     try:
-        if 'body' not in event or not event.get('isBase64Encoded', False):
+        if 'body' not in event or not event.get('isBase64Encoded'):
             raise ValueError("Missing or invalid file content.")
 
-        file_content = b64decode(event['body']).decode('utf-8')
+        raw_file_content = b64decode(event['body']).decode('utf-8')
 
-        query_params = event.get('queryStringParameters', {}) or {}
+        # Check for required query param
+        raw_query = event.get('rawQueryString') or ''
+        query_params = parse_qs(raw_query)
+        input_param = query_params.get('input', [None])[0]
 
-        # Get model_instance_name from headers (still required)
-        headers = event.get('headers', {}) or {}
-        headers = {k.lower(): v for k, v in headers.items()}
+        if input_param != '/sampleforraml':
+            raise ValueError("Invalid input param. expected 'input=/sampleforraml'.")
+
+        headers = event.get('headers', {})
         model_instance_name = headers.get('model_instance_name')
         if not model_instance_name:
             raise ValueError("Missing 'model_instance_name' in headers.")
 
-        # input should only come from queryStringParameters
-        input_value = query_params.get('input')
-        if not input_value or input_value.strip().lower() != "/sampleforraml":
-            raise ValueError("Invalid input param. Expected 'input=/sampleforraml' as query parameter.")
-
-        # optional count
         count = int(headers.get('count', 1))
 
-        validate_raml(file_content)
-
-        client = get_openai_client(model_instance_name)
-        result = process_with_openai(client, file_content, count)
+        result = process_file(raw_file_content, model_instance_name, count)
 
         return {
             "statusCode": 200,
