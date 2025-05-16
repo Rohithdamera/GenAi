@@ -105,21 +105,27 @@ def lambda_handler(event, context):
     logger.info(f"Received event: {json.dumps(event)}")
 
     try:
-        if 'body' not in event or not event['isBase64Encoded']:
+        if 'body' not in event or not event.get('isBase64Encoded', False):
             raise ValueError("Missing or invalid file content.")
 
         file_content = b64decode(event['body']).decode('utf-8')
-        headers = event.get('headers', {})
 
+        query_params = event.get('queryStringParameters', {}) or {}
+
+        # Get model_instance_name from headers (still required)
+        headers = event.get('headers', {}) or {}
+        headers = {k.lower(): v for k, v in headers.items()}
         model_instance_name = headers.get('model_instance_name')
         if not model_instance_name:
             raise ValueError("Missing 'model_instance_name' in headers.")
 
-        input_param = headers.get('input')
-        if input_param != "/sampleforraml":
-            raise ValueError("Invalid input param. Expected 'input=/sampleforraml'.")
+        # input should only come from queryStringParameters
+        input_value = query_params.get('input')
+        if not input_value or input_value.strip().lower() != "/sampleforraml":
+            raise ValueError("Invalid input param. Expected 'input=/sampleforraml' as query parameter.")
 
-        count = int(headers.get('count', 1))  # default to 1
+        # optional count
+        count = int(headers.get('count', 1))
 
         validate_raml(file_content)
 
