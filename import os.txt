@@ -9,46 +9,41 @@ from Crypto.Cipher import AES
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage
 
-# Logger setup
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Setup logger
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
+# AES decryption
 def unpad(data):
-    padding_length = data[-1]
-    return data[:-padding_length]
+    return data[:-data[-1]]
 
 def decrypt(data, key):
     cipher = AES.new(b64decode(key), AES.MODE_ECB)
     decrypted_data = cipher.decrypt(b64decode(data))
     return unpad(decrypted_data).decode()
 
+# OpenAI client setup
 def get_openai_client(model_instance_name):
-    try:
-        aes_key_base64 = os.environ['AES_KEY']
-        encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-        encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-        api_version = os.environ['AZURE_API_VERSION']
+    aes_key = os.environ['AES_KEY']
+    api_base = decrypt(os.environ['ENCRYPTED_API_BASE'], aes_key)
+    api_key = decrypt(os.environ['ENCRYPTED_API_KEY'], aes_key)
+    api_version = os.environ['AZURE_API_VERSION']
 
-        decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-        decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+    if not api_base.endswith("/"):
+        api_base += "/"
 
-        if not decrypted_api_base.endswith('/'):
-            decrypted_api_base += '/'
+    logger.info(f"Using OpenAI endpoint: {api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}")
 
-        logger.info(f"Requesting from: {decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}")
+    return AzureChatOpenAI(
+        deployment_name=model_instance_name,
+        openai_api_base=api_base,
+        openai_api_key=api_key,
+        openai_api_version=api_version
+    )
 
-        return AzureChatOpenAI(
-            deployment_name=model_instance_name,
-            openai_api_base=decrypted_api_base,
-            openai_api_key=decrypted_api_key,
-            openai_api_version=api_version
-        )
-    except Exception as e:
-        logger.error(f"OpenAI client initialization failed: {e}")
-        raise
-
+# Prompt generator
 def get_prompt(file_content, user_input, iteration=None, total=None):
-    prompt = f"""
+    return f"""
 You are an expert in analysing the RAML and generating the payload from the RAML. I am providing the RAML which will be used as an asset for designing my API. Please anlayze the RAML and generate the sample payload which will honour all the rules inside the RAML. You can refer the link for any doubts related to RAML:
 https://raml.org/developers/raml-100-tutorial
 
@@ -60,9 +55,9 @@ Here is the RAML file content:
 {file_content}
 
 Only return valid JSON. No explanation, no text.
-"""
-    return prompt.strip()
+""".strip()
 
+# Parse GPT output
 def parse_response_as_json(response_content):
     try:
         return json.loads(response_content)
@@ -72,36 +67,38 @@ def parse_response_as_json(response_content):
             cleaned = cleaned.replace("```json", "").replace("```", "").strip()
         return json.loads(cleaned)
 
+# Generate payloads
 def generate_payloads(client, file_content, user_input, count):
     results = []
     for i in range(count):
         prompt = get_prompt(file_content, user_input, i, count)
+        response = client.invoke([HumanMessage(content=prompt)])
         try:
-            response = client.invoke([HumanMessage(content=prompt)])
             parsed = parse_response_as_json(response.content)
             results.append(parsed)
         except Exception as e:
-            logger.error(f"Failed during generation {i+1}: {e}")
+            logger.error(f"Failed to parse JSON from model response: {response.content}")
             raise
     return results if count > 1 else results[0]
 
+# Lambda entry
 def lambda_handler(event, context):
     try:
-        logger.info(f"Received event: {json.dumps(event)[:500]}")
+        logger.info(f"Incoming event: {json.dumps(event)[:500]}")
 
         if 'body' not in event or not event.get('isBase64Encoded', False):
-            raise ValueError("Missing or invalid file content.")
+            raise ValueError("Missing or invalid base64-encoded file content.")
 
         file_content = b64decode(event['body']).decode('utf-8')
-        headers = event.get('headers', {})
-        params = event.get('queryStringParameters', {})
+        headers = event.get('headers', {}) or {}
+        params = event.get('queryStringParameters', {}) or {}
 
         model_instance_name = headers.get('model_instance_name')
         if not model_instance_name:
             raise ValueError("Missing 'model_instance_name' in headers.")
 
-        count = int(headers.get('count', 1))
         user_input = params.get('input', '/default')
+        count = int(headers.get('count', 1))
 
         client = get_openai_client(model_instance_name)
         result = generate_payloads(client, file_content, user_input, count)
@@ -113,7 +110,7 @@ def lambda_handler(event, context):
         }
 
     except Exception as e:
-        logger.error("Processing failed:")
+        logger.error("Error occurred:")
         logger.error(traceback.format_exc())
         return {
             "statusCode": 500,
