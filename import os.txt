@@ -11,19 +11,16 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def unpad(data):
-    """Remove padding from decrypted data."""
     padding_length = data[-1]
     return data[:-padding_length]
 
 def decrypt(data, key):
-    """Decrypt the data using AES and remove padding."""
     cipher = AES.new(b64decode(key), AES.MODE_ECB)
     decrypted_data = cipher.decrypt(b64decode(data))
     decrypted_data = unpad(decrypted_data)
     return decrypted_data.decode()
 
 def get_openai_client(model_instance_name):
-    """Initialize Azure OpenAI client using decrypted credentials."""
     try:
         aes_key_base64 = os.environ['AES_KEY']
         encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
@@ -36,8 +33,7 @@ def get_openai_client(model_instance_name):
         if not decrypted_api_base.endswith('/'):
             decrypted_api_base += '/'
 
-        request_url = f"{decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}"
-        logger.info(f"Constructed Request URL: {request_url}")
+        logger.info(f"Using OpenAI base: {decrypted_api_base}")
 
         return AzureChatOpenAI(
             deployment_name=model_instance_name,
@@ -46,53 +42,56 @@ def get_openai_client(model_instance_name):
             openai_api_version=api_version
         )
     except Exception as e:
-        logger.error(f"Error initializing OpenAI client: {e}")
-        raise ValueError(f"Error initializing OpenAI client: {e}")
+        logger.error(f"Failed to initialize OpenAI client: {e}")
+        raise ValueError(f"OpenAI client init error: {e}")
+
+def validate_xsd(file_content):
+    """Ensure it's a valid XSD file by checking for <xsd:schema or <xs:schema."""
+    if not file_content.strip().startswith("<xsd:schema") and not file_content.strip().startswith("<xs:schema"):
+        raise ValueError("Invalid file type. Expected an XSD file starting with <xsd:schema> or <xs:schema>.")
 
 def process_with_openai(client, file_content):
-    """Send prompt and file content to OpenAI and get response."""
+    """Send file content to OpenAI with specific prompt and instruction."""
     try:
         instruction = (
             "You are an expert in analysing the XSD and generating the payload from the XSD. "
             "I am providing the XSD which will be used as an asset for designing my API. "
-            "Please anlayze the XSD and generate the sample payload which will honour all the rules inside the XSD. "
+            "Please analyse the XSD and generate the sample payload which will honour all the rules inside the XSD. "
             "You can refer the link for any doubts related to XSD https://www.tutorialspoint.com/xsd/index.htm"
         )
+        prompt = "Please generate the payloads for the given XSD."
 
-        prompt = f"{instruction}\n\nPlease generate the payloads for the given XSD.\n\n{file_content}"
-
-        response = client.invoke([HumanMessage(content=prompt)])
+        full_prompt = f"{instruction}\n\n{prompt}\n\n{file_content}"
+        response = client.invoke([HumanMessage(content=full_prompt)])
         return response.content
     except Exception as e:
-        logger.error(f"Error in OpenAI API call: {e}")
+        logger.error(f"OpenAI processing error: {e}")
         raise
 
-def validate_xsd(file_content):
-    """Ensure uploaded file is a valid XSD."""
-    if not file_content.strip().startswith("<?xml") or "<xsd:" not in file_content:
-        raise ValueError("Invalid file type. Expected an XSD file with <xsd: elements.")
-
 def lambda_handler(event, context):
-    """AWS Lambda entry point."""
     logger.info(f"Received event: {json.dumps(event)}")
 
     try:
-        if 'body' not in event or 'isBase64Encoded' not in event or not event['isBase64Encoded']:
-            raise ValueError("File content is missing or not base64-encoded.")
+        if 'body' not in event or not event.get('isBase64Encoded', False):
+            raise ValueError("File content missing or not base64 encoded.")
 
         file_content = b64decode(event['body']).decode('utf-8')
 
+        # Validate input path
         query_params = event.get('queryStringParameters', {})
-        input_param = query_params.get('input')
-        if input_param != "/sampleforxsd":
-            raise ValueError("Unsupported or missing 'input' query param. Expected: /sampleforxsd")
+        input_path = query_params.get('input')
+        if input_path != "/sampleforxsd":
+            raise ValueError("Unsupported input value. Expected 'input=/sampleforxsd'.")
 
+        # Validate XSD file structure
         validate_xsd(file_content)
 
+        # Get model instance from headers
         model_instance_name = event['headers'].get('model_instance_name')
         if not model_instance_name:
-            raise ValueError("'model_instance_name' is missing in the headers.")
+            raise ValueError("'model_instance_name' header is required.")
 
+        # Initialize OpenAI and process
         client = get_openai_client(model_instance_name)
         result = process_with_openai(client, file_content)
 
@@ -103,7 +102,7 @@ def lambda_handler(event, context):
         }
 
     except Exception as e:
-        logger.error(f"An error occurred: {e}")
+        logger.error(f"Error occurred: {e}")
         return {
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
