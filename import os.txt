@@ -54,8 +54,6 @@ def get_instruction_and_prompt(input_type):
                 "I am providing the RAML which will be used as an asset for designing my API. "
                 "Please analyze the RAML and generate the sample payload which will honor all the rules inside the RAML. "
                 "You can refer the link for any doubts related to RAML: https://raml.org/developers/raml-100-tutorial."
-                "\n\n**IMPORTANT**: Only return a valid JSON array or JSON object containing the payloads. "
-                "Do NOT include any markdown, explanations, or extra text. The response must be parseable as JSON."
             ),
             "prompt": "Please generate the payloads for all the endpoints in the RAML ONLY as pure JSON.",
             "content_type": "application/json"
@@ -77,47 +75,47 @@ def get_instruction_and_prompt(input_type):
 def extract_json_from_response(text):
     try:
         return json.loads(text)
-    except Exception:
+    except:
         pass
 
-    json_matches = re.findall(r"```json(.*?)```", text, re.DOTALL | re.IGNORECASE)
-    for match in json_matches:
+    json_blocks = re.findall(r"```json(.*?)```", text, re.DOTALL)
+    for block in json_blocks:
         try:
-            return json.loads(match.strip())
+            return json.loads(block.strip())
         except:
             continue
 
-    code_matches = re.findall(r"```(.*?)```", text, re.DOTALL)
-    for match in code_matches:
+    json_blocks = re.findall(r"```(.*?)```", text, re.DOTALL)
+    for block in json_blocks:
         try:
-            return json.loads(match.strip())
+            return json.loads(block.strip())
         except:
             continue
 
-    obj_match = re.search(r"(\{.*\})", text, re.DOTALL)
-    if obj_match:
-        try:
+    try:
+        obj_match = re.search(r"(\{.*\})", text, re.DOTALL)
+        if obj_match:
             return json.loads(obj_match.group(1))
-        except:
-            pass
+    except:
+        pass
 
-    arr_match = re.search(r"(\[.*\])", text, re.DOTALL)
-    if arr_match:
-        try:
+    try:
+        arr_match = re.search(r"(\[.*\])", text, re.DOTALL)
+        if arr_match:
             return json.loads(arr_match.group(1))
-        except:
-            pass
+    except:
+        pass
 
     return None
 
 def lambda_handler(event, context):
     try:
-        logger.info("Received event: %s", json.dumps(event)[:1000])
+        logger.info("Received event")
 
-        if 'body' not in event or 'isBase64Encoded' not in event or not event['isBase64Encoded']:
+        if 'body' not in event or not event['isBase64Encoded']:
             return {
                 "statusCode": 400,
-                "body": json.dumps({"error": "File content is missing or not base64-encoded."})
+                "body": json.dumps({"error": "Base64-encoded file content missing"})
             }
 
         file_content = b64decode(event['body']).decode('utf-8')
@@ -127,7 +125,7 @@ def lambda_handler(event, context):
         if not input_value:
             return {
                 "statusCode": 400,
-                "body": json.dumps({"error": "'input' parameter is missing in query string."})
+                "body": json.dumps({"error": "Missing 'input' query param"})
             }
 
         headers = event.get('headers', {})
@@ -135,59 +133,55 @@ def lambda_handler(event, context):
         if not model_instance_name:
             return {
                 "statusCode": 400,
-                "body": json.dumps({"error": "'model_instance_name' header is missing."})
+                "body": json.dumps({"error": "Missing 'model_instance_name' header"})
             }
 
         count = int(headers.get('count', '1'))
-
         file_type = detect_file_type(file_content)
-        logger.info(f"Detected file type: {file_type}")
 
         if input_value == "/sampleforraml" and file_type != "yml":
             return {
                 "statusCode": 400,
-                "body": json.dumps({"error": "Only /sampleforraml command is allowed for .yml (RAML) files."})
+                "body": json.dumps({"error": "Only .yml files are allowed with /sampleforraml"})
             }
         elif input_value == "/sampleforxsd" and file_type != "xsd":
             return {
                 "statusCode": 400,
-                "body": json.dumps({"error": "Only /sampleforxsd command is allowed for .xsd (XSD) files."})
+                "body": json.dumps({"error": "Only .xsd files are allowed with /sampleforxsd"})
             }
 
         instruction_data = get_instruction_and_prompt(input_value)
         client = get_openai_client(model_instance_name)
 
         if input_value == "/sampleforraml":
-            message = [
-                HumanMessage(content=instruction_data["instruction"]),
-                HumanMessage(content=instruction_data["prompt"] + f"\nGenerate {count} unique payload(s).\n\n" + file_content)
-            ]
+            results = []
+            for i in range(count):
+                messages = [
+                    HumanMessage(content=instruction_data["instruction"]),
+                    HumanMessage(content=instruction_data["prompt"] + "\n\n" + file_content)
+                ]
+                response = client.invoke(messages)
+                result = extract_json_from_response(response.content.strip())
+                if result:
+                    results.append(result)
 
-            response = client.invoke(message)
-            parsed_json = extract_json_from_response(response.content.strip())
-
-            if parsed_json is None:
-                logger.warning("Failed to parse JSON from response")
-                return {
-                    "statusCode": 502,
-                    "body": json.dumps({"error": "Failed to parse valid JSON from the model response."})
-                }
+            if len(results) < count:
+                logger.warning("Only generated %d of %d requested payloads", len(results), count)
 
             return {
                 "statusCode": 200,
                 "headers": {"Content-Type": instruction_data["content_type"]},
-                "body": json.dumps(parsed_json, indent=2)
+                "body": json.dumps(results, indent=2)
             }
 
         elif input_value == "/sampleforxsd":
-            # For XSD, still call in a loop (as XML can’t be aggregated as easily)
             results = []
             for _ in range(count):
-                message = [
+                messages = [
                     HumanMessage(content=instruction_data["instruction"]),
                     HumanMessage(content=instruction_data["prompt"] + "\n\n" + file_content)
                 ]
-                response = client.invoke(message)
+                response = client.invoke(messages)
                 results.append(response.content.strip())
 
             return {
@@ -197,7 +191,7 @@ def lambda_handler(event, context):
             }
 
     except Exception as e:
-        logger.error("Unhandled exception: %s", str(e))
+        logger.exception("Unhandled error")
         return {
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
