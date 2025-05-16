@@ -10,18 +10,19 @@ from langchain.schema import HumanMessage
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Decryption helpers
+# Helper to unpad decrypted data
 def unpad(data):
     padding_length = data[-1]
     return data[:-padding_length]
 
+# AES Decryptor
 def decrypt(data, key):
     cipher = AES.new(b64decode(key), AES.MODE_ECB)
     decrypted_data = cipher.decrypt(b64decode(data))
     decrypted_data = unpad(decrypted_data)
     return decrypted_data.decode()
 
-# OpenAI Client
+# Get OpenAI client
 def get_openai_client(model_instance_name):
     try:
         aes_key_base64 = os.environ['AES_KEY']
@@ -45,10 +46,10 @@ def get_openai_client(model_instance_name):
         logger.error(f"OpenAI client init error: {e}")
         raise ValueError(f"OpenAI client init error: {e}")
 
-# Prompt builder with validation
+# Build instruction + prompt and validate filetype
 def get_instruction_and_prompt(input_value, filename):
-    file_ext = os.path.splitext(filename)[-1].lower()
-    
+    file_ext = os.path.splitext(filename.strip().lower())[-1]
+
     if input_value == "/sampleforraml":
         if file_ext != ".yml":
             raise ValueError("Only /sampleforraml command is allowed for .yml files.")
@@ -74,15 +75,14 @@ def get_instruction_and_prompt(input_value, filename):
         )
         prompt = "Please generate the payloads for the given XSD."
         content_type = "application/xml"
-
     else:
         raise ValueError(f"Unsupported input value: {input_value}")
 
     return instruction, prompt, content_type
 
-# Lambda entry
+# Main Lambda Handler
 def lambda_handler(event, context):
-    logger.info(f"Incoming event: {json.dumps(event)}")
+    logger.info(f"Incoming event: {json.dumps(event)[:500]}")  # log only first 500 chars
 
     try:
         if 'body' not in event or not event['isBase64Encoded']:
@@ -91,19 +91,23 @@ def lambda_handler(event, context):
         file_bytes = b64decode(event['body'])
         file_content = file_bytes.decode('utf-8')
 
-        # Extract filename from headers or fallback
-        headers = event.get('headers', {})
-        filename = headers.get('filename', 'uploaded_file')
+        # Headers (case-insensitive)
+        headers = {k.lower(): v for k, v in (event.get('headers') or {}).items()}
 
-        # Required parameters
-        query_params = event.get('queryStringParameters', {})
+        # Filename is mandatory
+        filename = headers.get('filename')
+        if not filename:
+            raise ValueError("Missing 'filename' header.")
+
+        # Query parameters
+        query_params = event.get('queryStringParameters', {}) or {}
         input_value = query_params.get('input')
         if not input_value:
-            raise ValueError("'input' query param is required.")
+            raise ValueError("Missing 'input' query parameter.")
 
         model_instance_name = headers.get('model_instance_name')
         if not model_instance_name:
-            raise ValueError("'model_instance_name' header is required.")
+            raise ValueError("Missing 'model_instance_name' header.")
 
         count = int(headers.get('count', '1'))
 
@@ -114,17 +118,18 @@ def lambda_handler(event, context):
         responses = []
         for i in range(count):
             logger.info(f"Generating payload {i+1} of {count}")
-            combined_prompt = instruction + "\n\n" + prompt + "\n\n" + file_content
+            combined_prompt = f"{instruction}\n\n{prompt}\n\n{file_content}"
             result = client.invoke([HumanMessage(content=combined_prompt)])
             responses.append(result.content.strip())
 
+        # Return formatted response
         if input_value == "/sampleforraml":
             return {
                 "statusCode": 200,
                 "headers": {"Content-Type": content_type},
                 "body": json.dumps(responses, indent=2)
             }
-        elif input_value == "/sampleforxsd":
+        else:
             return {
                 "statusCode": 200,
                 "headers": {"Content-Type": content_type},
