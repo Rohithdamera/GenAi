@@ -21,27 +21,23 @@ def decrypt(data, key):
     return decrypted_data.decode()
 
 def get_openai_client(model_instance_name):
-    try:
-        aes_key_base64 = os.environ['AES_KEY']
-        encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-        encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-        api_version = os.environ['AZURE_API_VERSION']
+    aes_key_base64 = os.environ['AES_KEY']
+    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+    api_version = os.environ['AZURE_API_VERSION']
 
-        decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-        decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
 
-        if not decrypted_api_base.endswith('/'):
-            decrypted_api_base += '/'
+    if not decrypted_api_base.endswith('/'):
+        decrypted_api_base += '/'
 
-        return AzureChatOpenAI(
-            deployment_name=model_instance_name,
-            openai_api_base=decrypted_api_base,
-            openai_api_key=decrypted_api_key,
-            openai_api_version=api_version
-        )
-    except Exception as e:
-        logger.error(f"Error initializing OpenAI client: {e}")
-        raise
+    return AzureChatOpenAI(
+        deployment_name=model_instance_name,
+        openai_api_base=decrypted_api_base,
+        openai_api_key=decrypted_api_key,
+        openai_api_version=api_version
+    )
 
 def detect_file_type(file_content):
     if re.search(r'^(%RAML)|(^#%RAML)', file_content.strip(), re.IGNORECASE):
@@ -79,47 +75,37 @@ def get_instruction_and_prompt(input_type):
         raise ValueError("Unsupported input type")
 
 def extract_json_from_response(text):
-    """
-    Attempt to extract JSON substring from model's response text.
-    This handles cases where model returns markdown/code blocks or extra text.
-    Returns a Python object if successful, else None.
-    """
-    # Try direct JSON parsing first
     try:
         return json.loads(text)
     except Exception:
         pass
 
-    # Try to extract JSON code block (markdown style)
     json_matches = re.findall(r"```json(.*?)```", text, re.DOTALL | re.IGNORECASE)
     for match in json_matches:
         try:
             return json.loads(match.strip())
-        except Exception:
+        except:
             continue
 
-    # Try to extract JSON inside any code block
     code_matches = re.findall(r"```(.*?)```", text, re.DOTALL)
     for match in code_matches:
         try:
             return json.loads(match.strip())
-        except Exception:
+        except:
             continue
 
-    # Try to find first {...} JSON object substring
-    json_obj_match = re.search(r"(\{.*\})", text, re.DOTALL)
-    if json_obj_match:
+    obj_match = re.search(r"(\{.*\})", text, re.DOTALL)
+    if obj_match:
         try:
-            return json.loads(json_obj_match.group(1))
-        except Exception:
+            return json.loads(obj_match.group(1))
+        except:
             pass
 
-    # Try to find first [...] JSON array substring
-    json_arr_match = re.search(r"(\[.*\])", text, re.DOTALL)
-    if json_arr_match:
+    arr_match = re.search(r"(\[.*\])", text, re.DOTALL)
+    if arr_match:
         try:
-            return json.loads(json_arr_match.group(1))
-        except Exception:
+            return json.loads(arr_match.group(1))
+        except:
             pass
 
     return None
@@ -154,7 +140,6 @@ def lambda_handler(event, context):
 
         count = int(headers.get('count', '1'))
 
-        # Detect file type
         file_type = detect_file_type(file_content)
         logger.info(f"Detected file type: {file_type}")
 
@@ -169,49 +154,46 @@ def lambda_handler(event, context):
                 "body": json.dumps({"error": "Only /sampleforxsd command is allowed for .xsd (XSD) files."})
             }
 
-        # Get instructions and prompts
         instruction_data = get_instruction_and_prompt(input_value)
-
-        # Create OpenAI client
         client = get_openai_client(model_instance_name)
 
-        results = []
-        for i in range(count):
-            messages = [
-                HumanMessage(content=instruction_data["instruction"]),
-                HumanMessage(content=instruction_data["prompt"] + "\n\n" + file_content)
-            ]
-            response = client.invoke(messages)
-            content = response.content.strip()
-
-            # For RAML, parse and clean JSON response
-            if input_value == "/sampleforraml":
-                parsed_json = extract_json_from_response(content)
-                if parsed_json is None:
-                    # fallback: just return raw text but warn
-                    logger.warning(f"Failed to parse JSON from LLM response: {content[:300]}")
-                    results.append({"error": "Failed to parse JSON from model response.", "raw": content})
-                else:
-                    results.append(parsed_json)
-            else:
-                # For XSD just append XML raw string
-                results.append(content)
-
-        # Prepare response
         if input_value == "/sampleforraml":
-            # Return as JSON array of JSON objects
+            message = [
+                HumanMessage(content=instruction_data["instruction"]),
+                HumanMessage(content=instruction_data["prompt"] + f"\nGenerate {count} unique payload(s).\n\n" + file_content)
+            ]
+
+            response = client.invoke(message)
+            parsed_json = extract_json_from_response(response.content.strip())
+
+            if parsed_json is None:
+                logger.warning("Failed to parse JSON from response")
+                return {
+                    "statusCode": 502,
+                    "body": json.dumps({"error": "Failed to parse valid JSON from the model response."})
+                }
+
             return {
                 "statusCode": 200,
                 "headers": {"Content-Type": instruction_data["content_type"]},
-                "body": json.dumps(results, indent=2)
+                "body": json.dumps(parsed_json, indent=2)
             }
+
         elif input_value == "/sampleforxsd":
-            # Join all XML payloads separated by new lines
-            xml_output = "\n\n".join(results)
+            # For XSD, still call in a loop (as XML can’t be aggregated as easily)
+            results = []
+            for _ in range(count):
+                message = [
+                    HumanMessage(content=instruction_data["instruction"]),
+                    HumanMessage(content=instruction_data["prompt"] + "\n\n" + file_content)
+                ]
+                response = client.invoke(message)
+                results.append(response.content.strip())
+
             return {
                 "statusCode": 200,
                 "headers": {"Content-Type": instruction_data["content_type"]},
-                "body": xml_output
+                "body": "\n\n".join(results)
             }
 
     except Exception as e:
