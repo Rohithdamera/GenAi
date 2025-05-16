@@ -1,9 +1,6 @@
 import os
 import logging
 import json
-import random
-import string
-import yaml
 from base64 import b64decode
 from Crypto.Cipher import AES
 from langchain_community.chat_models import AzureChatOpenAI
@@ -22,7 +19,7 @@ def decrypt(data, key):
     decrypted_data = cipher.decrypt(b64decode(data))
     return unpad(decrypted_data).decode()
 
-def get_openai_client(agent_name, model_instance_name):
+def get_openai_client(model_instance_name):
     try:
         aes_key_base64 = os.environ['AES_KEY']
         encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
@@ -47,88 +44,35 @@ def get_openai_client(agent_name, model_instance_name):
         logger.error(f"OpenAI client initialization failed: {e}")
         raise ValueError(f"OpenAI client initialization failed: {e}")
 
-def extract_input_value_from_raml(file_content):
-    try:
-        raml_data = yaml.safe_load(file_content)
-        return raml_data.get("params", {}).get("input")
-    except Exception as e:
-        logger.warning(f"Could not parse input value from RAML: {e}")
-        return None
-
-def detect_agent_name(file_content, fallback_detection=True):
+def validate_raml(file_content):
     file_content = file_content.strip()
-    input_value = extract_input_value_from_raml(file_content)
+    if not file_content.startswith("#%RAML"):
+        raise ValueError("Provided file is not a valid RAML file.")
+    return True
 
-    # Priority override using params.input
-    if input_value:
-        return input_value.strip("/")
-
-    if not fallback_detection:
-        raise ValueError("Missing `params.input` and fallback detection is disabled.")
-
-    # Fallback to content-based detection
-    if file_content.startswith("%dw"):
-        return "dwl_json"
-    elif file_content.startswith("#%RAML"):
-        return "raml_json"
-    elif file_content.startswith("<?xml"):
-        if "xsl:stylesheet" in file_content or "<xsl:stylesheet" in file_content:
-            return "xslt_json"
-        else:
-            return "xsd_json"
-    elif file_content.startswith("swagger:") or "openapi:" in file_content:
-        return "swagger_json"
-    else:
-        raise ValueError("Unsupported or unrecognized file type.")
-
-def get_prompt(agent_name, file_content, iteration=None, total=None):
-    base_instruction = ""
-    user_prompt = ""
-
-    if agent_name == "sampleforraml":
-        base_instruction = (
-            "You are an expert in analysing the RAML and generating the payload from the RAML. "
-            "I am providing the RAML which will be used as an asset for designing my API. "
-            "Please analyse the RAML and generate the sample payload which will honour all the rules inside the RAML. "
-            "You can refer the link for any doubts related to RAML: https://raml.org/developers/raml-100-tutorial"
-        )
-        user_prompt = "Please generate the payloads for all the endpoint in the RAML"
-    else:
-        # Generic type-specific instruction
-        if agent_name == "dwl_json":
-            base_instruction = "You are an expert in analyzing DataWeave (.dwl) scripts."
-        elif agent_name == "raml_json":
-            base_instruction = "You are an expert in RAML. Analyze the RAML file and generate realistic example JSON data."
-        elif agent_name == "xsd_json":
-            base_instruction = "You are an expert in XML Schema. Analyze the schema and generate valid JSON samples."
-        elif agent_name == "swagger_json":
-            base_instruction = "You are an expert in Swagger/OpenAPI. Generate valid request JSON based on the spec."
-        elif agent_name == "xslt_json":
-            base_instruction = "You are an expert in XSLT and JSON transformation. Generate a sample input JSON based on the .xslt file."
-        else:
-            raise ValueError(f"Unsupported agent name: {agent_name}")
-
-        user_prompt = (
-            "Generate a realistic JSON dataset based on the structure in the file. "
-            "If a field is of type string, generate a sample string. "
-            "If a field is of type integer, use a valid integer. "
-            "Respect the types exactly. Output only valid JSON."
-        )
+def build_prompt(file_content, iteration=None, total=None):
+    instruction = (
+        "You are an expert in analysing the RAML and generating the payload from the RAML. "
+        "I am providing the RAML which will be used as an asset for designing my API. "
+        "Please analyze the RAML and generate the sample payload which will honour all the rules inside the RAML. "
+        "You can refer the link for any doubts related to RAML: https://raml.org/developers/raml-100-tutorial"
+    )
 
     variation_instruction = ""
     if iteration is not None and total is not None:
         variation_instruction = f"This is sample {iteration + 1} of {total}. Ensure this sample is different from others."
 
-    full_prompt = f"""{base_instruction}
-{user_prompt}
+    prompt = f"""{instruction}
 {variation_instruction}
 
 Content:
 {file_content}
 
+Please generate the payloads for all the endpoint in the RAML.
+
 Only return JSON. No explanations.
 """
-    return full_prompt
+    return prompt
 
 def parse_response_as_json(response_content):
     try:
@@ -136,18 +80,17 @@ def parse_response_as_json(response_content):
     except json.JSONDecodeError:
         cleaned = response_content.strip()
         try:
-            # Fix common formatting issues
             if cleaned.startswith("```json"):
                 cleaned = cleaned.replace("```json", "").replace("```", "").strip()
             return json.loads(cleaned)
         except Exception as e:
             raise ValueError(f"Invalid JSON from model: {e}\nRaw output:\n{response_content}")
 
-def process_with_openai(client, file_content, agent_name, count):
+def process_with_openai(client, file_content, count):
     results = []
 
     for i in range(count):
-        prompt = get_prompt(agent_name, file_content, i, count)
+        prompt = build_prompt(file_content, i, count)
         try:
             response = client.invoke([HumanMessage(content=prompt)])
             parsed = parse_response_as_json(response.content)
@@ -157,11 +100,6 @@ def process_with_openai(client, file_content, agent_name, count):
             raise
 
     return results if count > 1 else results[0]
-
-def process_file_content(file_content, model_instance_name, count):
-    agent_name = detect_agent_name(file_content)
-    client = get_openai_client(agent_name, model_instance_name)
-    return process_with_openai(client, file_content, agent_name, count)
 
 def lambda_handler(event, context):
     logger.info(f"Received event: {json.dumps(event)}")
@@ -177,9 +115,16 @@ def lambda_handler(event, context):
         if not model_instance_name:
             raise ValueError("Missing 'model_instance_name' in headers.")
 
-        count = int(headers.get('count', 1))  # default to 1 if not passed
+        input_param = headers.get('input')
+        if input_param != "/sampleforraml":
+            raise ValueError("Invalid input param. Expected 'input=/sampleforraml'.")
 
-        result = process_file_content(file_content, model_instance_name, count)
+        count = int(headers.get('count', 1))  # default to 1
+
+        validate_raml(file_content)
+
+        client = get_openai_client(model_instance_name)
+        result = process_with_openai(client, file_content, count)
 
         return {
             "statusCode": 200,
