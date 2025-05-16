@@ -1,1 +1,136 @@
-Error deploying code: Unexpected token '<', "<!--# j10H"... is not valid JSON Deserialization error: to see the raw response, inspect the hidden field {error}.$response on this object.
+import os
+import logging
+import json
+import random
+import string
+from base64 import b64decode
+from urllib.parse import parse_qs
+from Crypto.Cipher import AES
+from langchain_community.chat_models import AzureChatOpenAI
+from langchain.schema import HumanMessage
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def unpad(data):
+    padding_length = data[-1]
+    return data[:-padding_length]
+
+def decrypt(data, key):
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)
+    decrypted_data = cipher.decrypt(b64decode(data))
+    return unpad(decrypted_data).decode()
+
+def get_openai_client(model_instance_name):
+    try:
+        aes_key_base64 = os.environ['AES_KEY']
+        encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+        encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+        api_version = os.environ['AZURE_API_VERSION']
+
+        decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+        decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+
+        if not decrypted_api_base.endswith('/'):
+            decrypted_api_base += '/'
+
+        logger.info(f"Request URL: {decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}")
+
+        return AzureChatOpenAI(
+            deployment_name=model_instance_name,
+            openai_api_base=decrypted_api_base,
+            openai_api_key=decrypted_api_key,
+            openai_api_version=api_version
+        )
+    except Exception as e:
+        logger.error(f"OpenAI client initialization failed: {e}")
+        raise ValueError(f"OpenAI client initialization failed: {e}")
+
+def get_prompt(file_content, iteration=None, total=None, input_param=None):
+    instruction = (
+        "You are an expert in analysing the RAML and generating the payload from the RAML. "
+        "I am providing the RAML which will be used as an asset for designing my API. "
+        "Please anlayze the RAML and generate the sample payload which will honour all the rules inside the RAML. "
+        "You can refer the link for any doubts related to RAML: https://raml.org/developers/raml-100-tutorial"
+    )
+    
+    prompt = "Please generate the payloads for all the endpoint in the RAML."
+
+    variation_instruction = f"This is dataset {iteration + 1} of {total} based on user input: {input_param}." if iteration is not None else ""
+
+    return f"""{instruction}
+{variation_instruction}
+
+{prompt}
+
+Content:
+{file_content}
+
+Only return JSON. No explanations.
+"""
+
+def parse_response_as_json(response_content):
+    try:
+        return json.loads(response_content)
+    except json.JSONDecodeError:
+        cleaned = response_content.strip()
+        try:
+            if cleaned.startswith("```json"):
+                cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+            return json.loads(cleaned)
+        except Exception as e:
+            raise ValueError(f"Invalid JSON from model: {e}\nRaw output:\n{response_content}")
+
+def process_with_openai(client, file_content, count, input_param):
+    results = []
+
+    for i in range(count):
+        prompt = get_prompt(file_content, i, count, input_param)
+        try:
+            response = client.invoke([HumanMessage(content=prompt)])
+            parsed = parse_response_as_json(response.content)
+            results.append(parsed)
+        except Exception as e:
+            logger.error(f"OpenAI call failed at iteration {i+1}: {e}")
+            raise
+
+    return results if count > 1 else results[0]
+
+def lambda_handler(event, context):
+    logger.info(f"Received event: {json.dumps(event)}")
+
+    try:
+        if 'body' not in event or not event.get('isBase64Encoded', False):
+            raise ValueError("Missing or invalid file content.")
+
+        # Decode the RAML file content
+        file_content = b64decode(event['body']).decode('utf-8')
+
+        # Extract headers
+        headers = event.get('headers', {})
+        model_instance_name = headers.get('model_instance_name')
+        if not model_instance_name:
+            raise ValueError("Missing 'model_instance_name' in headers.")
+        count = int(headers.get('count', 1))
+
+        # Extract query parameters (e.g., input=/sampleforraml)
+        input_param = None
+        if 'queryStringParameters' in event and event['queryStringParameters']:
+            input_param = event['queryStringParameters'].get('input', '/default')
+
+        client = get_openai_client(model_instance_name)
+        result = process_with_openai(client, file_content, count, input_param)
+
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps(result, indent=2)
+        }
+
+    except Exception as e:
+        logger.error(f"Processing failed: {e}")
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
