@@ -6,21 +6,24 @@ from Crypto.Cipher import AES
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage
 
-# Setup logger
+# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def unpad(data):
+    """Remove PKCS7 padding from decrypted data."""
     padding_length = data[-1]
     return data[:-padding_length]
 
 def decrypt(data, key):
+    """Decrypt base64 encoded AES ECB encrypted data."""
     cipher = AES.new(b64decode(key), AES.MODE_ECB)
     decrypted_data = cipher.decrypt(b64decode(data))
     decrypted_data = unpad(decrypted_data)
     return decrypted_data.decode()
 
 def get_openai_client(model_instance_name):
+    """Initialize Azure OpenAI client using decrypted credentials from env vars."""
     try:
         aes_key_base64 = os.environ['AES_KEY']
         encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
@@ -36,93 +39,93 @@ def get_openai_client(model_instance_name):
         request_url = f"{decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}"
         logger.info(f"Constructed Request URL: {request_url}")
 
-        return AzureChatOpenAI(
+        client = AzureChatOpenAI(
             deployment_name=model_instance_name,
             openai_api_base=decrypted_api_base,
             openai_api_key=decrypted_api_key,
             openai_api_version=api_version
         )
+        return client
     except Exception as e:
         logger.error(f"Error initializing OpenAI client: {e}")
         raise ValueError(f"Error initializing OpenAI client: {e}")
 
 def process_with_openai(client, file_content):
+    """Process RAML content with the prompt and call OpenAI."""
     try:
-        # Custom instructions + prompt for RAML analysis and payload generation
         instructions = (
             "You are an expert in analysing the RAML and generating the payload from the RAML. "
             "I am providing the RAML which will be used as an asset for designing my API. "
-            "Please analyse the RAML and generate the sample payload which will honour all the rules inside the RAML. "
-            "You can refer the link for any doubts related to RAML https://raml.org/developers/raml-100-tutorial."
+            "Please analyze the RAML and generate the sample payload which will honor all the rules inside the RAML. "
+            "You can refer the link for any doubts related to RAML https://raml.org/developers/raml-100-tutorial"
         )
         prompt = (
-            "\nPlease generate the payloads for all the endpoints in the RAML.\n"
+            instructions + "\n\nPlease generate the payloads for all the endpoints in the RAML."
         )
-
-        full_prompt = instructions + prompt + "\n\n" + file_content
-
-        response = client.invoke([HumanMessage(content=full_prompt)])
+        # Call OpenAI client with the prompt + RAML content
+        response = client.invoke([HumanMessage(content=prompt + "\n\n" + file_content)])
         return response.content
     except Exception as e:
         logger.error(f"Error in OpenAI API call: {e}")
         raise
 
-def validate_file_type(file_content):
-    # For RAML files, usually starts with #%RAML or # RAML 1.0 header
-    if not (file_content.strip().startswith("#%RAML") or file_content.strip().startswith("# RAML")):
-        raise ValueError("Invalid RAML file format. Expected file starting with '#%RAML' or '# RAML'.")
-
 def lambda_handler(event, context):
-    logger.info(f"Received event keys: {list(event.keys())}")
+    import traceback
+    logger.info(f"Event keys: {list(event.keys())}")
     logger.info(f"isBase64Encoded: {event.get('isBase64Encoded')}")
-    body_preview = event.get('body')[:100] if event.get('body') else 'No body'
-    logger.info(f"Body (first 100 chars): {body_preview}")
+    logger.info(f"Headers: {event.get('headers')}")
+    logger.info(f"Query params: {event.get('queryStringParameters')}")
 
     try:
+        # Validate body presence
         if 'body' not in event or not event['body']:
-            raise ValueError("File content is missing in the event.")
+            raise ValueError("Missing file content in request body")
 
-        # Decode body depending on base64 flag
+        # Decode body if base64 encoded
         if event.get('isBase64Encoded', False):
+            logger.info("Body is base64 encoded; decoding")
             file_content = b64decode(event['body']).decode('utf-8')
-            logger.info("Decoded base64 encoded body.")
         else:
+            logger.info("Body is plain text")
             file_content = event['body']
-            logger.info("Using plain text body.")
 
-        # Validate file content is RAML format
-        validate_file_type(file_content)
+        logger.info(f"File content preview: {file_content[:200]}")
 
-        # Extract query parameters for 'input'
+        # Validate RAML file signature
+        if not (file_content.strip().startswith("#%RAML") or file_content.strip().startswith("# RAML")):
+            raise ValueError("Invalid RAML file format. Expected a RAML starting with '#%RAML'.")
+
+        # Validate query param 'input'
         query_params = event.get('queryStringParameters', {})
         input_param = query_params.get('input')
         if not input_param:
-            raise ValueError("'input' query parameter is missing.")
-
-        # We only support input=sampleforraml for now
+            raise ValueError("Missing 'input' query parameter")
         if input_param != "sampleforraml":
-            raise ValueError(f"Unsupported input parameter: {input_param}")
+            raise ValueError(f"Unsupported input param: {input_param}. Expected 'sampleforraml'.")
 
-        # Extract model_instance_name from headers
+        # Validate model_instance_name in headers
         headers = event.get('headers', {})
         model_instance_name = headers.get('model_instance_name')
         if not model_instance_name:
-            raise ValueError("'model_instance_name' header is missing.")
+            raise ValueError("Missing 'model_instance_name' header")
+
+        logger.info(f"Using model_instance_name: {model_instance_name}")
 
         # Initialize OpenAI client
         client = get_openai_client(model_instance_name)
 
-        # Process the RAML content with OpenAI using your instructions and prompt
-        result = process_with_openai(client, file_content)
+        # Process file content with OpenAI
+        response = process_with_openai(client, file_content)
 
+        # Return response
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": result
+            "body": response
         }
-
     except Exception as e:
-        logger.error(f"An error occurred: {e}")
+        tb = traceback.format_exc()
+        logger.error(f"Exception caught: {e}\n{tb}")
         return {
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
