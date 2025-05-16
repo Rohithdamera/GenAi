@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 def unpad(data):
     """Remove padding from decrypted data."""
-    padding_length = data[-1]  # The last byte indicates the padding length
+    padding_length = data[-1]
     return data[:-padding_length]
 
 def decrypt(data, key):
@@ -30,7 +30,6 @@ def get_openai_client(model_instance_name):
         encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
         api_version = os.environ['AZURE_API_VERSION']
 
-        # Decrypt credentials
         decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
         decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
 
@@ -49,73 +48,62 @@ def get_openai_client(model_instance_name):
         logger.error(f"Error initializing OpenAI client: {e}")
         raise ValueError(f"Error initializing OpenAI client: {e}")
 
-def process_with_openai(client, file_content):
-    """Call OpenAI with fixed instruction and prompt for RAML analysis."""
-    try:
-        instruction = (
+def get_prompt_and_instruction(input_value):
+    """Return prompt and expected content type based on input."""
+    if input_value == "/sampleforrml":
+        prompt = (
             "You are an expert in analysing the RAML and generating the payload from the RAML. "
             "I am providing the RAML which will be used as an asset for designing my API. "
             "Please anlayze the RAML and generate the sample payload which will honour all the rules inside the RAML. "
-            "You can refer the link for any doubts related to RAML https://raml.org/developers/raml-100-tutorial"
+            "You can refer the link for any doubts related to RAML https://raml.org/developers/raml-100-tutorial.\n\n"
+            "Please generate the payloads for all the endpoint in the RAML."
         )
-
+        content_type = "application/json"
+    elif input_value == "/sampleforxsd":
         prompt = (
-            "Please generate the payloads for all the endpoint in the RAML"
+            "You are an expert in analysing the XSD and generating the payload from the XSD. "
+            "I am providing the XSD which will be used as an asset for designing my API. "
+            "Please anlayze the XSD and generate the sample payload which will honour all the rules inside the XSD. "
+            "You can refer the link for any doubts related to XSD https://www.tutorialspoint.com/xsd/index.htm\n\n"
+            "Please generate the payloads for the given XSD."
         )
-
-        full_prompt = f"{instruction}\n\n{prompt}\n\n{file_content}"
-        response = client.invoke([HumanMessage(content=full_prompt)])
-        return response.content
-    except Exception as e:
-        logger.error(f"Error during OpenAI invocation: {e}")
-        raise
-
-def validate_raml_file(file_content):
-    """Ensure the uploaded file is a RAML file."""
-    if not file_content.strip().startswith("#%RAML"):
-        raise ValueError("Invalid file type. Expected a RAML file starting with '#%RAML'.")
+        content_type = "application/xml"
+    else:
+        raise ValueError(f"Unsupported input value: {input_value}")
+    return prompt, content_type
 
 def lambda_handler(event, context):
-    """AWS Lambda entry point."""
     logger.info(f"Received event: {json.dumps(event)}")
 
     try:
         if 'body' not in event or 'isBase64Encoded' not in event or not event['isBase64Encoded']:
             raise ValueError("File content is missing or not base64-encoded in the event.")
 
-        # Decode the file
         file_content = b64decode(event['body']).decode('utf-8')
 
-        # Validate that it's a RAML file
-        validate_raml_file(file_content)
-
-        # Get 'input' param (e.g., /sampleforrml)
         query_params = event.get('queryStringParameters', {})
-        input_path = query_params.get('input')
-        if not input_path:
-            raise ValueError("'input' query parameter is missing.")
-        logger.info(f"Input path provided: {input_path}")
+        input_value = query_params.get('input')
+        if not input_value:
+            raise ValueError("'input' parameter is missing.")
 
-        # Extract model instance name from headers
         model_instance_name = event['headers'].get('model_instance_name')
         if not model_instance_name:
             raise ValueError("'model_instance_name' is missing in the headers.")
 
-        # Get OpenAI client and generate result
+        prompt, content_type = get_prompt_and_instruction(input_value)
+
         client = get_openai_client(model_instance_name)
-        result = process_with_openai(client, file_content)
+        response = client.invoke([HumanMessage(content=prompt + "\n\n" + file_content)])
 
         return {
             "statusCode": 200,
-            "headers": {"Content-Type": "application/json"},
-            "body": result
+            "headers": {"Content-Type": content_type},
+            "body": response.content
         }
 
     except Exception as e:
         logger.error(f"An error occurred: {e}")
         return {
             "statusCode": 500,
-            "body": json.dumps({
-                "error": str(e)
-            })
+            "body": json.dumps({"error": str(e)})
         }
