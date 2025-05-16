@@ -1,49 +1,44 @@
 import os
 import logging
 import json
-import shutil
 from base64 import b64decode
 from Crypto.Cipher import AES
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage
- 
+
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
- 
+
 def unpad(data):
     """Remove padding from decrypted data."""
-    padding_length = data[-1]  # The last byte indicates the padding length
+    padding_length = data[-1]
     return data[:-padding_length]
- 
+
 def decrypt(data, key):
     """Decrypt the data using AES and remove padding."""
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)  # Using ECB mode for simplicity
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)
     decrypted_data = cipher.decrypt(b64decode(data))
-    decrypted_data = unpad(decrypted_data)  # Remove padding
+    decrypted_data = unpad(decrypted_data)
     return decrypted_data.decode()
- 
-def get_openai_client(agent_name, model_instance_name):
-    """Initialize Azure OpenAI client using decrypted API credentials."""
+
+def get_openai_client(model_instance_name):
+    """Initialize Azure OpenAI client using decrypted credentials."""
     try:
         aes_key_base64 = os.environ['AES_KEY']
         encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
         encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
         api_version = os.environ['AZURE_API_VERSION']
- 
-        # Decrypt credentials
+
         decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
         decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
- 
-        # Ensure the base URL ends with a slash
+
         if not decrypted_api_base.endswith('/'):
             decrypted_api_base += '/'
- 
-        # Log the constructed request URL for debugging purposes
+
         request_url = f"{decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}"
         logger.info(f"Constructed Request URL: {request_url}")
- 
-        # Return OpenAI client
+
         return AzureChatOpenAI(
             deployment_name=model_instance_name,
             openai_api_base=decrypted_api_base,
@@ -53,130 +48,63 @@ def get_openai_client(agent_name, model_instance_name):
     except Exception as e:
         logger.error(f"Error initializing OpenAI client: {e}")
         raise ValueError(f"Error initializing OpenAI client: {e}")
- 
-def process_with_openai(client, file_content, agent_name):
-    """Process file content using OpenAI based on Agent_name."""
+
+def process_with_openai(client, file_content):
+    """Send prompt and file content to OpenAI and get response."""
     try:
-        if agent_name == "dwl_json":
-            prompt = (
-                "You are an expert in analyzing and converting DataWeave scripts into JSON structures. "
-                "Analyze the attached dwl logic and generate the input payloads for that. "
-                "The output should be a well-structured JSON array or object, *without any extra labels or keywords*. "
-                "Only return the raw JSON array or object. Do not include the words 'result', 'json', 'output', or any other labels."
-            )
-        elif agent_name == "raml_json":
-            prompt = (
-                '''You are an expert in analysing the RAML and generating the payload from the RAML.
-                 I am providing the RAML which will be used as an asset for designing my API.
-                 Please analyze the RAML and generate the sample payload with example data which will honor all the rules inside the RAML.
-                 You can refer the link for any doubts related to RAML https://raml.org/developers/raml-100-tutorial.
-                 Only return the raw JSON array or object. Do not include the words 'result', 'json', 'output', or any other labels.'''
-            )
-        elif agent_name == "xsd_json":
-            prompt = (
-                '''You are an expert in analysing the XSD and generating the payload from the XSD.
-                 I am providing the XSD which will be used as an asset for designing my API.
-                  Please analyze the XSD and generate the sample payload which will honor all the rules inside the XSD.
-                  You can refer the link for any doubts related to XSD https://www.tutorialspoint.com/xsd/index.html
-                  Only return the raw JSON array or object. Do not include the words 'result', 'json', 'output', or any other labels.'''
-            )
-        elif agent_name == "swagger_json":
-            prompt = (
-                '''You are an expert in analysing the Swagger and generating the payload from the Swagger.
-                I am providing the Swagger which will be used as an asset for designing my API.
-                Please analyze the Swagger and generate the sample payload which will honor all the rules inside the Swagger.
-                You can refer the link for any doubts related to Swagger https://swagger.io/solutions/api-design/
-                https://editor.swagger.io/
-                Only return the raw JSON array or object. Do not include the words 'result', 'json', 'output', or any other labels.'''
-            )
-        else:
-            raise ValueError(f"Unsupported Agent_name: {agent_name}")
- 
-        # Get OpenAI response
-        response = client.invoke([HumanMessage(content=prompt + "\n\n" + file_content)])
+        instruction = (
+            "You are an expert in analysing the XSD and generating the payload from the XSD. "
+            "I am providing the XSD which will be used as an asset for designing my API. "
+            "Please anlayze the XSD and generate the sample payload which will honour all the rules inside the XSD. "
+            "You can refer the link for any doubts related to XSD https://www.tutorialspoint.com/xsd/index.htm"
+        )
+
+        prompt = f"{instruction}\n\nPlease generate the payloads for the given XSD.\n\n{file_content}"
+
+        response = client.invoke([HumanMessage(content=prompt)])
         return response.content
     except Exception as e:
         logger.error(f"Error in OpenAI API call: {e}")
         raise
- 
-def process_file_content(agent_name, file_content, model_instance_name):
-    """Process the file content based on the agent name."""
-    try:
-        # Initialize OpenAI client
-        client = get_openai_client(agent_name, model_instance_name)
-        # Process the content using OpenAI
-        result = process_with_openai(client, file_content, agent_name)
-        return result
-    except Exception as e:
-        logger.error(f"Error processing file content: {e}")
-        raise
- 
-def validate_file_type(agent_name, file_content):
-    """Validate the file type based on the agent name."""
-    if agent_name == "dwl_json" and not file_content.strip().startswith("%dw"):
-        raise ValueError("Invalid file type for agent 'dwl_json'. Expected a DataWeave (dwl) file.")
-    elif agent_name == "raml_json" and not file_content.strip().startswith("#%RAML"):
-        raise ValueError("Invalid file type for agent 'raml_json'. Expected a RAML file.")
-    elif agent_name == "xsd_json" and not file_content.strip().startswith("<?xml"):
-        raise ValueError("Invalid file type for agent 'xsd_json'. Expected an XSD file.")
-    elif agent_name == "swagger_json" and not file_content.strip().startswith("swagger:"):
-        raise ValueError("Invalid file type for agent 'swagger_json'. Expected a Swagger (JSON) file.")
- 
+
+def validate_xsd(file_content):
+    """Ensure uploaded file is a valid XSD."""
+    if not file_content.strip().startswith("<?xml") or "<xsd:" not in file_content:
+        raise ValueError("Invalid file type. Expected an XSD file with <xsd: elements.")
+
 def lambda_handler(event, context):
     """AWS Lambda entry point."""
-    logger.info(f"Received event: {json.dumps(event)}")  # Log the entire event
- 
+    logger.info(f"Received event: {json.dumps(event)}")
+
     try:
-        # Check if the file is uploaded in binary format
         if 'body' not in event or 'isBase64Encoded' not in event or not event['isBase64Encoded']:
-            raise ValueError("File content is missing or not base64-encoded in the event.")
- 
-        # Decode the binary file content
+            raise ValueError("File content is missing or not base64-encoded.")
+
         file_content = b64decode(event['body']).decode('utf-8')
- 
-        # Extract query parameters to determine the Agent_name
+
         query_params = event.get('queryStringParameters', {})
-        agent_name = query_params.get('Agent_name')
-        if not agent_name:
-            raise ValueError("'Agent_name' is missing in the query parameters.")
- 
-        # Validate agent_name
-        valid_agent_names = ["dwl_json", "raml_json", "xsd_json", "swagger_json"]
-        if agent_name not in valid_agent_names:
-            raise ValueError(f"Unsupported Agent_name specified: {agent_name}. Valid values are: {', '.join(valid_agent_names)}")
- 
-        # Validate file type
-        validate_file_type(agent_name, file_content)
- 
-        # Extract model_instance_name from headers
-        model_instance_name = event['headers'].get('model_instance_name', None)
+        input_param = query_params.get('input')
+        if input_param != "/sampleforxsd":
+            raise ValueError("Unsupported or missing 'input' query param. Expected: /sampleforxsd")
+
+        validate_xsd(file_content)
+
+        model_instance_name = event['headers'].get('model_instance_name')
         if not model_instance_name:
             raise ValueError("'model_instance_name' is missing in the headers.")
- 
-        # Process the file content
-        processed_result = process_file_content(agent_name, file_content, model_instance_name)
- 
-        # Return response in the appropriate format
+
+        client = get_openai_client(model_instance_name)
+        result = process_with_openai(client, file_content)
+
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": processed_result  # JSON response
+            "body": result
         }
- 
+
     except Exception as e:
         logger.error(f"An error occurred: {e}")
         return {
             "statusCode": 500,
-            "body": json.dumps({
-                "error": str(e)
-            })
+            "body": json.dumps({"error": str(e)})
         }
- 
- 
- 
- 
- 
- 
- 
- 
- 
