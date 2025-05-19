@@ -39,8 +39,10 @@ def get_openai_client(model_instance_name):
         openai_api_version=api_version
     )
 
-def detect_file_type(file_content):
-    if re.search(r'^(%RAML)|(^#%RAML)', file_content.strip(), re.IGNORECASE):
+def detect_file_type(file_content, filename=""):
+    if filename.lower().endswith(".raml"):
+        return "raml"
+    elif re.search(r'^(%RAML)|(^#%RAML)', file_content.strip(), re.IGNORECASE):
         return "raml"
     elif "<xs:schema" in file_content or "http://www.w3.org/2001/XMLSchema" in file_content:
         return "xsd"
@@ -53,11 +55,11 @@ def get_instruction_and_prompt(input_type):
                 "You are an expert in analysing the RAML and generating the payload from the RAML. "
                 "I am providing the RAML which will be used as an asset for designing my API. "
                 "Please analyze the RAML and generate the sample payload which will honor all the rules inside the RAML. "
-                "You can refer the link for any doubts related to RAML: https://raml.org/developers/raml-100-tutorial.\n\n"
-                "**IMPORTANT**: Only return a valid JSON array or JSON object containing the payloads. "
+                "You can refer the link for any doubts related to RAML: https://raml.org/developers/raml-100-tutorial."
+                "\n\n**IMPORTANT**: Only return a valid JSON object or JSON array containing the payload. "
                 "Do NOT include any markdown, explanations, or extra text. The response must be parseable as JSON."
             ),
-            "prompt": "Please generate the payloads for all the endpoints in the RAML ONLY as pure JSON.",
+            "prompt": "Please generate one JSON payload from the following RAML:",
             "content_type": "application/json"
         }
     elif input_type == "/sampleforxsd":
@@ -68,7 +70,7 @@ def get_instruction_and_prompt(input_type):
                 "Please analyze the XSD and generate the sample payload which will honor all the rules inside the XSD. "
                 "You can refer the link for any doubts related to XSD: https://www.tutorialspoint.com/xsd/index.htm"
             ),
-            "prompt": "Please generate the payloads for the given XSD.",
+            "prompt": "Please generate one XML payload for the following XSD:",
             "content_type": "application/xml"
         }
     else:
@@ -139,14 +141,15 @@ def lambda_handler(event, context):
             }
 
         count = int(headers.get('count', '1'))
+        filename = headers.get('filename', '')  # optional: allow filename to assist in file detection
 
-        file_type = detect_file_type(file_content)
+        file_type = detect_file_type(file_content, filename)
         logger.info(f"Detected file type: {file_type}")
 
         if input_value == "/sampleforraml" and file_type != "raml":
             return {
                 "statusCode": 400,
-                "body": json.dumps({"error": "Only /sampleforraml command is allowed for .raml (RAML) files."})
+                "body": json.dumps({"error": "Only /sampleforraml command is allowed for .raml or .yml files."})
             }
         elif input_value == "/sampleforxsd" and file_type != "xsd":
             return {
@@ -157,38 +160,30 @@ def lambda_handler(event, context):
         instruction_data = get_instruction_and_prompt(input_value)
         client = get_openai_client(model_instance_name)
 
-        if input_value == "/sampleforraml":
+        results = []
+        for i in range(count):
             message = [
                 HumanMessage(content=instruction_data["instruction"]),
-                HumanMessage(content=instruction_data["prompt"] + f"\nGenerate {count} unique payload(s).\n\n" + file_content)
+                HumanMessage(content=instruction_data["prompt"] + "\n\n" + file_content)
             ]
-
             response = client.invoke(message)
-            parsed_json = extract_json_from_response(response.content.strip())
 
-            if parsed_json is None:
-                logger.warning("Failed to parse JSON from response")
-                return {
-                    "statusCode": 502,
-                    "body": json.dumps({"error": "Failed to parse valid JSON from the model response."})
-                }
+            if input_value == "/sampleforraml":
+                parsed = extract_json_from_response(response.content.strip())
+                if parsed is not None:
+                    results.append(parsed)
+                else:
+                    logger.warning(f"Failed to parse JSON from response {i+1}")
+            else:  # /sampleforxsd
+                results.append(response.content.strip())
 
+        if input_value == "/sampleforraml":
             return {
                 "statusCode": 200,
                 "headers": {"Content-Type": instruction_data["content_type"]},
-                "body": json.dumps(parsed_json, indent=2)
+                "body": json.dumps(results, indent=2)
             }
-
-        elif input_value == "/sampleforxsd":
-            results = []
-            for _ in range(count):
-                message = [
-                    HumanMessage(content=instruction_data["instruction"]),
-                    HumanMessage(content=instruction_data["prompt"] + "\n\n" + file_content)
-                ]
-                response = client.invoke(message)
-                results.append(response.content.strip())
-
+        else:  # /sampleforxsd
             return {
                 "statusCode": 200,
                 "headers": {"Content-Type": instruction_data["content_type"]},
