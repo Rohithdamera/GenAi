@@ -39,42 +39,30 @@ def get_openai_client(model_instance_name):
         openai_api_version=api_version
     )
 
-def detect_file_type(file_content, filename=""):
-    if filename.lower().endswith(".raml"):
-        return "raml"
-    elif filename.lower().endswith(".xsd"):
-        return "xsd"
-    elif re.search(r'^(%RAML)|(^#%RAML)', file_content.strip(), re.IGNORECASE):
+def detect_file_type(file_content):
+    if re.search(r'^(%RAML)|(^#%RAML)', file_content.strip(), re.IGNORECASE):
         return "raml"
     elif "<xs:schema" in file_content or "http://www.w3.org/2001/XMLSchema" in file_content:
         return "xsd"
     return "unknown"
 
-def get_instruction_and_prompt(input_type):
+def get_instruction(input_type):
     if input_type == "/sampleforraml":
-        return {
-            "instruction": (
-                "You are an expert in analysing the RAML and generating the payload from the RAML. "
-                "I am providing the RAML which will be used as an asset for designing my API. "
-                "Please analyze the RAML and generate the sample payload which will honor all the rules inside the RAML. "
-                "You can refer the link for any doubts related to RAML: https://raml.org/developers/raml-100-tutorial."
-                "\n\n**IMPORTANT**: Only return a valid JSON object or JSON array containing the payload. "
-                "Do NOT include any markdown, explanations, or extra text. The response must be parseable as JSON."
-            ),
-            "prompt": "Please generate one JSON payload from the following RAML:",
-            "content_type": "application/json"
-        }
+        return (
+            "You are an expert in analysing the RAML and generating the payload from the RAML. "
+            "I am providing the RAML which will be used as an asset for designing my API. "
+            "Please analyze the RAML and generate the sample payload which will honor all the rules inside the RAML. "
+            "You can refer the link for any doubts related to RAML: https://raml.org/developers/raml-100-tutorial.\n\n"
+            "**IMPORTANT**: Only return a valid JSON object or JSON array containing the payload. "
+            "Do NOT include any markdown, explanations, or extra text. The response must be parseable as JSON."
+        )
     elif input_type == "/sampleforxsd":
-        return {
-            "instruction": (
-                "You are an expert in analysing the XSD and generating the payload from the XSD. "
-                "I am providing the XSD which will be used as an asset for designing my API. "
-                "Please analyze the XSD and generate the sample payload which will honor all the rules inside the XSD. "
-                "You can refer the link for any doubts related to XSD: https://www.tutorialspoint.com/xsd/index.htm"
-            ),
-            "prompt": "Please generate one XML payload for the following XSD:",
-            "content_type": "application/xml"
-        }
+        return (
+            "You are an expert in analysing the XSD and generating the payload from the XSD. "
+            "I am providing the XSD which will be used as an asset for designing my API. "
+            "Please analyze the XSD and generate the sample payload which will honor all the rules inside the XSD. "
+            "You can refer the link for any doubts related to XSD: https://www.tutorialspoint.com/xsd/index.htm"
+        )
     else:
         raise ValueError("Unsupported input type")
 
@@ -127,11 +115,17 @@ def lambda_handler(event, context):
         file_content = b64decode(event['body']).decode('utf-8')
         query_params = event.get('queryStringParameters', {})
         input_value = query_params.get('input')
+        user_prompt = query_params.get('prompt')
 
         if not input_value:
             return {
                 "statusCode": 400,
                 "body": json.dumps({"error": "'input' parameter is missing in query string."})
+            }
+        if not user_prompt:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "'prompt' parameter is missing in query string."})
             }
 
         headers = event.get('headers', {})
@@ -143,30 +137,28 @@ def lambda_handler(event, context):
             }
 
         count = int(headers.get('count', '1'))
-        filename = headers.get('filename', '')  # optional: allow .txt, .raml, .xsd
-
-        file_type = detect_file_type(file_content, filename)
+        file_type = detect_file_type(file_content)
         logger.info(f"Detected file type: {file_type}")
 
         if input_value == "/sampleforraml" and file_type != "raml":
             return {
                 "statusCode": 400,
-                "body": json.dumps({"error": "Only RAML (.raml, .txt) content is allowed for /sampleforraml."})
+                "body": json.dumps({"error": "Only RAML or .txt content containing RAML is allowed for /sampleforraml."})
             }
         elif input_value == "/sampleforxsd" and file_type != "xsd":
             return {
                 "statusCode": 400,
-                "body": json.dumps({"error": "Only XSD (.xsd, .txt) content is allowed for /sampleforxsd."})
+                "body": json.dumps({"error": "Only XSD or .txt content containing XSD is allowed for /sampleforxsd."})
             }
 
-        instruction_data = get_instruction_and_prompt(input_value)
+        instruction_text = get_instruction(input_value)
         client = get_openai_client(model_instance_name)
 
         results = []
         for i in range(count):
             message = [
-                HumanMessage(content=instruction_data["instruction"]),
-                HumanMessage(content=instruction_data["prompt"] + "\n\n" + file_content)
+                HumanMessage(content=instruction_text),
+                HumanMessage(content=user_prompt + "\n\n" + file_content)
             ]
             response = client.invoke(message)
 
@@ -182,13 +174,13 @@ def lambda_handler(event, context):
         if input_value == "/sampleforraml":
             return {
                 "statusCode": 200,
-                "headers": {"Content-Type": instruction_data["content_type"]},
+                "headers": {"Content-Type": "application/json"},
                 "body": json.dumps(results, indent=2)
             }
         else:  # /sampleforxsd
             return {
                 "statusCode": 200,
-                "headers": {"Content-Type": instruction_data["content_type"]},
+                "headers": {"Content-Type": "application/xml"},
                 "body": "\n\n".join(results)
             }
 
