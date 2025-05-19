@@ -41,7 +41,7 @@ def get_openai_client(model_instance_name):
 
 def detect_file_type(file_content):
     if re.search(r'^(%RAML)|(^#%RAML)', file_content.strip(), re.IGNORECASE):
-        return "yml"
+        return "raml"
     elif "<xs:schema" in file_content or "http://www.w3.org/2001/XMLSchema" in file_content:
         return "xsd"
     return "unknown"
@@ -53,8 +53,8 @@ def get_instruction_and_prompt(input_type):
                 "You are an expert in analysing the RAML and generating the payload from the RAML. "
                 "I am providing the RAML which will be used as an asset for designing my API. "
                 "Please analyze the RAML and generate the sample payload which will honor all the rules inside the RAML. "
-                "You can refer the link for any doubts related to RAML: https://raml.org/developers/raml-100-tutorial."
-                "\n\n**IMPORTANT**: Only return a valid JSON array or JSON object containing the payloads. "
+                "You can refer the link for any doubts related to RAML: https://raml.org/developers/raml-100-tutorial.\n\n"
+                "**IMPORTANT**: Only return a valid JSON array or JSON object containing the payloads. "
                 "Do NOT include any markdown, explanations, or extra text. The response must be parseable as JSON."
             ),
             "prompt": "Please generate the payloads for all the endpoints in the RAML ONLY as pure JSON.",
@@ -143,10 +143,10 @@ def lambda_handler(event, context):
         file_type = detect_file_type(file_content)
         logger.info(f"Detected file type: {file_type}")
 
-        if input_value == "/sampleforraml" and file_type != "yml":
+        if input_value == "/sampleforraml" and file_type != "raml":
             return {
                 "statusCode": 400,
-                "body": json.dumps({"error": "Only /sampleforraml command is allowed for .yml (RAML) files."})
+                "body": json.dumps({"error": "Only /sampleforraml command is allowed for .raml (RAML) files."})
             }
         elif input_value == "/sampleforxsd" and file_type != "xsd":
             return {
@@ -180,7 +180,6 @@ def lambda_handler(event, context):
             }
 
         elif input_value == "/sampleforxsd":
-            # For XSD, still call in a loop (as XML can’t be aggregated as easily)
             results = []
             for _ in range(count):
                 message = [
