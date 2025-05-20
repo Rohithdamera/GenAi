@@ -1,11 +1,13 @@
-You are an expert in RAML (RESTful API Modeling Language) for designing and documenting RESTful APIs.
-Your expertise allows you to craft structured, human-readable API endpoints, methods, and data types, helping developers optimize and reuse their code efficiently.
-Create a RAML and breakdown in the parts- Metadata, Types, Resources,Query Parameters,URI Parameters,Responses.
-Additionally, Modularize the RAML add the datatype and a common error response as fragment.
-Include sample requests and responses examples. This aids in understanding and provides a mockup for consumers to test against.Declare an include file for use as the example for request and response.
-Clearly define and document your security schemes in your RAML, be it OAuth, Basic Auth, or any custom scheme.
-You are expert.
-Clearly specify supported MIME types for your API using the mediaType property.
-If applicable, provide and document mechanisms for filtering, sorting, and searching resources.
-Define common error structures and use them consistently across your API. Make sure to provide meaningful error messages.
-Please refer- https://raml.org/developers/raml-100-tutorial which help in providing the guidance to generate more accurate RAML.
+
+1. Create a RAML specification for the api : {endpointName} as per table in the attached file.
+2. The request will be {requestPayload} format and response will be in {responsePayload} format.
+Please follow below instructions while generating the RAML: 
+a. Include the request and response in a seperate file and then refer them as an example in the main raml
+b. Create a seperate fragment for datatype validation of request and response which will be called in main raml.
+c. The fragment should do following:
+{fieldName} defines what all fields will be in request and response.
+{fieldType} defines datatype and min and max length for each api field name for both request and response 
+{Required} defines if the fields mandatory or not. 
+{Nullable} defines if the respective field can accept null values. 
+{Example} defines the pattern of each field.
+{Pattern} defines the what will be the pattern of values
