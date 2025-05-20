@@ -91,3 +91,34 @@ examples/redeem-response.json
 examples/error-response.json
  
 This RAML specification includes the main API definition, data types for request and response, and examples for each. The data types ensure validation of fields like customerId, redeemAmount, bmiCustomerRequestDate, and bmiTransactionId with specific constraints 1 .
+
+
+
+
+1. Create a RAML specification for the api : {endpointName} as per table in the attached file.
+2. The request will be {requestPayload} format and response will be in {responsePayload} format.
+Please follow below instructions while generating the RAML: 
+a. Include the request and response in a seperate file and then refer them as an example in the main raml
+b. Create a seperate fragment for datatype validation of request and response which will be called in main raml.
+c. The fragment should do following:
+{fieldName} defines what all fields will be in request and response.
+{fieldType} defines datatype and min and max length for each api field name for both request and response 
+{Required} defines if the fields mandatory or not. 
+{Nullable} defines if the respective field can accept null values. 
+{Example} defines the pattern of each field.
+{Pattern} defines the what will be the pattern of values
+ 
+ 
+===========QueryParamas=========
+query parameter--- value
+==============================
+endpointName- create order
+requestPayload- json 
+responsePayload- json
+fieldName- Field Name (optional)
+fieldType-  Type (optional)
+requiredCol- Required (optional)
+nullableCol- Nullable (optional)
+exampleCol- Example (optional)
+patternCol- Pattern (optional)
+prompt- "Dynamic Prompt" (optional)
