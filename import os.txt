@@ -2,23 +2,15 @@ import os
 import logging
 
 def lambda_handler(event, context):
-    logging.getLogger().setLevel(logging.INFO)
+    logging.info("=== Installed libraries in /opt ===")
 
-    layer_paths = [
-        "/opt/python",  # Common for custom layers
-        "/opt/python/lib/python3.9/site-packages",  # Python 3.9 layers
-        "/opt/python/lib/python3.8/site-packages",  # Python 3.8
-        "/opt/python/lib/python3.10/site-packages",  # Python 3.10
-    ]
+    for root, dirs, files in os.walk("/opt"):
+        for file in files:
+            full_path = os.path.join(root, file)
+            if full_path.endswith(".py") or 'site-packages' in full_path:
+                logging.info(full_path)
 
-    for path in layer_paths:
-        if os.path.exists(path):
-            logging.info(f"Listing contents of: {path}")
-            for root, dirs, files in os.walk(path):
-                for name in files:
-                    full_path = os.path.join(root, name)
-                    logging.info(full_path)
-        else:
-            logging.info(f"Path not found: {path}")
-
-    return {"status": "done"}
+    return {
+        "status": "done",
+        "message": "Check CloudWatch logs for installed libraries in /opt (i.e. from the Layer)"
+    }
