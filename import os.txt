@@ -1,1 +1,2 @@
-C:\Users\rdamera\Downloads\Dependencies\python\lib\python3.9\site-packages>pip install python-docx lxml pycrptodome -t "C:\Users\rdamera\Downloads\Dependencies\python\lib\python3.9\site-packages"
+mkdir -p C:\Users\rdamera\Downloads\Dependencies\python\lib\python3.9\lambda_packages
+pip install python-docx lxml pycryptodome -t "C:\Users\rdamera\Downloads\Dependencies\python\lib\python3.9\lambda_packages"
