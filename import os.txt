@@ -1,115 +1,133 @@
- Directory of C:\Users\rdamera\Downloads\Dependencies\python\lib\python3.9\site-packages
+import base64
+import json
+import logging
+import os
+import tempfile
+import xml.etree.ElementTree as ET
+import zipfile
+from io import BytesIO
 
-20-05-2025  19:06    <DIR>          .
-20-05-2025  16:28    <DIR>          ..
-20-05-2025  16:28    <DIR>          aiohappyeyeballs
-20-05-2025  16:28    <DIR>          aiohappyeyeballs-2.4.4.dist-info
-20-05-2025  16:28    <DIR>          aiohttp
-20-05-2025  16:28    <DIR>          aiohttp-3.11.11.dist-info
-20-05-2025  16:28    <DIR>          aiosignal
-20-05-2025  16:28    <DIR>          aiosignal-1.3.2.dist-info
-20-05-2025  16:28    <DIR>          annotated_types
-20-05-2025  16:28    <DIR>          annotated_types-0.7.0.dist-info
-20-05-2025  16:28    <DIR>          anyio
-20-05-2025  16:28    <DIR>          anyio-4.8.0.dist-info
-20-05-2025  16:28    <DIR>          async_timeout
-20-05-2025  16:28    <DIR>          async_timeout-4.0.3.dist-info
-20-05-2025  16:28    <DIR>          attr
-20-05-2025  16:28    <DIR>          attrs
-20-05-2025  16:28    <DIR>          attrs-24.3.0.dist-info
-20-05-2025  16:28    <DIR>          bin
-20-05-2025  16:29    <DIR>          boto3
-20-05-2025  16:29    <DIR>          boto3-1.28.80.dist-info
-20-05-2025  16:29    <DIR>          boto3-1.35.95.dist-info
-20-05-2025  16:29    <DIR>          boto3-1.36.0.dist-info
-20-05-2025  16:29    <DIR>          certifi
-20-05-2025  16:29    <DIR>          certifi-2024.12.14.dist-info
-20-05-2025  16:29    <DIR>          charset_normalizer
-20-05-2025  16:29    <DIR>          charset_normalizer-3.4.1.dist-info
-20-05-2025  16:29    <DIR>          Crypto
-20-05-2025  16:38    <DIR>          docx
-20-05-2025  16:29    <DIR>          exceptiongroup
-20-05-2025  16:29    <DIR>          exceptiongroup-1.2.2.dist-info
-20-05-2025  16:29    <DIR>          frozenlist
-20-05-2025  16:29    <DIR>          frozenlist-1.5.0.dist-info
-20-05-2025  16:29    <DIR>          greenlet
-20-05-2025  16:29    <DIR>          greenlet-3.1.1.dist-info
-20-05-2025  16:29    <DIR>          h11
-20-05-2025  16:29    <DIR>          h11-0.14.0.dist-info
-20-05-2025  16:29    <DIR>          httpcore
-20-05-2025  16:29    <DIR>          httpcore-1.0.7.dist-info
-20-05-2025  16:29    <DIR>          httpx
-20-05-2025  16:29    <DIR>          httpx-0.28.1.dist-info
-20-05-2025  16:29    <DIR>          idna
-20-05-2025  16:29    <DIR>          idna-3.10.dist-info
-20-05-2025  16:29    <DIR>          include
-20-05-2025  16:29    <DIR>          jsonpatch-1.33.dist-info
-20-05-2025  16:28            29,778 jsonpatch.py
-20-05-2025  16:29    <DIR>          jsonpointer-3.0.0.dist-info
-20-05-2025  16:28            10,601 jsonpointer.py
-20-05-2025  16:31    <DIR>          langchain
-20-05-2025  16:31    <DIR>          langchain-0.3.13.dist-info
-20-05-2025  16:34    <DIR>          langchain_community
-20-05-2025  16:34    <DIR>          langchain_community-0.3.14.dist-info
-20-05-2025  16:34    <DIR>          langchain_core
-20-05-2025  16:34    <DIR>          langchain_core-0.3.29.dist-info
-20-05-2025  16:34    <DIR>          langchain_openai
-20-05-2025  16:34    <DIR>          langchain_openai-0.2.14.dist-info
-20-05-2025  16:34    <DIR>          langchain_openai-0.3.0.dist-info
-20-05-2025  16:34    <DIR>          langchain_text_splitters
-20-05-2025  16:34    <DIR>          langchain_text_splitters-0.3.4.dist-info
-20-05-2025  16:34    <DIR>          langsmith
-20-05-2025  16:34    <DIR>          langsmith-0.2.10.dist-info
-20-05-2025  16:34    <DIR>          multidict
-20-05-2025  16:34    <DIR>          multidict-6.1.0.dist-info
-20-05-2025  16:35    <DIR>          numpy
-20-05-2025  16:28                 0 numpy-1.26.4-cp39-cp39-win_amd64.whl
-20-05-2025  16:35    <DIR>          numpy-1.26.4.dist-info
-20-05-2025  16:35    <DIR>          numpy-2.0.2.dist-info
-20-05-2025  16:35    <DIR>          numpy.libs
-20-05-2025  16:35    <DIR>          openai
-20-05-2025  16:35    <DIR>          openai-0.27.10.dist-info
-20-05-2025  16:38    <DIR>          openpyxl
-20-05-2025  16:38    <DIR>          openpyxl-3.1.5.dist-info
-20-05-2025  16:35    <DIR>          orjson
-20-05-2025  16:35    <DIR>          orjson-3.10.13.dist-info
-20-05-2025  16:35    <DIR>          packaging
-20-05-2025  16:35    <DIR>          packaging-24.2.dist-info
-20-05-2025  16:35    <DIR>          propcache
-20-05-2025  16:35    <DIR>          propcache-0.2.1.dist-info
-20-05-2025  16:35    <DIR>          pycryptodome-3.21.0.dist-info
-20-05-2025  16:35    <DIR>          pydantic
-20-05-2025  16:36    <DIR>          pydantic-2.10.2.dist-info
-20-05-2025  16:36    <DIR>          pydantic_core
-20-05-2025  16:36    <DIR>          pydantic_core-2.27.1.dist-info
-20-05-2025  16:38    <DIR>          python_docx-1.1.2.dist-info
-20-05-2025  16:36    <DIR>          PyYAML-6.0.2.dist-info
-20-05-2025  16:36    <DIR>          regex
-20-05-2025  16:36    <DIR>          regex-2024.11.6.dist-info
-20-05-2025  16:36    <DIR>          requests
-20-05-2025  16:36    <DIR>          requests-2.32.3.dist-info
-20-05-2025  16:36    <DIR>          requests_toolbelt
-20-05-2025  16:36    <DIR>          requests_toolbelt-1.0.0.dist-info
-20-05-2025  16:36    <DIR>          sniffio
-20-05-2025  16:36    <DIR>          sniffio-1.3.1.dist-info
-20-05-2025  16:36    <DIR>          sqlalchemy
-20-05-2025  16:36    <DIR>          SQLAlchemy-2.0.36.dist-info
-20-05-2025  16:36    <DIR>          tenacity
-20-05-2025  16:36    <DIR>          tenacity-9.0.0.dist-info
-20-05-2025  16:36    <DIR>          tiktoken
-20-05-2025  16:36    <DIR>          tiktoken-0.8.0.dist-info
-20-05-2025  16:36    <DIR>          tiktoken_ext
-20-05-2025  16:36    <DIR>          typing_extensions-4.12.2.dist-info
-20-05-2025  16:38    <DIR>          typing_extensions-4.13.2.dist-info
-20-05-2025  16:28           134,451 typing_extensions.py
-20-05-2025  16:36    <DIR>          urllib3
-20-05-2025  16:36    <DIR>          urllib3-2.3.0.dist-info
-20-05-2025  16:36    <DIR>          xmlschema
-20-05-2025  16:36    <DIR>          xmlschema-2.5.1.dist-info
-20-05-2025  16:36    <DIR>          yaml
-20-05-2025  16:36    <DIR>          yarl
-20-05-2025  16:36    <DIR>          yarl-1.18.3.dist-info
-20-05-2025  16:36    <DIR>          _yaml
-20-05-2025  16:36    <DIR>          __pycache__
-               4 File(s)        174,830 bytes
-             107 Dir(s)  370,342,457,344 bytes free
+import docx
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+
+def extract_text_and_table(doc_path):
+    doc = docx.Document(doc_path)
+    text = [para.text for para in doc.paragraphs if para.text.strip()]
+    tables = []
+    for table in doc.tables:
+        headers = [cell.text.strip() for cell in table.rows[0].cells]
+        rows = []
+        for row in table.rows[1:]:
+            rows.append([cell.text.strip() for cell in row.cells])
+        tables.append((headers, rows))
+    return text, tables
+
+
+def lambda_handler(event, context):
+    try:
+        # Get headers and query parameters
+        headers = event.get("headers", {})
+        query_params = event.get("queryStringParameters", {})
+        count = int(headers.get("count", 1))
+        model_name = headers.get("model_instance_name", "default_model")
+
+        # Get prompt from query params or use default
+        prompt = query_params.get(
+            "prompt",
+            """1. Create a RAML specification for the api : {endpointName} as per table in the attached file.
+2. The request will be {requestPayload} format and response will be in {responsePayload} format.
+Please follow below instructions while generating the RAML: 
+a. Include the request and response in a seperate file and then refer them as an example in the main raml
+b. Create a seperate fragment for datatype validation of request and response which will be called in main raml.
+c. The fragment should do following:
+{apiFields} defines what all fields will be in request and response.
+{apiFieldType} defines datatype and min and max length for each api field name for both request and response 
+{apiFieldType} defines if the fields mandatory or not. 
+{apiNullable} defines if the respective field can accept null values. 
+{apiExample} defines the pattern of each field.
+{apiPattern} defines the what will be the pattern of values"""
+        )
+
+        instruction = """You are an expert in RAML (RESTful API Modeling Language) for designing and documenting RESTful APIs.
+Your expertise allows you to craft structured, human-readable API endpoints, methods, and data types, helping developers optimize and reuse their code efficiently.
+Create a RAML and breakdown in the parts- Metadata, Types, Resources,Query Parameters,URI Parameters,Responses.
+Additionally, Modularize the RAML add the datatype and a common error response as fragment.
+Include sample requests and responses examples. This aids in understanding and provides a mockup for consumers to test against.Declare an include file for use as the example for request and response.
+Clearly define and document your security schemes in your RAML, be it OAuth, Basic Auth, or any custom scheme.
+You are expert.
+Clearly specify supported MIME types for your API using the mediaType property.
+If applicable, provide and document mechanisms for filtering, sorting, and searching resources.
+Define common error structures and use them consistently across your API. Make sure to provide meaningful error messages.
+Please refer- https://raml.org/developers/raml-100-tutorial which help in providing the guidance to generate more accurate RAML."""
+
+        # Decode and extract the .docx file
+        is_base64_encoded = event.get("isBase64Encoded", False)
+        file_content = event["body"]
+        if is_base64_encoded:
+            file_content = base64.b64decode(file_content)
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as temp_docx:
+            temp_docx.write(file_content)
+            temp_docx_path = temp_docx.name
+
+        # Extract text and table
+        text_content, table_data = extract_text_and_table(temp_docx_path)
+
+        # Extract query param values
+        endpoint_name = query_params.get("endpointName", "")
+        request_payload = query_params.get("requestPayload", "")
+        response_payload = query_params.get("responsePayload", "")
+        api_fields = query_params.get("apiFields", "")
+        api_field_type = query_params.get("apiFieldType", "")
+        api_required = query_params.get("apiRequired", "")
+        api_nullable = query_params.get("apiNullable", "")
+        api_example = query_params.get("apiExample", "")
+        api_pattern = query_params.get("apiPattern", "")
+
+        # Fill in the prompt
+        formatted_prompt = prompt.format(
+            endpointName=endpoint_name,
+            requestPayload=request_payload,
+            responsePayload=response_payload,
+            apiFields=api_fields,
+            apiFieldType=api_field_type,
+            apiRequired=api_required,
+            apiNullable=api_nullable,
+            apiExample=api_example,
+            apiPattern=api_pattern,
+        )
+
+        final_prompt = instruction + "\n\n" + formatted_prompt
+
+        # Dummy RAML generation logic (simulate actual generation for count times)
+        output_list = []
+        for i in range(count):
+            output_list.append({
+                "raml_main": f"# RAML for {endpoint_name} - example {i+1}",
+                "datatype_fragment": f"# Datatype for request and response - example {i+1}",
+                "error_response_fragment": "# Error response structure",
+                "example_request": f"{{\n  \"example\": \"request {i+1}\"\n}}",
+                "example_response": f"{{\n  \"example\": \"response {i+1}\"\n}}"
+            })
+
+        return {
+            "statusCode": 200,
+            "body": json.dumps({
+                "model_instance_name": model_name,
+                "count_requested": count,
+                "prompt_used": final_prompt,
+                "raml_outputs": output_list
+            }),
+            "headers": {"Content-Type": "application/json"},
+        }
+
+    except Exception as e:
+        logger.error("Error occurred", exc_info=True)
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)}),
+            "headers": {"Content-Type": "application/json"},
+        }
