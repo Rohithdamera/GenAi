@@ -1,1 +1,150 @@
-  "errorMessage": "Unable to import module 'lambda_function': cannot import name 'etree' from 'lxml' (/opt/python/lib/python3.9/site-packages/lxml/__init__.py)",
+import os
+import json
+import base64
+import logging
+import tempfile
+import zipfile
+import shutil
+import xml.etree.ElementTree as ET
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
+from string import ascii_letters, digits
+from random import choices
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.secrets import SecretClient
+from openai import AzureOpenAI
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger()
+
+# Decrypt using AES
+def decrypt_value(cipher_text_b64, secret_key):
+    cipher_text = base64.b64decode(cipher_text_b64)
+    iv = cipher_text[:16]
+    cipher = AES.new(secret_key.encode('utf-8'), AES.MODE_CBC, iv)
+    decrypted = cipher.decrypt(cipher_text[16:])
+    return decrypted.rstrip(b"\x00").decode('utf-8')
+
+# Extract text from docx (without python-docx or lxml)
+def extract_text_from_docx(file_path):
+    text = []
+    try:
+        with zipfile.ZipFile(file_path) as docx_zip:
+            # Word document text is stored in word/document.xml
+            with docx_zip.open('word/document.xml') as document_xml_file:
+                tree = ET.parse(document_xml_file)
+                root = tree.getroot()
+                # The XML namespace for Word documents
+                namespace = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+                # Extract all text in w:t elements inside w:p (paragraphs)
+                for paragraph in root.findall('.//w:p', namespace):
+                    texts = [node.text for node in paragraph.findall('.//w:t', namespace) if node.text]
+                    if texts:
+                        text.append(''.join(texts))
+    except Exception as e:
+        logger.error(f"Failed to extract text from docx: {e}")
+    return '\n'.join(text)
+
+# Build dynamic prompt from input fields
+def build_prompt(endpointName, requestPayload, responsePayload, apiFields,
+                 apiFieldType, apiRequired, apiNullable, apiExample, apiPattern):
+    return f"""
+1. Create a RAML specification for the api : {endpointName} as per table in the attached file.
+2. The request will be {requestPayload} format and response will be in {responsePayload} format.
+Please follow below instructions while generating the RAML:
+a. Include the request and response in a separate file and then refer them as an example in the main RAML
+b. Create a separate fragment for datatype validation of request and response which will be called in main RAML.
+c. The fragment should do the following:
+{apiFields} defines what all fields will be in request and response.
+{apiFieldType} defines datatype and min and max length for each api field name for both request and response.
+{apiRequired} defines if the fields mandatory or not.
+{apiNullable} defines if the respective field can accept null values.
+{apiExample} defines the pattern of each field.
+{apiPattern} defines what will be the pattern of values.
+"""
+
+# Main Lambda handler
+def lambda_handler(event, context):
+    try:
+        # Get headers
+        headers = event.get("headers", {})
+        model_instance = headers.get("model_instance_name", "")
+        count = int(headers.get("count", "1"))
+
+        # Get query parameters
+        query = event.get("queryStringParameters", {}) or {}
+        prompt_override = query.get("prompt")
+
+        # Required query params
+        endpointName = query.get("endpointName", "")
+        requestPayload = query.get("requestPayload", "")
+        responsePayload = query.get("responsePayload", "")
+        apiFields = query.get("apiFields", "")
+        apiFieldType = query.get("apiFieldType", "")
+        apiRequired = query.get("apiRequired", "")
+        apiNullable = query.get("apiNullable", "")
+        apiExample = query.get("apiExample", "")
+        apiPattern = query.get("apiPattern", "")
+
+        # Decode and save uploaded .docx file
+        body = base64.b64decode(event["body"])
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
+            temp_file.write(body)
+            temp_file_path = temp_file.name
+
+        # Extract text from docx using pure Python method
+        extracted_text = extract_text_from_docx(temp_file_path)
+
+        # Default Instruction
+        default_instruction = """
+You are an expert in RAML (RESTful API Modeling Language) for designing and documenting RESTful APIs.
+Your expertise allows you to craft structured, human-readable API endpoints, methods, and data types, helping developers optimize and reuse their code efficiently.
+Create a RAML and breakdown in the parts - Metadata, Types, Resources, Query Parameters, URI Parameters, Responses.
+Additionally, Modularize the RAML, add the datatype and a common error response as fragment.
+Include sample requests and responses examples. Declare an include file for use as the example for request and response.
+Clearly define and document your security schemes in your RAML (OAuth, Basic Auth, or custom).
+Clearly specify supported MIME types using the mediaType property.
+If applicable, document filtering, sorting, searching resources.
+Define common error structures and provide meaningful error messages.
+Refer to https://raml.org/developers/raml-100-tutorial for more guidance.
+"""
+
+        # Final Prompt
+        prompt = prompt_override if prompt_override else default_instruction
+        prompt += "\n" + build_prompt(endpointName, requestPayload, responsePayload, apiFields,
+                                      apiFieldType, apiRequired, apiNullable, apiExample, apiPattern)
+        prompt += "\n\nHere is the extracted content from the file:\n" + extracted_text
+
+        # Connect to Azure OpenAI
+        client = AzureOpenAI(
+            api_key=os.environ.get("AZURE_OPENAI_KEY"),
+            api_version="2024-08-01-preview",
+            azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT"),
+        )
+
+        # Invoke LLM
+        response = client.chat.completions.create(
+            model=os.environ.get("AZURE_OPENAI_MODEL"),  # e.g., "gpt-4"
+            temperature=0.4,
+            max_tokens=4096,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": "Generate the RAML as described."}
+            ]
+        )
+
+        # Response content
+        final_result = response.choices[0].message.content.strip()
+
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"raml_spec": final_result})
+        }
+
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
