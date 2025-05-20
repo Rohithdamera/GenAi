@@ -1,6 +1,1 @@
-Status: Failed
-Test Event Name: test
-
-Response:
-{
-  "errorMessage": "Unable to import module 'lambda_function': cannot import name 'etree' from 'lxml' (/opt/python/lib/python3.9/site-packages/lxml/__init__.py)",s
+C:\Users\rdamera\Downloads\Dependencies\python\lib\python3.9\site-packages
