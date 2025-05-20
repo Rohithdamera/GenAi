@@ -14,14 +14,14 @@ import tempfile
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
 
-# Decryption function
+# Fixed decryption function
 def decrypt(data, key):
     cipher = AES.new(b64decode(key), AES.MODE_ECB)
     decrypted_data = cipher.decrypt(b64decode(data))
-    decrypted_data = unpad(decrypted_data)
+    decrypted_data = unpad(decrypted_data, AES.block_size)  # Fixed: Added AES.block_size = 16
     return decrypted_data.decode()
 
-# Initialize Azure Chat OpenAI client
+# Get AzureChatOpenAI client using decrypted secrets
 def get_openai_client(model_instance_name):
     aes_key_base64 = os.environ['AES_KEY']
     encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
@@ -43,7 +43,7 @@ def get_openai_client(model_instance_name):
         max_tokens=4096
     )
 
-# Extract text from .docx (without python-docx)
+# Extract text from .docx file without python-docx
 def extract_text_from_docx(docx_path):
     try:
         with zipfile.ZipFile(docx_path) as docx_zip:
@@ -61,7 +61,7 @@ def extract_text_from_docx(docx_path):
         logger.error(f"Failed to extract text from docx: {e}")
         return ""
 
-# Build prompt
+# Prompt builder function
 def build_prompt(endpointName, requestPayload, responsePayload, apiFields,
                  apiFieldType, apiRequired, apiNullable, apiExample, apiPattern):
     return f"""
@@ -98,7 +98,7 @@ def lambda_handler(event, context):
         apiExample = query.get("apiExample", "")
         apiPattern = query.get("apiPattern", "")
 
-        # Decode the uploaded .docx file
+        # Decode and save .docx file from request body
         body_b64 = event.get("body", "")
         if not body_b64:
             raise ValueError("No file content found in the request body")
@@ -128,7 +128,6 @@ Refer to https://raml.org/developers/raml-100-tutorial for more guidance.
                                       apiFieldType, apiRequired, apiNullable, apiExample, apiPattern)
         prompt += "\n\nHere is the extracted content from the file:\n" + extracted_text
 
-        # Get OpenAI client with secure decryption
         client = get_openai_client(model_instance)
 
         response = client.generate(
