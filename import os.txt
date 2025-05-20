@@ -4,6 +4,7 @@ import json
 import re
 from base64 import b64decode
 from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage
 import zipfile
@@ -13,16 +14,36 @@ import tempfile
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
 
-# Decrypt AES-encrypted values
-def decrypt(cipher_text_b64, secret_key_b64):
-    secret_key = b64decode(secret_key_b64)
-    cipher_text = b64decode(cipher_text_b64)
-    iv = cipher_text[:16]
-    cipher = AES.new(secret_key, AES.MODE_CBC, iv)
-    decrypted = cipher.decrypt(cipher_text[16:])
-    return decrypted.rstrip(b"\x00").decode('utf-8')
+# Decryption function
+def decrypt(data, key):
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)
+    decrypted_data = cipher.decrypt(b64decode(data))
+    decrypted_data = unpad(decrypted_data)
+    return decrypted_data.decode()
 
-# Extract text from .docx using pure XML (no python-docx)
+# Initialize Azure Chat OpenAI client
+def get_openai_client(model_instance_name):
+    aes_key_base64 = os.environ['AES_KEY']
+    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+    api_version = os.environ['AZURE_API_VERSION']
+
+    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+
+    if not decrypted_api_base.endswith('/'):
+        decrypted_api_base += '/'
+
+    return AzureChatOpenAI(
+        deployment_name=model_instance_name,
+        openai_api_base=decrypted_api_base,
+        openai_api_key=decrypted_api_key,
+        openai_api_version=api_version,
+        temperature=0.4,
+        max_tokens=4096
+    )
+
+# Extract text from .docx (without python-docx)
 def extract_text_from_docx(docx_path):
     try:
         with zipfile.ZipFile(docx_path) as docx_zip:
@@ -40,7 +61,7 @@ def extract_text_from_docx(docx_path):
         logger.error(f"Failed to extract text from docx: {e}")
         return ""
 
-# Dynamically build prompt
+# Build prompt
 def build_prompt(endpointName, requestPayload, responsePayload, apiFields,
                  apiFieldType, apiRequired, apiNullable, apiExample, apiPattern):
     return f"""
@@ -58,37 +79,15 @@ c. The fragments should do the following:
 - {apiPattern} defines the pattern of values.
 """
 
-# Get OpenAI client with decrypted credentials
-def get_openai_client(model_instance_name):
-    aes_key_base64 = os.environ['AES_KEY']
-    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-    api_version = os.environ['AZURE_API_VERSION']
-    deployment_name = os.environ['AZURE_OPENAI_MODEL']
-
-    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
-
-    return AzureChatOpenAI(
-        deployment_name=deployment_name,
-        temperature=0.4,
-        max_tokens=4096,
-        openai_api_base=decrypted_api_base,
-        openai_api_version=api_version,
-        openai_api_key=decrypted_api_key,
-        model=deployment_name
-    )
-
-# Main Lambda handler
+# Lambda handler
 def lambda_handler(event, context):
     try:
-        headers = event.get("headers", {})
+        headers = event.get("headers", {}) or {}
         model_instance = headers.get("model_instance_name", "")
         count = int(headers.get("count", "1"))
 
         query = event.get("queryStringParameters", {}) or {}
         prompt_override = query.get("prompt")
-
         endpointName = query.get("endpointName", "")
         requestPayload = query.get("requestPayload", "")
         responsePayload = query.get("responsePayload", "")
@@ -99,6 +98,7 @@ def lambda_handler(event, context):
         apiExample = query.get("apiExample", "")
         apiPattern = query.get("apiPattern", "")
 
+        # Decode the uploaded .docx file
         body_b64 = event.get("body", "")
         if not body_b64:
             raise ValueError("No file content found in the request body")
@@ -128,7 +128,7 @@ Refer to https://raml.org/developers/raml-100-tutorial for more guidance.
                                       apiFieldType, apiRequired, apiNullable, apiExample, apiPattern)
         prompt += "\n\nHere is the extracted content from the file:\n" + extracted_text
 
-        # Use the custom OpenAI client with decrypted keys
+        # Get OpenAI client with secure decryption
         client = get_openai_client(model_instance)
 
         response = client.generate(
