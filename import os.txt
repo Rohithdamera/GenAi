@@ -61,33 +61,26 @@ def extract_text_from_docx(docx_path):
         logger.error(f"Failed to extract text from docx: {e}")
         return ""
 
-# Prompt builder
-def build_prompt(endpointName, requestPayload, responsePayload, apiFields,
-                 apiFieldType, apiRequired, apiNullable, apiExample, apiPattern):
-    return f"""
-1. Create a RAML specification for the API: {endpointName} as per the table in the attached file.
-2. The request will be in {requestPayload} format and the response will be in {responsePayload} format.
-Please follow the instructions below while generating the RAML:
-a. Include the request and response in separate files and then refer to them as examples in the main RAML.
-b. Create separate fragments for datatype validation of request and response, which will be called in the main RAML.
-c. The fragments should do the following:
-- {apiFields} defines all fields present in the request and response.
-- {apiFieldType} defines the datatype and min/max length for each API field name for both request and response.
-- {apiRequired} defines whether the fields are mandatory or not.
-- {apiNullable} defines whether the respective field can accept null values.
-- {apiExample} defines the pattern of each field.
-- {apiPattern} defines the pattern of values.
-"""
+# Build prompt by replacing placeholders with param values
+def build_prompt_from_template(template, params):
+    # Replace placeholders like {endpointName}, {requestPayload}, etc. with param values
+    def replacer(match):
+        key = match.group(1)
+        return params.get(key, f"{{{key}}}")  # keep placeholder if param missing
+
+    pattern = re.compile(r"\{(\w+)\}")
+    return pattern.sub(replacer, template)
 
 # Lambda handler
 def lambda_handler(event, context):
     try:
         headers = event.get("headers", {}) or {}
-        model_instance = headers.get("model_instance_name", "")
+        model_instance = headers.get("model_instance_name", "").strip()
         count = int(headers.get("count", "1"))
 
         query = event.get("queryStringParameters", {}) or {}
-        prompt_override = query.get("prompt")
+
+        # Get all parameters for placeholder replacement
         endpointName = query.get("endpointName", "")
         requestPayload = query.get("requestPayload", "")
         responsePayload = query.get("responsePayload", "")
@@ -97,6 +90,9 @@ def lambda_handler(event, context):
         apiNullable = query.get("apiNullable", "")
         apiExample = query.get("apiExample", "")
         apiPattern = query.get("apiPattern", "")
+
+        # The 'prompt' parameter (optional)
+        prompt_template = query.get("prompt", "").strip()
 
         body_b64 = event.get("body", "")
         if not body_b64:
@@ -109,7 +105,43 @@ def lambda_handler(event, context):
 
         extracted_text = extract_text_from_docx(temp_file_path)
 
-        default_instruction = """
+        # Default prompt if no prompt param passed
+        default_prompt = """
+1. Create a RAML specification for the api : {endpointName} as per table in the attached file.
+2. The request will be {requestPayload} format and response will be in {responsePayload} format.
+Please follow below instructions while generating the RAML: 
+a. Include the request and response in a seperate file and then refer them as an example in the main raml
+b. Create a seperate fragment for datatype validation of request and response which will be called in main raml.
+c. The fragment should do following:
+{apiFields} defines what all fields will be in request and response.
+{apiFieldType} defines datatype and min and max length for each api field name for both request and response 
+{apiRequired} defines if the fields mandatory or not. 
+{apiNullable} defines if the respective field can accept null values. 
+{apiExample} defines the pattern of each field.
+{apiPattern} defines the what will be the pattern of values
+"""
+
+        # Use query param prompt if provided, else default
+        prompt_template_to_use = prompt_template if prompt_template else default_prompt
+
+        # Prepare param dict for replacement
+        param_dict = {
+            "endpointName": endpointName,
+            "requestPayload": requestPayload,
+            "responsePayload": responsePayload,
+            "apiFields": apiFields,
+            "apiFieldType": apiFieldType,
+            "apiRequired": apiRequired,
+            "apiNullable": apiNullable,
+            "apiExample": apiExample,
+            "apiPattern": apiPattern
+        }
+
+        # Build final prompt text by replacing placeholders
+        prompt_built = build_prompt_from_template(prompt_template_to_use, param_dict)
+
+        # Add extracted content from docx
+        final_prompt = f"""
 You are an expert in RAML (RESTful API Modeling Language) for designing and documenting RESTful APIs.
 Your expertise allows you to craft structured, human-readable API endpoints, methods, and data types, helping developers optimize and reuse their code efficiently.
 Create a RAML and breakdown in the parts - Metadata, Types, Resources, Query Parameters, URI Parameters, Responses.
@@ -120,36 +152,37 @@ Clearly specify supported MIME types using the mediaType property.
 If applicable, document filtering, sorting, searching resources.
 Define common error structures and provide meaningful error messages.
 Refer to https://raml.org/developers/raml-100-tutorial for more guidance.
-"""
 
-        prompt = prompt_override if prompt_override else default_instruction
-        prompt += "\n" + build_prompt(endpointName, requestPayload, responsePayload, apiFields,
-                                      apiFieldType, apiRequired, apiNullable, apiExample, apiPattern)
-        prompt += "\n\nHere is the extracted content from the file:\n" + extracted_text
+{prompt_built}
+
+Here is the extracted content from the file:
+{extracted_text}
+
+Generate the RAML as described.
+"""
 
         client = get_openai_client(model_instance)
 
-        results = []
-        for _ in range(count):
-            response = client.invoke([
-                HumanMessage(content=prompt),
-                HumanMessage(content="Generate the RAML as described.")
-            ])
-            results.append(response.content.strip())
+        response = client.invoke([HumanMessage(content=final_prompt)])
 
-        # Structure the result as JSON
-        structured_output = {
-            "count": count,
-            "results": [{"raml_output": r} for r in results]
-        }
+        final_result = response.content.strip()
 
-        return {
-            "statusCode": 200,
-            "headers": {
-                "Content-Type": "application/json"
-            },
-            "body": json.dumps(structured_output, indent=2)
-        }
+        # Try to parse JSON if possible, else return as text
+        try:
+            json_result = json.loads(final_result)
+            # Return JSON so Postman shows structured output
+            return {
+                "statusCode": 200,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps(json_result, indent=2)
+            }
+        except Exception:
+            # Not JSON, return plain text with proper content type
+            return {
+                "statusCode": 200,
+                "headers": {"Content-Type": "text/plain"},
+                "body": final_result
+            }
 
     except Exception as e:
         logger.error(f"Error: {e}")
