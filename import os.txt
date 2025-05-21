@@ -7,8 +7,7 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage
-import zipfile
-import xml.etree.ElementTree as ET
+from docx import Document
 import tempfile
 
 logging.basicConfig(level=logging.INFO)
@@ -43,23 +42,10 @@ def get_openai_client(model_instance_name):
         max_tokens=4096
     )
 
-# DOCX text extraction using XML
+# ✅ Your updated method to extract text using python-docx
 def extract_text_from_docx(docx_path):
-    try:
-        with zipfile.ZipFile(docx_path) as docx_zip:
-            with docx_zip.open('word/document.xml') as document_xml_file:
-                tree = ET.parse(document_xml_file)
-                root = tree.getroot()
-                namespaces = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
-                paragraphs = []
-                for paragraph in root.findall('.//w:p', namespaces):
-                    texts = [node.text for node in paragraph.findall('.//w:t', namespaces) if node.text]
-                    if texts:
-                        paragraphs.append(''.join(texts))
-                return '\n'.join(paragraphs)
-    except Exception as e:
-        logger.error(f"Failed to extract text from docx: {e}")
-        return ""
+    doc = Document(docx_path)
+    return '\n'.join([para.text for para in doc.paragraphs if para.text.strip()])
 
 # Prompt builder
 def build_prompt(endpointName, requestPayload, responsePayload, apiFields,
@@ -136,7 +122,7 @@ Refer to https://raml.org/developers/raml-100-tutorial for more guidance.
 
         final_result = response.content.strip()
 
-        # Return as plain text so formatting is preserved
+        # Return RAML output as plain text
         return {
             "statusCode": 200,
             "headers": {
