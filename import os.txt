@@ -1,1 +1,152 @@
-{"error": "Got unknown type ('content', '\\nYou are an expert in RAML (RESTful API Modeling Language) for designing and documenting RESTful APIs.\\nYour expertise allows you to craft structured, human-readable API endpoints, methods, and data types, helping developers optimize and reuse their code efficiently.\\nCreate a RAML and breakdown in the parts - Metadata, Types, Resources, Query Parameters, URI Parameters, Responses.\\nAdditionally, Modularize the RAML, add the datatype and a common error response as fragment.\\nInclude sample requests and responses examples. Declare an include file for use as the example for request and response.\\nClearly define and document your security schemes in your RAML (OAuth, Basic Auth, or custom).\\nClearly specify supported MIME types using the mediaType property.\\nIf applicable, document filtering, sorting, searching resources.\\nDefine common error structures and provide meaningful error messages.\\nRefer to https://raml.org/developers/raml-100-tutorial for more guidance.\\n\\n\\n1. Create a RAML specification for the API: create order as per the table in the attached file.\\n2. The request will be in json format and the response will be in json format.\\nPlease follow the instructions below while generating the RAML:\\na. Include the request and response in separate files and then refer to them as examples in the main RAML.\\nb. Create separate fragments for datatype validation of request and response, which will be called in the main RAML.\\nc. The fragments should do the following:\\n- Field name defines all fields present in the request and response.\\n- Field Type defines the datatype and min/max length for each API field name for both request and response.\\n- Requied defines whether the fields are mandatory or not.\\n- Nullable defines whether the respective field can accept null values.\\n- Example defines the pattern of each field.\\n- Pattern defines the pattern of values.\\n\\n\\nHere is the extracted content from the file:\\nTarget:ABCAPI Name: RedeemPointPurpose: Pass redeem amount  to ABC \\nField Name\\nField Type\\nField Description\\nNullable\\nRequired\\nExample\\nPattern\\nBody-UserInfo\\ncustomerId\\nString (50)\\nYes\\nredeemAmount\\nInteger\\nYes\\nMax is 2500,\\nbmiCustomerRequestDate\\nDateTime\\nyes\\n\"2025-01-20T22:00:00Z\"\\n\"2025-01-20T22:00:00Z\"\\nbmiTransactionId\\nInteger\\nyes\\nResponse/results [from ABC] \\n\\xa0\\ncustomerId\\nString (50)\\nYes\\nstatus\\nString (50)\\nYes\\nActive/Inactive \\nbcmTaskId\\nString (50)\\nerrorMessage\\nString (2500)\\nNo\\nYes, only if there are any error for API call to ABC\\n\\xa0\\n\\xa0')"}s
+import os
+import logging
+import json
+import re
+from base64 import b64decode
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
+from langchain_community.chat_models import AzureChatOpenAI
+from langchain.schema import HumanMessage
+import zipfile
+import xml.etree.ElementTree as ET
+import tempfile
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger()
+
+# Decryption using AES (ECB mode)
+def decrypt(data, key):
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)
+    decrypted_data = cipher.decrypt(b64decode(data))
+    decrypted_data = unpad(decrypted_data, AES.block_size)  # Fixed
+    return decrypted_data.decode()
+
+# Azure OpenAI client initialization
+def get_openai_client(model_instance_name):
+    aes_key_base64 = os.environ['AES_KEY']
+    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+    api_version = os.environ['AZURE_API_VERSION']
+
+    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+
+    if not decrypted_api_base.endswith('/'):
+        decrypted_api_base += '/'
+
+    return AzureChatOpenAI(
+        deployment_name=model_instance_name,
+        openai_api_base=decrypted_api_base,
+        openai_api_key=decrypted_api_key,
+        openai_api_version=api_version,
+        temperature=0.4,
+        max_tokens=4096
+    )
+
+# DOCX text extraction using XML
+def extract_text_from_docx(docx_path):
+    try:
+        with zipfile.ZipFile(docx_path) as docx_zip:
+            with docx_zip.open('word/document.xml') as document_xml_file:
+                tree = ET.parse(document_xml_file)
+                root = tree.getroot()
+                namespaces = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+                paragraphs = []
+                for paragraph in root.findall('.//w:p', namespaces):
+                    texts = [node.text for node in paragraph.findall('.//w:t', namespaces) if node.text]
+                    if texts:
+                        paragraphs.append(''.join(texts))
+                return '\n'.join(paragraphs)
+    except Exception as e:
+        logger.error(f"Failed to extract text from docx: {e}")
+        return ""
+
+# Prompt builder
+def build_prompt(endpointName, requestPayload, responsePayload, apiFields,
+                 apiFieldType, apiRequired, apiNullable, apiExample, apiPattern):
+    return f"""
+1. Create a RAML specification for the API: {endpointName} as per the table in the attached file.
+2. The request will be in {requestPayload} format and the response will be in {responsePayload} format.
+Please follow the instructions below while generating the RAML:
+a. Include the request and response in separate files and then refer to them as examples in the main RAML.
+b. Create separate fragments for datatype validation of request and response, which will be called in the main RAML.
+c. The fragments should do the following:
+- {apiFields} defines all fields present in the request and response.
+- {apiFieldType} defines the datatype and min/max length for each API field name for both request and response.
+- {apiRequired} defines whether the fields are mandatory or not.
+- {apiNullable} defines whether the respective field can accept null values.
+- {apiExample} defines the pattern of each field.
+- {apiPattern} defines the pattern of values.
+"""
+
+# Lambda handler
+def lambda_handler(event, context):
+    try:
+        headers = event.get("headers", {}) or {}
+        model_instance = headers.get("model_instance_name", "")
+        count = int(headers.get("count", "1"))
+
+        query = event.get("queryStringParameters", {}) or {}
+        prompt_override = query.get("prompt")
+        endpointName = query.get("endpointName", "")
+        requestPayload = query.get("requestPayload", "")
+        responsePayload = query.get("responsePayload", "")
+        apiFields = query.get("apiFields", "")
+        apiFieldType = query.get("apiFieldType", "")
+        apiRequired = query.get("apiRequired", "")
+        apiNullable = query.get("apiNullable", "")
+        apiExample = query.get("apiExample", "")
+        apiPattern = query.get("apiPattern", "")
+
+        # Decode .docx file
+        body_b64 = event.get("body", "")
+        if not body_b64:
+            raise ValueError("No file content found in the request body")
+
+        body = b64decode(body_b64)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
+            temp_file.write(body)
+            temp_file_path = temp_file.name
+
+        extracted_text = extract_text_from_docx(temp_file_path)
+
+        default_instruction = """
+You are an expert in RAML (RESTful API Modeling Language) for designing and documenting RESTful APIs.
+Your expertise allows you to craft structured, human-readable API endpoints, methods, and data types, helping developers optimize and reuse their code efficiently.
+Create a RAML and breakdown in the parts - Metadata, Types, Resources, Query Parameters, URI Parameters, Responses.
+Additionally, Modularize the RAML, add the datatype and a common error response as fragment.
+Include sample requests and responses examples. Declare an include file for use as the example for request and response.
+Clearly define and document your security schemes in your RAML (OAuth, Basic Auth, or custom).
+Clearly specify supported MIME types using the mediaType property.
+If applicable, document filtering, sorting, searching resources.
+Define common error structures and provide meaningful error messages.
+Refer to https://raml.org/developers/raml-100-tutorial for more guidance.
+"""
+
+        prompt = prompt_override if prompt_override else default_instruction
+        prompt += "\n" + build_prompt(endpointName, requestPayload, responsePayload, apiFields,
+                                      apiFieldType, apiRequired, apiNullable, apiExample, apiPattern)
+        prompt += "\n\nHere is the extracted content from the file:\n" + extracted_text
+
+        client = get_openai_client(model_instance)
+
+        # ✅ Correct usage of invoke() with HumanMessage
+        response = client.invoke([
+            HumanMessage(content=prompt),
+            HumanMessage(content="Generate the RAML as described.")
+        ])
+
+        final_result = response.content.strip()
+
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"raml_spec": final_result})
+        }
+
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
