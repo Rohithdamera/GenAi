@@ -129,20 +129,26 @@ Refer to https://raml.org/developers/raml-100-tutorial for more guidance.
 
         client = get_openai_client(model_instance)
 
-        response = client.invoke([
-            HumanMessage(content=prompt),
-            HumanMessage(content="Generate the RAML as described.")
-        ])
+        results = []
+        for _ in range(count):
+            response = client.invoke([
+                HumanMessage(content=prompt),
+                HumanMessage(content="Generate the RAML as described.")
+            ])
+            results.append(response.content.strip())
 
-        final_result = response.content.strip()
+        # Structure the result as JSON
+        structured_output = {
+            "count": count,
+            "results": [{"raml_output": r} for r in results]
+        }
 
-        # Return as plain text so formatting is preserved
         return {
             "statusCode": 200,
             "headers": {
-                "Content-Type": "text/plain"
+                "Content-Type": "application/json"
             },
-            "body": final_result
+            "body": json.dumps(structured_output, indent=2)
         }
 
     except Exception as e:
