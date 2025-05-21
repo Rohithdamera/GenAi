@@ -7,20 +7,21 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage
-from docx import Document
+import zipfile
+import xml.etree.ElementTree as ET
 import tempfile
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
 
-# Decryption using AES (ECB mode)
+# AES Decryption
 def decrypt(data, key):
     cipher = AES.new(b64decode(key), AES.MODE_ECB)
     decrypted_data = cipher.decrypt(b64decode(data))
     decrypted_data = unpad(decrypted_data, AES.block_size)
     return decrypted_data.decode()
 
-# Azure OpenAI client initialization
+# Azure Chat Model client
 def get_openai_client(model_instance_name):
     aes_key_base64 = os.environ['AES_KEY']
     encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
@@ -42,10 +43,23 @@ def get_openai_client(model_instance_name):
         max_tokens=4096
     )
 
-# ✅ Your updated method to extract text using python-docx
+# Extract text from DOCX using XML
 def extract_text_from_docx(docx_path):
-    doc = Document(docx_path)
-    return '\n'.join([para.text for para in doc.paragraphs if para.text.strip()])
+    try:
+        with zipfile.ZipFile(docx_path) as docx_zip:
+            with docx_zip.open('word/document.xml') as document_xml_file:
+                tree = ET.parse(document_xml_file)
+                root = tree.getroot()
+                namespaces = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+                paragraphs = []
+                for paragraph in root.findall('.//w:p', namespaces):
+                    texts = [node.text for node in paragraph.findall('.//w:t', namespaces) if node.text]
+                    if texts:
+                        paragraphs.append(''.join(texts))
+                return '\n'.join(paragraphs)
+    except Exception as e:
+        logger.error(f"Failed to extract text from docx: {e}")
+        return ""
 
 # Prompt builder
 def build_prompt(endpointName, requestPayload, responsePayload, apiFields,
@@ -65,7 +79,7 @@ c. The fragments should do the following:
 - {apiPattern} defines the pattern of values.
 """
 
-# Lambda handler
+# Main Lambda handler
 def lambda_handler(event, context):
     try:
         headers = event.get("headers", {}) or {}
@@ -95,6 +109,7 @@ def lambda_handler(event, context):
 
         extracted_text = extract_text_from_docx(temp_file_path)
 
+        # Prompt setup
         default_instruction = """
 You are an expert in RAML (RESTful API Modeling Language) for designing and documenting RESTful APIs.
 Your expertise allows you to craft structured, human-readable API endpoints, methods, and data types, helping developers optimize and reuse their code efficiently.
@@ -107,7 +122,6 @@ If applicable, document filtering, sorting, searching resources.
 Define common error structures and provide meaningful error messages.
 Refer to https://raml.org/developers/raml-100-tutorial for more guidance.
 """
-
         prompt = prompt_override if prompt_override else default_instruction
         prompt += "\n" + build_prompt(endpointName, requestPayload, responsePayload, apiFields,
                                       apiFieldType, apiRequired, apiNullable, apiExample, apiPattern)
@@ -115,21 +129,32 @@ Refer to https://raml.org/developers/raml-100-tutorial for more guidance.
 
         client = get_openai_client(model_instance)
 
-        response = client.invoke([
-            HumanMessage(content=prompt),
-            HumanMessage(content="Generate the RAML as described.")
-        ])
+        # Generate `count` outputs
+        results = []
+        for _ in range(count):
+            response = client.invoke([
+                HumanMessage(content=prompt),
+                HumanMessage(content="Generate the RAML as described.")
+            ])
+            output = response.content.strip()
+            results.append(output)
 
-        final_result = response.content.strip()
-
-        # Return RAML output as plain text
+        # Option 1: Return as array of RAML blocks
         return {
             "statusCode": 200,
             "headers": {
-                "Content-Type": "text/plain"
+                "Content-Type": "application/json"
             },
-            "body": final_result
+            "body": json.dumps({"raml_specs": results}, indent=2)
         }
+
+        # Option 2 (Uncomment to return plain text with separator instead of JSON):
+        # joined_output = "\n\n---\n\n".join(results)
+        # return {
+        #     "statusCode": 200,
+        #     "headers": {"Content-Type": "text/plain"},
+        #     "body": joined_output
+        # }
 
     except Exception as e:
         logger.error(f"Error: {e}")
