@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+import re
 from base64 import b64decode
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
@@ -13,18 +14,22 @@ import tempfile
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
 
-# AES Decryption
+# Decryption using AES (ECB mode)
 def decrypt(data, key):
     cipher = AES.new(b64decode(key), AES.MODE_ECB)
     decrypted_data = cipher.decrypt(b64decode(data))
-    return unpad(decrypted_data, AES.block_size).decode()
+    decrypted_data = unpad(decrypted_data, AES.block_size)
+    return decrypted_data.decode()
 
-# Azure OpenAI client setup
+# Azure OpenAI client initialization
 def get_openai_client(model_instance_name):
     aes_key_base64 = os.environ['AES_KEY']
-    decrypted_api_base = decrypt(os.environ['ENCRYPTED_API_BASE'], aes_key_base64)
-    decrypted_api_key = decrypt(os.environ['ENCRYPTED_API_KEY'], aes_key_base64)
+    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
     api_version = os.environ['AZURE_API_VERSION']
+
+    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
 
     if not decrypted_api_base.endswith('/'):
         decrypted_api_base += '/'
@@ -38,7 +43,7 @@ def get_openai_client(model_instance_name):
         max_tokens=4096
     )
 
-# Extract text from .docx
+# DOCX text extraction using XML
 def extract_text_from_docx(docx_path):
     try:
         with zipfile.ZipFile(docx_path) as docx_zip:
@@ -47,13 +52,13 @@ def extract_text_from_docx(docx_path):
                 root = tree.getroot()
                 namespaces = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
                 paragraphs = []
-                for p in root.findall('.//w:p', namespaces):
-                    texts = [t.text for t in p.findall('.//w:t', namespaces) if t.text]
+                for paragraph in root.findall('.//w:p', namespaces):
+                    texts = [node.text for node in paragraph.findall('.//w:t', namespaces) if node.text]
                     if texts:
                         paragraphs.append(''.join(texts))
                 return '\n'.join(paragraphs)
     except Exception as e:
-        logger.error(f"Failed to extract text from .docx: {e}")
+        logger.error(f"Failed to extract text from docx: {e}")
         return ""
 
 # Prompt builder
@@ -78,11 +83,10 @@ c. The fragments should do the following:
 def lambda_handler(event, context):
     try:
         headers = event.get("headers", {}) or {}
-        query = event.get("queryStringParameters", {}) or {}
-
         model_instance = headers.get("model_instance_name", "")
         count = int(headers.get("count", "1"))
 
+        query = event.get("queryStringParameters", {}) or {}
         prompt_override = query.get("prompt")
         endpointName = query.get("endpointName", "")
         requestPayload = query.get("requestPayload", "")
@@ -96,19 +100,16 @@ def lambda_handler(event, context):
 
         body_b64 = event.get("body", "")
         if not body_b64:
-            raise ValueError("No file content found in body")
+            raise ValueError("No file content found in the request body")
 
-        # Decode .docx file and save temporarily
         body = b64decode(body_b64)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
             temp_file.write(body)
-            docx_path = temp_file.name
+            temp_file_path = temp_file.name
 
-        # Extract document text
-        doc_text = extract_text_from_docx(docx_path)
+        extracted_text = extract_text_from_docx(temp_file_path)
 
-        # Build final prompt
-        default_prompt = """
+        default_instruction = """
 You are an expert in RAML (RESTful API Modeling Language) for designing and documenting RESTful APIs.
 Your expertise allows you to craft structured, human-readable API endpoints, methods, and data types, helping developers optimize and reuse their code efficiently.
 Create a RAML and breakdown in the parts - Metadata, Types, Resources, Query Parameters, URI Parameters, Responses.
@@ -120,33 +121,32 @@ If applicable, document filtering, sorting, searching resources.
 Define common error structures and provide meaningful error messages.
 Refer to https://raml.org/developers/raml-100-tutorial for more guidance.
 """
-        prompt = (prompt_override if prompt_override else default_prompt) + "\n"
-        prompt += build_prompt(endpointName, requestPayload, responsePayload, apiFields,
-                               apiFieldType, apiRequired, apiNullable, apiExample, apiPattern)
-        prompt += "\n\nHere is the extracted content from the file:\n" + doc_text
+
+        prompt = prompt_override if prompt_override else default_instruction
+        prompt += "\n" + build_prompt(endpointName, requestPayload, responsePayload, apiFields,
+                                      apiFieldType, apiRequired, apiNullable, apiExample, apiPattern)
+        prompt += "\n\nHere is the extracted content from the file:\n" + extracted_text
 
         client = get_openai_client(model_instance)
 
-        # Generate RAML outputs
-        all_outputs = []
-        for _ in range(count):
-            response = client.invoke([
-                HumanMessage(content=prompt),
-                HumanMessage(content="Generate the RAML as described.")
-            ])
-            output = response.content.strip()
-            all_outputs.append(output)
+        response = client.invoke([
+            HumanMessage(content=prompt),
+            HumanMessage(content="Generate the RAML as described.")
+        ])
 
+        final_result = response.content.strip()
+
+        # Return as plain text so formatting is preserved
         return {
             "statusCode": 200,
             "headers": {
-                "Content-Type": "application/json"
+                "Content-Type": "text/plain"
             },
-            "body": json.dumps({"raml_outputs": all_outputs}, indent=2)
+            "body": final_result
         }
 
     except Exception as e:
-        logger.error(f"Unhandled error: {e}")
+        logger.error(f"Error: {e}")
         return {
             "statusCode": 500,
             "headers": {"Content-Type": "application/json"},
