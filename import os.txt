@@ -43,7 +43,7 @@ def get_openai_client(model_instance_name):
         max_tokens=4096
     )
 
-# DOCX text extraction (paragraphs + table content)
+# DOCX text extraction using XML
 def extract_text_from_docx(docx_path):
     try:
         with zipfile.ZipFile(docx_path) as docx_zip:
@@ -51,27 +51,12 @@ def extract_text_from_docx(docx_path):
                 tree = ET.parse(document_xml_file)
                 root = tree.getroot()
                 namespaces = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
-
-                extracted_text = []
-
-                # Extract paragraphs
+                paragraphs = []
                 for paragraph in root.findall('.//w:p', namespaces):
                     texts = [node.text for node in paragraph.findall('.//w:t', namespaces) if node.text]
                     if texts:
-                        extracted_text.append(''.join(texts))
-
-                # Extract tables (row by row)
-                for table in root.findall('.//w:tbl', namespaces):
-                    for row in table.findall('.//w:tr', namespaces):
-                        row_texts = []
-                        for cell in row.findall('.//w:tc', namespaces):
-                            cell_texts = [node.text for node in cell.findall('.//w:t', namespaces) if node.text]
-                            if cell_texts:
-                                row_texts.append(' '.join(cell_texts))
-                        if row_texts:
-                            extracted_text.append(' | '.join(row_texts))  # pipe delimiter for readability
-
-                return '\n'.join(extracted_text)
+                        paragraphs.append(''.join(texts))
+                return '\n'.join(paragraphs)
     except Exception as e:
         logger.error(f"Failed to extract text from docx: {e}")
         return ""
@@ -146,7 +131,7 @@ c. The fragment should do following:
 
         prompt_built = build_prompt_from_template(prompt_template_to_use, param_dict)
 
-        final_prompt = f"""
+        instruction = f"""
 You are an expert in RAML (RESTful API Modeling Language) for designing and documenting RESTful APIs.
 Your expertise allows you to craft structured, human-readable API endpoints, methods, and data types, helping developers optimize and reuse their code efficiently.
 Create a RAML and breakdown in the parts - Metadata, Types, Resources, Query Parameters, URI Parameters, Responses.
@@ -167,7 +152,7 @@ Generate the RAML as described.
 """
 
         client = get_openai_client(model_instance)
-        response = client.invoke([HumanMessage(content=final_prompt)])
+        response = client.invoke([HumanMessage(content=instruction)])
         final_result = response.content.strip()
 
         try:
