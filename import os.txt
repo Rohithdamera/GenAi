@@ -43,7 +43,7 @@ def get_openai_client(model_instance_name):
         max_tokens=4096
     )
 
-# DOCX text extraction using XML
+# DOCX text extraction (paragraphs + table content)
 def extract_text_from_docx(docx_path):
     try:
         with zipfile.ZipFile(docx_path) as docx_zip:
@@ -51,23 +51,36 @@ def extract_text_from_docx(docx_path):
                 tree = ET.parse(document_xml_file)
                 root = tree.getroot()
                 namespaces = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
-                paragraphs = []
+
+                extracted_text = []
+
+                # Extract paragraphs
                 for paragraph in root.findall('.//w:p', namespaces):
                     texts = [node.text for node in paragraph.findall('.//w:t', namespaces) if node.text]
                     if texts:
-                        paragraphs.append(''.join(texts))
-                return '\n'.join(paragraphs)
+                        extracted_text.append(''.join(texts))
+
+                # Extract tables (row by row)
+                for table in root.findall('.//w:tbl', namespaces):
+                    for row in table.findall('.//w:tr', namespaces):
+                        row_texts = []
+                        for cell in row.findall('.//w:tc', namespaces):
+                            cell_texts = [node.text for node in cell.findall('.//w:t', namespaces) if node.text]
+                            if cell_texts:
+                                row_texts.append(' '.join(cell_texts))
+                        if row_texts:
+                            extracted_text.append(' | '.join(row_texts))  # pipe delimiter for readability
+
+                return '\n'.join(extracted_text)
     except Exception as e:
         logger.error(f"Failed to extract text from docx: {e}")
         return ""
 
 # Build prompt by replacing placeholders with param values
 def build_prompt_from_template(template, params):
-    # Replace placeholders like {endpointName}, {requestPayload}, etc. with param values
     def replacer(match):
         key = match.group(1)
-        return params.get(key, f"{{{key}}}")  # keep placeholder if param missing
-
+        return params.get(key, f"{{{key}}}")
     pattern = re.compile(r"\{(\w+)\}")
     return pattern.sub(replacer, template)
 
@@ -80,7 +93,6 @@ def lambda_handler(event, context):
 
         query = event.get("queryStringParameters", {}) or {}
 
-        # Get all parameters for placeholder replacement
         endpointName = query.get("endpointName", "")
         requestPayload = query.get("requestPayload", "")
         responsePayload = query.get("responsePayload", "")
@@ -90,8 +102,6 @@ def lambda_handler(event, context):
         apiNullable = query.get("apiNullable", "")
         apiExample = query.get("apiExample", "")
         apiPattern = query.get("apiPattern", "")
-
-        # The 'prompt' parameter (optional)
         prompt_template = query.get("prompt", "").strip()
 
         body_b64 = event.get("body", "")
@@ -105,7 +115,6 @@ def lambda_handler(event, context):
 
         extracted_text = extract_text_from_docx(temp_file_path)
 
-        # Default prompt if no prompt param passed
         default_prompt = """
 1. Create a RAML specification for the api : {endpointName} as per table in the attached file.
 2. The request will be {requestPayload} format and response will be in {responsePayload} format.
@@ -121,10 +130,8 @@ c. The fragment should do following:
 {apiPattern} defines the what will be the pattern of values
 """
 
-        # Use query param prompt if provided, else default
         prompt_template_to_use = prompt_template if prompt_template else default_prompt
 
-        # Prepare param dict for replacement
         param_dict = {
             "endpointName": endpointName,
             "requestPayload": requestPayload,
@@ -137,10 +144,8 @@ c. The fragment should do following:
             "apiPattern": apiPattern
         }
 
-        # Build final prompt text by replacing placeholders
         prompt_built = build_prompt_from_template(prompt_template_to_use, param_dict)
 
-        # Add extracted content from docx
         final_prompt = f"""
 You are an expert in RAML (RESTful API Modeling Language) for designing and documenting RESTful APIs.
 Your expertise allows you to craft structured, human-readable API endpoints, methods, and data types, helping developers optimize and reuse their code efficiently.
@@ -162,22 +167,17 @@ Generate the RAML as described.
 """
 
         client = get_openai_client(model_instance)
-
         response = client.invoke([HumanMessage(content=final_prompt)])
-
         final_result = response.content.strip()
 
-        # Try to parse JSON if possible, else return as text
         try:
             json_result = json.loads(final_result)
-            # Return JSON so Postman shows structured output
             return {
                 "statusCode": 200,
                 "headers": {"Content-Type": "application/json"},
                 "body": json.dumps(json_result, indent=2)
             }
         except Exception:
-            # Not JSON, return plain text with proper content type
             return {
                 "statusCode": 200,
                 "headers": {"Content-Type": "text/plain"},
