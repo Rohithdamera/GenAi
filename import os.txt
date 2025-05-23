@@ -1,74 +1,181 @@
-from langchain.chat_models import AzureChatOpenAI
 import os
+import logging
+import json
+import re
+from base64 import b64decode
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
+from langchain_community.chat_models import AzureChatOpenAI
+from langchain.schema import HumanMessage
+import zipfile
+import xml.etree.ElementTree as ET
+import tempfile
 
-def get_openai_client():
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger()
+
+def decrypt(data, key):
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)
+    decrypted_data = cipher.decrypt(b64decode(data))
+    decrypted_data = unpad(decrypted_data, AES.block_size)
+    return decrypted_data.decode()
+
+def get_openai_client(model_instance_name):
+    aes_key_base64 = os.environ['AES_KEY']
+    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+    api_version = os.environ['AZURE_API_VERSION']
+
+    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+
+    if not decrypted_api_base.endswith('/'):
+        decrypted_api_base += '/'
+
+    return AzureChatOpenAI(
+        deployment_name=model_instance_name,
+        openai_api_base=decrypted_api_base,
+        openai_api_key=decrypted_api_key,
+        openai_api_version=api_version,
+        temperature=0.4,
+        max_tokens=4096
+    )
+
+def extract_text_from_docx(docx_path):
     try:
-        return AzureChatOpenAI(
-            azure_endpoint="https://testopenaiassets.openai.azure.com",
-            deployment_name="First_Chatbot",
-            openai_api_key="",
-            openai_api_version="2024-08-01-preview"
-        )
-    except Exception as e:
-        print(f"Error initializing OpenAI client: {e}")
-        return None
+        with zipfile.ZipFile(docx_path) as docx_zip:
+            with docx_zip.open('word/document.xml') as document_xml_file:
+                tree = ET.parse(document_xml_file)
+                root = tree.getroot()
+                namespaces = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
 
-def extract_text_from_dwl(file_path):
+                paragraphs = []
+                for paragraph in root.findall('.//w:p', namespaces):
+                    texts = [node.text for node in paragraph.findall('.//w:t', namespaces) if node.text]
+                    if texts:
+                        paragraphs.append(''.join(texts))
+                return '\n'.join(paragraphs)
+    except Exception as e:
+        logger.error(f"Failed to extract text from docx: {e}")
+        return ""
+
+def build_prompt_from_template(template, params):
+    def replacer(match):
+        key = match.group(1)
+        return params.get(key, "")
+    pattern = re.compile(r"\{(\w+)\}")
+    return pattern.sub(replacer, template)
+
+def lambda_handler(event, context):
     try:
-        with open(file_path, 'r') as file:
-            lines = file.readlines()
-        return "\n".join([line.strip() for line in lines if line.strip() and not line.strip().startswith(("#", "//"))])
+        headers = event.get("headers", {}) or {}
+        model_instance = headers.get("model_instance_name", "").strip()
+        count = int(headers.get("count", "1"))
+
+        query = event.get("queryStringParameters", {}) or {}
+
+        endpointName = query.get("endpointName", "")
+        requestPayload = query.get("requestPayload", "")
+        responsePayload = query.get("responsePayload", "")
+        apiFields = query.get("apiFields", "")
+        apiFieldType = query.get("apiFieldType", "")
+        apiRequired = query.get("apiRequired", "")
+        apiNullable = query.get("apiNullable", "")
+        apiExample = query.get("apiExample", "")
+        apiPattern = query.get("apiPattern", "")
+        prompt_template = query.get("prompt", "").strip()
+
+        # Decode the .docx file
+        body_b64 = event.get("body", "")
+        if not body_b64:
+            raise ValueError("No file content found in the request body")
+
+        body = b64decode(body_b64)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
+            temp_file.write(body)
+            temp_file_path = temp_file.name
+
+        extracted_text = extract_text_from_docx(temp_file_path)
+
+        # Default prompt if none provided
+        default_prompt = """
+1. Create a RAML specification for the api : {endpointName} as per table in the attached file.
+2. The request will be {requestPayload} format and response will be in {responsePayload} format.
+Please follow below instructions while generating the RAML: 
+a. Include the request and response in a seperate file and then refer them as an example in the main raml
+b. Create a seperate fragment for datatype validation of request and response which will be called in main raml.
+c. The fragment should do following:
+{apiFields} defines what all fields will be in request and response.
+{apiFieldType} defines datatype and min and max length for each api field name for both request and response 
+{apiRequired} defines if the fields mandatory or not. 
+{apiNullable} defines if the respective field can accept null values. 
+{apiExample} defines the pattern of each field.
+{apiPattern} defines the what will be the pattern of values
+"""
+
+        # Use user prompt if provided
+        prompt_template_to_use = prompt_template if prompt_template else default_prompt
+
+        param_dict = {
+            "endpointName": endpointName,
+            "requestPayload": requestPayload,
+            "responsePayload": responsePayload,
+            "apiFields": apiFields,
+            "apiFieldType": apiFieldType,
+            "apiRequired": apiRequired,
+            "apiNullable": apiNullable,
+            "apiExample": apiExample,
+            "apiPattern": apiPattern
+        }
+
+        # Final prompt to send to LLM
+        prompt_built = build_prompt_from_template(prompt_template_to_use, param_dict)
+
+        instruction = f"""
+You are an expert in RAML (RESTful API Modeling Language) for designing and documenting RESTful APIs.
+Your expertise allows you to craft structured, human-readable API endpoints, methods, and data types, helping developers optimize and reuse their code efficiently.
+Create a RAML and breakdown in the parts - Metadata, Types, Resources, Query Parameters, URI Parameters, Responses.
+Additionally, Modularize the RAML, add the datatype and a common error response as fragment.
+Include sample requests and responses examples. Declare an include file for use as the example for request and response.
+Clearly define and document your security schemes in your RAML (OAuth, Basic Auth, or custom).
+Clearly specify supported MIME types using the mediaType property.
+If applicable, document filtering, sorting, searching resources.
+Define common error structures and provide meaningful error messages.
+Refer to https://raml.org/developers/raml-100-tutorial for more guidance.
+
+{prompt_built}
+
+Here is the extracted content from the file:
+{extracted_text}
+
+Generate the RAML as described.
+"""
+
+        client = get_openai_client(model_instance)
+
+        response = client.invoke([HumanMessage(content=instruction)])
+        final_result = response.content.strip()
+
+        # If LLM returns structured JSON, return it as JSON
+        try:
+            json_result = json.loads(final_result)
+            return {
+                "statusCode": 200,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps(json_result, indent=2)
+            }
+        except Exception:
+            # Return plain text if not JSON
+            return {
+                "statusCode": 200,
+                "headers": {"Content-Type": "text/plain"},
+                "body": final_result
+            }
+
     except Exception as e:
-        print(f"Error reading DWL file: {e}")
-        return None
-
-def generate_java_code(dwl_content):
-    try:
-        client = get_openai_client()
-        if not client:
-            return None
-
-        response = client.invoke([
-            {"role": "system", "content": (
-                "You are an expert Java developer. "
-                "You will receive DataWeave logic that outlines a transformation process. "
-                "Convert this logic into equivalent Java code. "
-                "Ensure the Java code is clean, well-structured, and includes necessary classes and methods."
-            )},
-            {"role": "user", "content": dwl_content}
-        ])
-
-        java_code = response.content.strip()
-        if not java_code.startswith("public") and "class" not in java_code:
-            raise ValueError("Unexpected response format: Java class not found.")
-        return java_code
-    except Exception as e:
-        print(f"Error generating Java code: {e}")
-        return None
-
-def save_java_file(java_code, output_file):
-    try:
-        with open(output_file, 'w') as file:
-            file.write(java_code)
-        print(f"Java file saved successfully: {output_file}")
-    except Exception as e:
-        print(f"Error saving the Java file: {e}")
-
-def convert_dwl_to_java(file_path, output_file):
-    dwl_content = extract_text_from_dwl(file_path)
-    if dwl_content:
-        java_code = generate_java_code(dwl_content)
-        if java_code:
-            save_java_file(java_code, output_file)
-        else:
-            print("Could not generate Java code from the DWL file.")
-    else:
-        print("Could not extract text from the DWL file.")
-
-if __name__ == "__main__":
-    dwl_file_path = input("Enter the path to the .dwl file: ").strip()
-    if dwl_file_path.endswith(".dwl"):
-        output_file = input("Enter the output file name (e.g., 'Transformation.java'): ").strip()
-        convert_dwl_to_java(dwl_file_path, output_file)
-    else:
-        print("Invalid file type. Please provide a valid .dwl file.")
+        logger.error(f"Error: {e}")
+        return {
+            "statusCode": 500,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"error": str(e)})
+        }
