@@ -1,89 +1,74 @@
-# RAML Specification for RedeemPoint API
+from langchain.chat_models import AzureChatOpenAI
+import os
 
-## 1. Metadata
-```yaml
-#%RAML 1.0
-title: RedeemPoint API
-version: 1.0
-baseUri: http://api.example.com/{version}
-mediaType: application/json
-protocols: [HTTP, HTTPS]
-```
+def get_openai_client():
+    try:
+        return AzureChatOpenAI(
+            azure_endpoint="https://testopenaiassets.openai.azure.com",
+            deployment_name="First_Chatbot",
+            openai_api_key="",
+            openai_api_version="2024-08-01-preview"
+        )
+    except Exception as e:
+        print(f"Error initializing OpenAI client: {e}")
+        return None
 
-## 2. Types
-### Define data types using external fragments
-```yaml
-types:
-  RedeemRequest: !include types/RedeemRequest.raml
-  RedeemResponse: !include types/RedeemResponse.raml
-  CommonErrorResponse: !include types/CommonErrorResponse.raml
-```
+def extract_text_from_dwl(file_path):
+    try:
+        with open(file_path, 'r') as file:
+            lines = file.readlines()
+        return "\n".join([line.strip() for line in lines if line.strip() and not line.strip().startswith(("#", "//"))])
+    except Exception as e:
+        print(f"Error reading DWL file: {e}")
+        return None
 
-## 3. Resources
-```yaml
-/redeemPoint:
-  post:
-    description: Pass redeem amount to ABC
-    body:
-      application/json:
-        type: RedeemRequest
-        example: !include examples/RedeemRequestExample.json
-    responses:
-      200:
-        body:
-          application/json:
-            type: RedeemResponse
-            example: !include examples/RedeemResponseExample.json
-      400:
-        body:
-          application/json:
-            type: CommonErrorResponse
-            example: !include examples/CommonErrorResponseExample.json
-```
+def generate_java_code(dwl_content):
+    try:
+        client = get_openai_client()
+        if not client:
+            return None
 
-## 4. Query Parameters
-```yaml
-# No query parameters for this API
-```
+        response = client.invoke([
+            {"role": "system", "content": (
+                "You are an expert Java developer. "
+                "You will receive DataWeave logic that outlines a transformation process. "
+                "Convert this logic into equivalent Java code. "
+                "Ensure the Java code is clean, well-structured, and includes necessary classes and methods."
+            )},
+            {"role": "user", "content": dwl_content}
+        ])
 
-## 5. URI Parameters
-```yaml
-# No URI parameters for this API
-```
+        java_code = response.content.strip()
+        if not java_code.startswith("public") and "class" not in java_code:
+            raise ValueError("Unexpected response format: Java class not found.")
+        return java_code
+    except Exception as e:
+        print(f"Error generating Java code: {e}")
+        return None
 
-## 6. Responses
-### Response and error structures are defined in the types section and referenced here.
+def save_java_file(java_code, output_file):
+    try:
+        with open(output_file, 'w') as file:
+            file.write(java_code)
+        print(f"Java file saved successfully: {output_file}")
+    except Exception as e:
+        print(f"Error saving the Java file: {e}")
 
-## 7. Security Schemes
-```yaml
-securitySchemes:
-  oauth_2_0:
-    description: |
-      OAuth 2.0 security. 
-    type: OAuth 2.0
-    describedBy:
-      headers:
-        Authorization:
-          description: Used to send a valid OAuth 2.0 Access Token.
-          type: string
-    settings:
-      authorizationUri: https://example.com/oauth/authorize
-      accessTokenUri: https://example.com/oauth/token
-      authorizationGrants: [ authorization_code, client_credentials ]
-```
+def convert_dwl_to_java(file_path, output_file):
+    dwl_content = extract_text_from_dwl(file_path)
+    if dwl_content:
+        java_code = generate_java_code(dwl_content)
+        if java_code:
+            save_java_file(java_code, output_file)
+        else:
+            print("Could not generate Java code from the DWL file.")
+    else:
+        print("Could not extract text from the DWL file.")
 
-## 8. Modularization
-### DataType and Error Response are modularized as fragments in separate files.
-
-## 9. Sample Requests and Responses
-### Included as external files.
-
-## 10. Documentation of Filtering, Sorting, Searching
-```yaml
-# This API does not support filtering, sorting or searching.
-```
-
-## 11. Common Error Structures
-### Defined in `CommonErrorResponse` type fragment.
-
-This RAML specification provides a clear, structured, and detailed description of the RedeemPoint API, including security, request, and response formats, and modularization of data types and error responses.
+if __name__ == "__main__":
+    dwl_file_path = input("Enter the path to the .dwl file: ").strip()
+    if dwl_file_path.endswith(".dwl"):
+        output_file = input("Enter the output file name (e.g., 'Transformation.java'): ").strip()
+        convert_dwl_to_java(dwl_file_path, output_file)
+    else:
+        print("Invalid file type. Please provide a valid .dwl file.")
