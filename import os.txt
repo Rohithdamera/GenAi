@@ -1,181 +1,95 @@
-import os
-import logging
-import json
-import re
-from base64 import b64decode
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import unpad
-from langchain_community.chat_models import AzureChatOpenAI
-from langchain.schema import HumanMessage
-import zipfile
-import xml.etree.ElementTree as ET
-import tempfile
+```raml
+#%RAML 1.0
+title: ABCAPI
+version: 1.0
+baseUri: http://api.abccompany.com/{version}
+mediaType: application/json
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger()
+types:
+  RedeemRequest: !include types/redeemRequest.raml
+  RedeemResponse: !include types/redeemResponse.raml
+  ErrorResponse: !include types/errorResponse.raml
 
-def decrypt(data, key):
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted_data = cipher.decrypt(b64decode(data))
-    decrypted_data = unpad(decrypted_data, AES.block_size)
-    return decrypted_data.decode()
+/securitySchemes:
+  oauth_2_0:
+    description: |
+      ABCAPI supports OAuth 2.0 for authorizing requests.
+    type: OAuth 2.0
+    describedBy:
+      headers:
+        Authorization:
+          description: |
+            Used to send a valid OAuth 2.0 access token.
+          type: string
+      responses:
+        401:
+          description: |
+            Bad or expired token. This can happen if the user or ABCAPI revoked or expired an access token. To fix, you should re-authenticate the user.
+        403:
+          description: |
+            Bad OAuth request (wrong consumer key, bad nonce, expired timestamp...). Unfortunately, re-authenticating the user won't help here.
+    settings:
+      authorizationUri: https://auth.abccompany.com/oauth2/authorize
+      accessTokenUri: https://auth.abccompany.com/oauth2/token
+      authorizationGrants: [ authorization_code, client_credentials ]
 
-def get_openai_client(model_instance_name):
-    aes_key_base64 = os.environ['AES_KEY']
-    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-    api_version = os.environ['AZURE_API_VERSION']
+/redeem:
+  post:
+    description: Pass redeem amount to ABC
+    securedBy: [oauth_2_0]
+    body:
+      application/json:
+        type: RedeemRequest
+        example: !include examples/redeemRequest.json
+    responses:
+      200:
+        body:
+          application/json:
+            type: RedeemResponse
+            example: !include examples/redeemResponse.json
+      400:
+        body:
+          application/json:
+            type: ErrorResponse
+            example: !include examples/errorResponse.json
+      500:
+        description: Internal Server Error
+        body:
+          application/json:
+            type: ErrorResponse
+            example: !include examples/errorResponse.json
+```
 
-    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+### Breakdown:
 
-    if not decrypted_api_base.endswith('/'):
-        decrypted_api_base += '/'
+#### Metadata:
+- **title**: ABCAPI
+- **version**: 1.0
+- **baseUri**: Base URI where the API is hosted.
 
-    return AzureChatOpenAI(
-        deployment_name=model_instance_name,
-        openai_api_base=decrypted_api_base,
-        openai_api_key=decrypted_api_key,
-        openai_api_version=api_version,
-        temperature=0.4,
-        max_tokens=4096
-    )
+#### Types:
+- **RedeemRequest**: Defined in a separate file `types/redeemRequest.raml`.
+- **RedeemResponse**: Defined in a separate file `types/redeemResponse.raml`.
+- **ErrorResponse**: Defined in a separate file `types/errorResponse.raml`.
 
-def extract_text_from_docx(docx_path):
-    try:
-        with zipfile.ZipFile(docx_path) as docx_zip:
-            with docx_zip.open('word/document.xml') as document_xml_file:
-                tree = ET.parse(document_xml_file)
-                root = tree.getroot()
-                namespaces = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+#### Resources:
+- **/redeem**: Endpoint to post redeem requests.
 
-                paragraphs = []
-                for paragraph in root.findall('.//w:p', namespaces):
-                    texts = [node.text for node in paragraph.findall('.//w:t', namespaces) if node.text]
-                    if texts:
-                        paragraphs.append(''.join(texts))
-                return '\n'.join(paragraphs)
-    except Exception as e:
-        logger.error(f"Failed to extract text from docx: {e}")
-        return ""
+#### Security Schemes:
+- **OAuth 2.0**: For securing API access using OAuth 2.0.
 
-def build_prompt_from_template(template, params):
-    def replacer(match):
-        key = match.group(1)
-        return params.get(key, "")
-    pattern = re.compile(r"\{(\w+)\}")
-    return pattern.sub(replacer, template)
+#### Responses:
+- **200**: Successful response with redeem details.
+- **400**: Bad request error response.
+- **500**: Internal server error response.
 
-def lambda_handler(event, context):
-    try:
-        headers = event.get("headers", {}) or {}
-        model_instance = headers.get("model_instance_name", "").strip()
-        count = int(headers.get("count", "1"))
+#### Examples:
+- Examples for requests and responses are included from external files.
 
-        query = event.get("queryStringParameters", {}) or {}
+### Modularization:
+- Types and examples are placed in separate files (`redeemRequest.raml`, `redeemResponse.raml`, `errorResponse.raml`, `redeemRequest.json`, `redeemResponse.json`, `errorResponse.json`) to keep the main RAML file clean and modular.
 
-        endpointName = query.get("endpointName", "")
-        requestPayload = query.get("requestPayload", "")
-        responsePayload = query.get("responsePayload", "")
-        apiFields = query.get("apiFields", "")
-        apiFieldType = query.get("apiFieldType", "")
-        apiRequired = query.get("apiRequired", "")
-        apiNullable = query.get("apiNullable", "")
-        apiExample = query.get("apiExample", "")
-        apiPattern = query.get("apiPattern", "")
-        prompt_template = query.get("prompt", "").strip()
+### Datatype and Common Error Response:
+- Datatype validation and common error responses are defined in separate fragments (`redeemRequest.raml`, `redeemResponse.raml`, `errorResponse.raml`) to ensure reusability and maintainability.
 
-        # Decode the .docx file
-        body_b64 = event.get("body", "")
-        if not body_b64:
-            raise ValueError("No file content found in the request body")
-
-        body = b64decode(body_b64)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
-            temp_file.write(body)
-            temp_file_path = temp_file.name
-
-        extracted_text = extract_text_from_docx(temp_file_path)
-
-        # Default prompt if none provided
-        default_prompt = """
-1. Create a RAML specification for the api : {endpointName} as per table in the attached file.
-2. The request will be {requestPayload} format and response will be in {responsePayload} format.
-Please follow below instructions while generating the RAML: 
-a. Include the request and response in a seperate file and then refer them as an example in the main raml
-b. Create a seperate fragment for datatype validation of request and response which will be called in main raml.
-c. The fragment should do following:
-{apiFields} defines what all fields will be in request and response.
-{apiFieldType} defines datatype and min and max length for each api field name for both request and response 
-{apiRequired} defines if the fields mandatory or not. 
-{apiNullable} defines if the respective field can accept null values. 
-{apiExample} defines the pattern of each field.
-{apiPattern} defines the what will be the pattern of values
-"""
-
-        # Use user prompt if provided
-        prompt_template_to_use = prompt_template if prompt_template else default_prompt
-
-        param_dict = {
-            "endpointName": endpointName,
-            "requestPayload": requestPayload,
-            "responsePayload": responsePayload,
-            "apiFields": apiFields,
-            "apiFieldType": apiFieldType,
-            "apiRequired": apiRequired,
-            "apiNullable": apiNullable,
-            "apiExample": apiExample,
-            "apiPattern": apiPattern
-        }
-
-        # Final prompt to send to LLM
-        prompt_built = build_prompt_from_template(prompt_template_to_use, param_dict)
-
-        instruction = f"""
-You are an expert in RAML (RESTful API Modeling Language) for designing and documenting RESTful APIs.
-Your expertise allows you to craft structured, human-readable API endpoints, methods, and data types, helping developers optimize and reuse their code efficiently.
-Create a RAML and breakdown in the parts - Metadata, Types, Resources, Query Parameters, URI Parameters, Responses.
-Additionally, Modularize the RAML, add the datatype and a common error response as fragment.
-Include sample requests and responses examples. Declare an include file for use as the example for request and response.
-Clearly define and document your security schemes in your RAML (OAuth, Basic Auth, or custom).
-Clearly specify supported MIME types using the mediaType property.
-If applicable, document filtering, sorting, searching resources.
-Define common error structures and provide meaningful error messages.
-Refer to https://raml.org/developers/raml-100-tutorial for more guidance.
-
-{prompt_built}
-
-Here is the extracted content from the file:
-{extracted_text}
-
-Generate the RAML as described.
-"""
-
-        client = get_openai_client(model_instance)
-
-        response = client.invoke([HumanMessage(content=instruction)])
-        final_result = response.content.strip()
-
-        # If LLM returns structured JSON, return it as JSON
-        try:
-            json_result = json.loads(final_result)
-            return {
-                "statusCode": 200,
-                "headers": {"Content-Type": "application/json"},
-                "body": json.dumps(json_result, indent=2)
-            }
-        except Exception:
-            # Return plain text if not JSON
-            return {
-                "statusCode": 200,
-                "headers": {"Content-Type": "text/plain"},
-                "body": final_result
-            }
-
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        return {
-            "statusCode": 500,
-            "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"error": str(e)})
-        }
+This RAML specification provides a structured, modular, and secure way to document the Redeem API endpoint for ABC Company.
