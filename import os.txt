@@ -1,19 +1,39 @@
 ```raml
 #%RAML 1.0
-title: ABCAPI
+title: ABC API
 version: 1.0
-baseUri: http://api.abccompany.com/{version}
+baseUri: https://api.abc.com/{version}
 mediaType: application/json
 
 types:
-  RedeemRequest: !include types/redeemRequest.raml
-  RedeemResponse: !include types/redeemResponse.raml
-  ErrorResponse: !include types/errorResponse.raml
+  RedeemRequest: !include types/RedeemRequest.raml
+  RedeemResponse: !include types/RedeemResponse.raml
+  ErrorResponse: !include types/ErrorResponse.raml
 
-/securitySchemes:
+/redeem:
+  post:
+    description: Pass redeem amount to ABC
+    body:
+      application/json:
+        type: RedeemRequest
+        example: !include examples/RedeemRequestExample.json
+    responses:
+      200:
+        body:
+          application/json:
+            type: RedeemResponse
+            example: !include examples/RedeemResponseExample.json
+      400:
+        body:
+          application/json:
+            type: ErrorResponse
+            example: !include examples/ErrorResponseExample.json
+    securedBy: [oauth_2_0]
+
+securitySchemes:
   oauth_2_0:
     description: |
-      ABCAPI supports OAuth 2.0 for authorizing requests.
+      ABC uses OAuth 2.0 for authorization.
     type: OAuth 2.0
     describedBy:
       headers:
@@ -24,72 +44,102 @@ types:
       responses:
         401:
           description: |
-            Bad or expired token. This can happen if the user or ABCAPI revoked or expired an access token. To fix, you should re-authenticate the user.
+            Bad or expired token. This can happen if the user or ABC revoked or expired an access token. To fix, you should re-authenticate the user.
         403:
           description: |
             Bad OAuth request (wrong consumer key, bad nonce, expired timestamp...). Unfortunately, re-authenticating the user won't help here.
     settings:
-      authorizationUri: https://auth.abccompany.com/oauth2/authorize
-      accessTokenUri: https://auth.abccompany.com/oauth2/token
+      authorizationUri: https://api.abc.com/oauth2/authorize
+      accessTokenUri: https://api.abc.com/oauth2/token
       authorizationGrants: [ authorization_code, client_credentials ]
-
-/redeem:
-  post:
-    description: Pass redeem amount to ABC
-    securedBy: [oauth_2_0]
-    body:
-      application/json:
-        type: RedeemRequest
-        example: !include examples/redeemRequest.json
-    responses:
-      200:
-        body:
-          application/json:
-            type: RedeemResponse
-            example: !include examples/redeemResponse.json
-      400:
-        body:
-          application/json:
-            type: ErrorResponse
-            example: !include examples/errorResponse.json
-      500:
-        description: Internal Server Error
-        body:
-          application/json:
-            type: ErrorResponse
-            example: !include examples/errorResponse.json
 ```
 
-### Breakdown:
+### Types and Fragments
 
-#### Metadata:
-- **title**: ABCAPI
-- **version**: 1.0
-- **baseUri**: Base URI where the API is hosted.
+**RedeemRequest.raml**
+```raml
+#%RAML 1.0 DataType
+type: object
+properties:
+  customerId:
+    type: string
+    maxLength: 60
+    required: true
+  redeemAmount:
+    type: integer
+    maximum: 2500
+    required: true
+  bmiCustomerRequestDate:
+    type: datetime
+    required: true
+  bmiTransactionId:
+    type: integer
+    required: true
+```
 
-#### Types:
-- **RedeemRequest**: Defined in a separate file `types/redeemRequest.raml`.
-- **RedeemResponse**: Defined in a separate file `types/redeemResponse.raml`.
-- **ErrorResponse**: Defined in a separate file `types/errorResponse.raml`.
+**RedeemResponse.raml**
+```raml
+#%RAML 1.0 DataType
+type: object
+properties:
+  customerId:
+    type: string
+    maxLength: 60
+    required: true
+  status:
+    type: string
+    maxLength: 50
+    required: true
+  bcmTaskId:
+    type: string
+    maxLength: 50
+    required: false
+  errorMessage:
+    type: string
+    maxLength: 2500
+    required: false
+```
 
-#### Resources:
-- **/redeem**: Endpoint to post redeem requests.
+**ErrorResponse.raml**
+```raml
+#%RAML 1.0 DataType
+type: object
+properties:
+  code:
+    type: integer
+    required: true
+  message:
+    type: string
+    required: true
+```
 
-#### Security Schemes:
-- **OAuth 2.0**: For securing API access using OAuth 2.0.
+### Example Files
 
-#### Responses:
-- **200**: Successful response with redeem details.
-- **400**: Bad request error response.
-- **500**: Internal server error response.
+**RedeemRequestExample.json**
+```json
+{
+  "customerId": "12345",
+  "redeemAmount": 1000,
+  "bmiCustomerRequestDate": "2025-01-20T22:00:00Z",
+  "bmiTransactionId": 98765
+}
+```
 
-#### Examples:
-- Examples for requests and responses are included from external files.
+**RedeemResponseExample.json**
+```json
+{
+  "customerId": "12345",
+  "status": "Active",
+  "bcmTaskId": "abc123"
+}
+```
 
-### Modularization:
-- Types and examples are placed in separate files (`redeemRequest.raml`, `redeemResponse.raml`, `errorResponse.raml`, `redeemRequest.json`, `redeemResponse.json`, `errorResponse.json`) to keep the main RAML file clean and modular.
+**ErrorResponseExample.json**
+```json
+{
+  "code": 400,
+  "message": "Invalid request parameters"
+}
+```
 
-### Datatype and Common Error Response:
-- Datatype validation and common error responses are defined in separate fragments (`redeemRequest.raml`, `redeemResponse.raml`, `errorResponse.raml`) to ensure reusability and maintainability.
-
-This RAML specification provides a structured, modular, and secure way to document the Redeem API endpoint for ABC Company.
+This RAML specification defines the API endpoint `/redeem` which accepts a POST request with a JSON body to redeem points. It includes detailed data types and examples for both the request and response, as well as a common error response structure. Security is handled using OAuth 2.0.
