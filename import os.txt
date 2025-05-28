@@ -1,17 +1,126 @@
-Enter the API name (e.g., EXA-api):   xy-force-system-api
-Enter the time interval (e.g., 3 HOUR, 1 DAY):  1 day
-📊 Performance Summary:
- 1. **API Performance Overview:**
-   The 'xy-force-system-api' shows a consistent pattern in response times and error rates over the provided data points. The response times vary from as low as 431 milliseconds to as high as 1494 milliseconds, indicating some variability in how quickly the API responds to requests. All requests have an error rate of 100% (as indicated by the status code 400), which is a significant concern.
+import mysql.connector
+import openai
+import pandas as pd
+import matplotlib.pyplot as plt
+from datetime import datetime
 
-2. **Slowdowns and Error Spikes:**
-   - **Response Time Variability:** The API response time fluctuates significantly, which might indicate inconsistent performance. For instance, the lowest recorded response time is 431 milliseconds, and the highest is 1494 milliseconds.
-   - **Error Rate:** All requests resulted in errors (status code 400), which is highly unusual and problematic. This suggests that no successful data retrieval occurred during this period.
+# Set your OpenAI Azure configuration
+openai.api_type = "azure"
+openai.api_key = ""  # <-- Insert your key
+openai.api_base = "https://testopenaiassets.openai.azure.com/"
+openai.api_version = "2024-08-01-preview"
 
-3. **Suggested Improvements:**
-   - **Error Investigation:** Immediate investigation into the cause of the consistent error responses (status code 400) is necessary. This might involve checking the API request configurations or the backend handling these requests for issues.
-   - **Performance Optimization:** Given the variability in response times, optimizing server performance or reviewing the API's codebase for efficiency improvements could help stabilize response times.
-   - **Monitoring and Alerts:** Implementing more robust monitoring tools to alert on high error rates and significant deviations in response time can help catch issues early before they affect all users.
+# Get user input
+api_name = input("Enter the API name (e.g., EXA-api): ").strip()
+time_interval = input("Enter the time interval (e.g., 3 HOUR, 1 DAY): ").strip().upper()
 
-These steps should help in improving the reliability and efficiency of the 'xy-force-system-api'.
-Graph error: 'Error Rate'
+# Connect to MySQL database
+conn = mysql.connector.connect(
+    host="localhost",
+    user="root",
+    password="Admin",
+    database="test_data"
+)
+cursor = conn.cursor()
+
+# Fetch data for the given API name and time interval
+sql_query = f"""
+SELECT *
+FROM `all api last 1 week performance report`
+WHERE `API Name` = %s
+  AND Timestamp BETWEEN (NOW() - INTERVAL {time_interval}) AND NOW()
+ORDER BY `API Name`, Timestamp ASC;
+"""
+
+cursor.execute(sql_query, (api_name,))
+results = cursor.fetchall()
+column_names = [desc[0] for desc in cursor.description]
+conn.close()
+
+# Convert results to DataFrame and string
+df = pd.DataFrame(results, columns=column_names)
+results_str = "\n".join(
+    [", ".join(f"{col}: {val}" for col, val in zip(column_names, row)) for row in results]
+)
+
+# Build prompt for OpenAI
+prompt = (
+    f"You are a data analyst reviewing API performance.\n"
+    f"API Name: {api_name}\n"
+    f"Time Interval: Last {time_interval}\n\n"
+    "You are given the following columns:\n"
+    "- Timestamp\n"
+    "- Response time (ms)\n"
+    "- Error rate (as percentage)\n"
+    "- Request volume (number of requests)\n\n"
+    "Provide a medium-length summary with:\n"
+    "1. API's performance overview.\n"
+    "2. Any errors, slowdowns, or unusual patterns.\n"
+    "3. Possible causes and suggestions.\n"
+    "4. Keep it simple and easy to understand.\n"
+    "Do not provide excessive detail.\n"
+)
+
+# Get OpenAI summary
+def get_openai_summary(prompt, data):
+    try:
+        response = openai.ChatCompletion.create(
+            deployment_id="Fourth_Chatbot",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": data}
+            ],
+            max_tokens=900,
+            temperature=0.5,
+            top_p=0.85,
+            frequency_penalty=0.1,
+            presence_penalty=0.1
+        )
+        summary = response['choices'][0]['message']['content']
+        print("📊 Performance Summary:\n", summary)
+    except Exception as e:
+        print(f"Error generating summary: {e}")
+
+# Plot pie chart of performance distribution
+def plot_pie_charts(df):
+    try:
+        print("Available columns:", df.columns.tolist())  # Debugging info
+
+        # Match common patterns in column names
+        col_response = next((col for col in df.columns if 'response' in col.lower()), None)
+        col_error = next((col for col in df.columns if 'error' in col.lower()), None)
+        col_volume = next((col for col in df.columns if 'volume' in col.lower() or 'request' in col.lower()), None)
+
+        if not all([col_response, col_error, col_volume]):
+            raise ValueError("Missing required columns: response, error, or request volume.")
+
+        # Convert to numeric
+        df[col_response] = pd.to_numeric(df[col_response], errors='coerce')
+        df[col_error] = pd.to_numeric(df[col_error], errors='coerce')
+        df[col_volume] = pd.to_numeric(df[col_volume], errors='coerce')
+        df.dropna(subset=[col_response, col_error, col_volume], inplace=True)
+
+        # Calculate sums for pie chart
+        metrics = {
+            'Response Time': df[col_response].sum(),
+            'Error Rate': df[col_error].sum(),
+            'Request Volume': df[col_volume].sum()
+        }
+
+        # Plot pie chart
+        plt.figure(figsize=(8, 6))
+        plt.pie(metrics.values(), labels=metrics.keys(), autopct='%1.1f%%', startangle=140)
+        plt.title(f"API Performance Distribution: {api_name}")
+        plt.axis('equal')
+        plt.tight_layout()
+        plt.show()
+
+    except Exception as e:
+        print(f"Graph error: {e}")
+
+# Run analysis
+if not df.empty:
+    get_openai_summary(prompt, results_str)
+    plot_pie_charts(df)
+else:
+    print("No data found for the given API and time interval.")
