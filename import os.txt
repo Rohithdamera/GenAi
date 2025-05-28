@@ -1,113 +1,17 @@
-import mysql.connector
-import openai
-from datetime import datetime
-import matplotlib.pyplot as plt
-import pandas as pd
+Enter the API name (e.g., EXA-api):   xy-force-system-api
+Enter the time interval (e.g., 3 HOUR, 1 DAY):  1 day
+📊 Performance Summary:
+ 1. **API Performance Overview:**
+   The 'xy-force-system-api' shows a consistent pattern in response times and error rates over the provided data points. The response times vary from as low as 431 milliseconds to as high as 1494 milliseconds, indicating some variability in how quickly the API responds to requests. All requests have an error rate of 100% (as indicated by the status code 400), which is a significant concern.
 
-# OpenAI Azure config
-openai.api_type = "azure"
-openai.api_key = ""
-openai.api_base = "https://testopenaiassets.openai.azure.com/"
-openai.api_version = "2024-08-01-preview"
+2. **Slowdowns and Error Spikes:**
+   - **Response Time Variability:** The API response time fluctuates significantly, which might indicate inconsistent performance. For instance, the lowest recorded response time is 431 milliseconds, and the highest is 1494 milliseconds.
+   - **Error Rate:** All requests resulted in errors (status code 400), which is highly unusual and problematic. This suggests that no successful data retrieval occurred during this period.
 
-# Get user input
-api_name = input("Enter the API name (e.g., EXA-api): ").strip()
-time_interval = input("Enter the time interval (e.g., 3 HOUR, 1 DAY): ").strip().upper()
+3. **Suggested Improvements:**
+   - **Error Investigation:** Immediate investigation into the cause of the consistent error responses (status code 400) is necessary. This might involve checking the API request configurations or the backend handling these requests for issues.
+   - **Performance Optimization:** Given the variability in response times, optimizing server performance or reviewing the API's codebase for efficiency improvements could help stabilize response times.
+   - **Monitoring and Alerts:** Implementing more robust monitoring tools to alert on high error rates and significant deviations in response time can help catch issues early before they affect all users.
 
-# Connect to MySQL
-conn = mysql.connector.connect(
-    host="localhost",
-    user="root",
-    password="Admin",
-    database="test_data"
-)
-cursor = conn.cursor()
-
-# Query data
-sql_query = f"""
-SELECT *
-FROM `all api last 1 week performance report`
-WHERE `API Name` = %s
-  AND Timestamp BETWEEN (NOW() - INTERVAL {time_interval}) AND NOW()
-ORDER BY `API Name`, Timestamp ASC;
-"""
-cursor.execute(sql_query, (api_name,))
-results = cursor.fetchall()
-column_names = [desc[0] for desc in cursor.description]
-conn.close()
-
-# Convert to DataFrame
-df = pd.DataFrame(results, columns=column_names)
-
-# Convert DataFrame to readable string (limited rows for clarity)
-sample_data = df.head(10).to_string(index=False)
-
-# Medium, user-friendly prompt
-prompt = (
-    f"You are a data analyst. The following is a sample of API performance data for '{api_name}' from the last {time_interval}.\n"
-    "Each row shows:\n"
-    "- Timestamp\n"
-    "- Response Time (ms)\n"
-    "- Error Rate (%)\n"
-    "- Request Volume\n\n"
-    "Your task is to:\n"
-    "1. Briefly explain the API's performance.\n"
-    "2. Point out any slowdowns or unusual error spikes.\n"
-    "3. Suggest basic improvements.\n\n"
-    "Be concise, simple, and avoid technical jargon.\n"
-    "Make sure it's understandable by non-technical users.\n\n"
-    "Here is the data:"
-)
-
-# Call OpenAI API
-def get_openai_summary(prompt, data):
-    try:
-        response = openai.ChatCompletion.create(
-            deployment_id="Fourth_Chatbot",
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": data}
-            ],
-            max_tokens=800,
-            temperature=0.5,
-            top_p=0.8,
-            frequency_penalty=0.2,
-            presence_penalty=0.1
-        )
-        summary = response['choices'][0]['message']['content']
-        print("📊 Performance Summary:\n", summary)
-    except Exception as e:
-        print(f"OpenAI error: {e}")
-
-# Pie chart visualization
-def plot_pie_charts(df):
-    try:
-        # Ensure columns are numeric
-        df['Response Time'] = pd.to_numeric(df['Response Time'], errors='coerce')
-        df['Error Rate'] = pd.to_numeric(df['Error Rate'], errors='coerce')
-        df['Request Volume'] = pd.to_numeric(df['Request Volume'], errors='coerce')
-
-        # Drop rows with NaN
-        df.dropna(subset=['Response Time', 'Error Rate', 'Request Volume'], inplace=True)
-
-        # Aggregate data
-        avg_metrics = {
-            'Response Time': df['Response Time'].sum(),
-            'Error Rate': df['Error Rate'].sum(),
-            'Request Volume': df['Request Volume'].sum()
-        }
-
-        # Pie chart
-        plt.figure(figsize=(8, 6))
-        plt.pie(avg_metrics.values(), labels=avg_metrics.keys(), autopct='%1.1f%%', startangle=140)
-        plt.title(f"API Performance Distribution: {api_name}")
-        plt.axis('equal')
-        plt.tight_layout()
-        plt.show()
-
-    except Exception as e:
-        print(f"Graph error: {e}")
-
-# Run
-get_openai_summary(prompt, sample_data)
-plot_pie_charts(df)
+These steps should help in improving the reliability and efficiency of the 'xy-force-system-api'.
+Graph error: 'Error Rate'
