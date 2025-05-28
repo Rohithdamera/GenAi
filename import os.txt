@@ -4,9 +4,9 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 from collections import Counter
 
-# Set your OpenAI API key and other configurations
+# Set your OpenAI API key and configuration
 openai.api_type = "azure"
-openai.api_key = ""  # Add your key
+openai.api_key = ""  # Replace with your Azure OpenAI API key
 openai.api_base = "https://testopenaiassets.openai.azure.com/"
 openai.api_version = "2024-08-01-preview"
 
@@ -14,7 +14,7 @@ openai.api_version = "2024-08-01-preview"
 api_name = input("Enter the API name (e.g., EXA-api): ").strip()
 time_interval = input("Enter the time interval (e.g., 3 HOUR, 1 DAY): ").strip().upper()
 
-# Connect to the MySQL database
+# Connect to MySQL
 conn = mysql.connector.connect(
     host="localhost",
     user="root",
@@ -23,7 +23,7 @@ conn = mysql.connector.connect(
 )
 cursor = conn.cursor()
 
-# SQL query with dynamic API name and time interval
+# Run SQL query
 sql_query = f"""
 SELECT *
 FROM `all api last 1 week performance report`
@@ -37,24 +37,24 @@ results = cursor.fetchall()
 column_names = [desc[0] for desc in cursor.description]
 conn.close()
 
-# Convert results to a readable string
+# Format results for OpenAI
 results_str = "\n".join(
     [", ".join(f"{col}: {val}" for col, val in zip(column_names, row)) for row in results]
 )
 
-# Short, clear prompt for medium-length summary
+# Prompt for OpenAI (medium length and beginner-friendly)
 prompt = (
-    f"You are a data analyst. Analyze the performance of the API named '{api_name}' over the last {time_interval}.\n"
-    "Here’s what you need to do:\n"
-    "1. Briefly summarize the API's overall performance.\n"
-    "2. Point out any spikes in errors or delays.\n"
-    "3. Suggest simple causes and fixes, using clear language a non-technical user can understand.\n"
-    "4. Mention noticeable trends (if any).\n\n"
-    "Do NOT use too much text – keep the explanation simple and straight to the point.\n"
-    "Here's the data:\n"
+    f"You are a helpful analyst. Analyze the API '{api_name}' over the last {time_interval}.\n"
+    "Focus on the following:\n"
+    "1. Overall health and stability of the API.\n"
+    "2. Any unusual patterns in error rate, response time, or volume.\n"
+    "3. Simple explanations of issues for a non-technical user.\n"
+    "4. Practical tips or quick wins to improve reliability.\n\n"
+    "Be clear and concise. Avoid jargon. Keep it short and readable.\n"
+    "Below is the data:\n"
 )
 
-# Function to summarize and visualize
+# Function to generate summary and pie chart
 def get_openai_client(prompt):
     try:
         response = openai.ChatCompletion.create(
@@ -73,35 +73,45 @@ def get_openai_client(prompt):
         print("📊 API Performance Summary:\n")
         print(summary)
 
-        # Generate pie chart from status code
+        # Show pie chart
         generate_status_pie_chart(results, column_names)
 
     except Exception as e:
         print(f"Error during generating the summary: {e}")
 
-# Function to generate pie chart
+# Pie chart based on status code
 def generate_status_pie_chart(results, column_names):
-    status_idx = column_names.index("Status Code")
-    status_counts = Counter()
+    try:
+        status_idx = column_names.index("Status Code")
+    except ValueError:
+        print("No 'Status Code' column found.")
+        return
 
+    status_counts = Counter()
     for row in results:
         status = row[status_idx]
-        if status >= 400:
-            status_counts["Failure (400+)"] += 1
-        elif status >= 200:
-            status_counts["Success (200+)"] += 1
+        if isinstance(status, int):  # Ensure it's a number
+            if status >= 400:
+                status_counts["Failure (400+)"] += 1
+            elif status >= 200:
+                status_counts["Success (200+)"] += 1
+
+    if not status_counts:
+        print("No valid status codes found for pie chart.")
+        return
 
     labels = list(status_counts.keys())
     sizes = list(status_counts.values())
-    colors = ['red', 'green']
-    explode = (0.1, 0) if "Failure (400+)" in labels else (0, 0)
+    colors = ['red' if 'Failure' in label else 'green' for label in labels]
+    explode = [0.1 if 'Failure' in label else 0 for label in labels]  # Highlight failure slice
 
     plt.figure(figsize=(6, 6))
-    plt.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90, colors=colors, explode=explode)
-    plt.title(f"API Status Code Distribution for '{api_name}'")
-    plt.axis('equal')
+    plt.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90,
+            colors=colors, explode=explode)
+    plt.title(f"API Status Distribution for '{api_name}'")
+    plt.axis('equal')  # Equal aspect ratio for a circle
     plt.tight_layout()
     plt.show()
 
-# Run
+# Run the analysis
 get_openai_client(prompt)
