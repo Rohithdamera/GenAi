@@ -6,7 +6,7 @@ from datetime import datetime
 
 # Set your OpenAI Azure configuration
 openai.api_type = "azure"
-openai.api_key = ""  # <-- Insert your key here
+openai.api_key = ""  # <-- Add your API Key
 openai.api_base = "https://testopenaiassets.openai.azure.com/"
 openai.api_version = "2024-08-01-preview"
 
@@ -40,14 +40,66 @@ conn.close()
 df = pd.DataFrame(results, columns=column_names)
 
 # Normalize column names for flexible matching
-df.columns = df.columns.str.strip().str.lower()
+df.columns = [col.strip().lower() for col in df.columns]
 
-# Prepare data string for OpenAI
+# Identify required columns
+def find_column(keywords):
+    for col in df.columns:
+        if all(kw in col for kw in keywords):
+            return col
+    return None
+
+col_timestamp = find_column(['timestamp'])
+col_response = find_column(['response', 'time'])
+col_error = find_column(['error'])
+col_volume = find_column(['request']) or find_column(['volume'])
+
+# Debug info
+print(f"\n✅ Column matches:\n- Timestamp: {col_timestamp}\n- Response Time: {col_response}\n- Error Rate: {col_error}\n- Request Volume: {col_volume}\n")
+
+# Handle missing columns
+missing = []
+if not col_timestamp: missing.append("timestamp")
+if not col_response: missing.append("response time")
+if not col_error:    missing.append("error rate")
+if not col_volume:   missing.append("request volume")
+
+if missing:
+    print(f"❌ Graph error: Missing required columns: {', '.join(missing)}")
+else:
+    try:
+        # Convert relevant columns to numeric
+        df[col_response] = pd.to_numeric(df[col_response], errors='coerce')
+        df[col_error] = pd.to_numeric(df[col_error], errors='coerce')
+        df[col_volume] = pd.to_numeric(df[col_volume], errors='coerce')
+
+        # Drop rows with NaNs in required columns
+        df.dropna(subset=[col_response, col_error, col_volume], inplace=True)
+
+        # Create summary data
+        metrics = {
+            'Total Response Time (ms)': df[col_response].sum(),
+            'Total Error Rate (%)': df[col_error].sum(),
+            'Total Request Volume': df[col_volume].sum()
+        }
+
+        # Pie Chart
+        plt.figure(figsize=(8, 6))
+        plt.pie(metrics.values(), labels=metrics.keys(), autopct='%1.1f%%', startangle=140)
+        plt.title(f"API Performance Breakdown: {api_name}", fontsize=14)
+        plt.axis('equal')
+        plt.tight_layout()
+        plt.show()
+
+    except Exception as e:
+        print(f"❌ Pie chart generation failed: {e}")
+
+# Prepare data for OpenAI
 results_str = "\n".join(
-    [", ".join(f"{col}: {val}" for col, val in zip(df.columns, row)) for row in results]
+    [", ".join(f"{col}: {val}" for col, val in zip(df.columns, row)) for row in df.values]
 )
 
-# Prompt to instruct OpenAI to summarize API behavior
+# Prompt for OpenAI
 prompt = (
     f"You are a data analyst reviewing API performance logs.\n"
     f"The API being analyzed is named **{api_name}**, and the timeframe is **last {time_interval}**.\n"
@@ -63,64 +115,22 @@ prompt = (
     "4. Use simple, non-technical language for broad understanding.\n"
 )
 
-# Function to get summary from OpenAI
-def get_openai_summary(prompt, data):
-    try:
-        response = openai.ChatCompletion.create(
-            deployment_id="Fourth_Chatbot",
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": data}
-            ],
-            max_tokens=900,
-            temperature=0.5,
-            top_p=0.9,
-            frequency_penalty=0.1,
-            presence_penalty=0.1
-        )
-        summary = response['choices'][0]['message']['content']
-        print("\n📊 Performance Summary:\n", summary)
-    except Exception as e:
-        print(f"❌ Error generating summary: {e}")
+# Generate OpenAI summary
+try:
+    response = openai.ChatCompletion.create(
+        deployment_id="Fourth_Chatbot",
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": results_str}
+        ],
+        max_tokens=900,
+        temperature=0.5,
+        top_p=0.9,
+        frequency_penalty=0.1,
+        presence_penalty=0.1
+    )
+    summary = response['choices'][0]['message']['content']
+    print("\n📊 Performance Summary:\n", summary)
 
-# Plot pie chart
-def plot_pie_charts(df):
-    try:
-        # Identify columns
-        col_response = next((c for c in df.columns if 'response' in c and 'time' in c), None)
-        col_error = next((c for c in df.columns if 'error' in c), None)
-        col_volume = next((c for c in df.columns if 'volume' in c or 'request' in c), None)
-
-        if not all([col_response, col_error, col_volume]):
-            raise ValueError("Missing required columns: response time, error rate, or request volume.")
-
-        # Convert to numeric and drop rows with NaNs
-        df[col_response] = pd.to_numeric(df[col_response], errors='coerce')
-        df[col_error] = pd.to_numeric(df[col_error], errors='coerce')
-        df[col_volume] = pd.to_numeric(df[col_volume], errors='coerce')
-        df.dropna(subset=[col_response, col_error, col_volume], inplace=True)
-
-        # Aggregate totals
-        metrics = {
-            'Total Response Time (ms)': df[col_response].sum(),
-            'Total Error Rate (%)': df[col_error].sum(),
-            'Total Request Volume': df[col_volume].sum()
-        }
-
-        # Pie chart
-        plt.figure(figsize=(8, 6))
-        plt.pie(metrics.values(), labels=metrics.keys(), autopct='%1.1f%%', startangle=140)
-        plt.title(f"API Performance Breakdown: {api_name}", fontsize=14)
-        plt.axis('equal')
-        plt.tight_layout()
-        plt.show()
-
-    except Exception as e:
-        print(f"❌ Graph error: {e}")
-
-# Run analysis
-if not df.empty:
-    get_openai_summary(prompt, results_str)
-    plot_pie_charts(df)
-else:
-    print("⚠️ No data found for the given API and time interval.")
+except Exception as e:
+    print(f"❌ Error generating summary: {e}")
