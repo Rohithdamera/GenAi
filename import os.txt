@@ -1,8 +1,10 @@
 import mysql.connector
 import openai
 from datetime import datetime
+import matplotlib.pyplot as plt
+import pandas as pd
 
-# Set your OpenAI API key and other configurations
+# OpenAI Azure config
 openai.api_type = "azure"
 openai.api_key = ""
 openai.api_base = "https://testopenaiassets.openai.azure.com/"
@@ -12,7 +14,7 @@ openai.api_version = "2024-08-01-preview"
 api_name = input("Enter the API name (e.g., EXA-api): ").strip()
 time_interval = input("Enter the time interval (e.g., 3 HOUR, 1 DAY): ").strip().upper()
 
-# Connect to the MySQL database
+# Connect to MySQL
 conn = mysql.connector.connect(
     host="localhost",
     user="root",
@@ -21,7 +23,7 @@ conn = mysql.connector.connect(
 )
 cursor = conn.cursor()
 
-# SQL query with dynamic API name and time interval
+# Query data
 sql_query = f"""
 SELECT *
 FROM `all api last 1 week performance report`
@@ -29,64 +31,82 @@ WHERE `API Name` = %s
   AND Timestamp BETWEEN (NOW() - INTERVAL {time_interval}) AND NOW()
 ORDER BY `API Name`, Timestamp ASC;
 """
-
-# Execute the SQL query
 cursor.execute(sql_query, (api_name,))
 results = cursor.fetchall()
-
-# Get column names dynamically
 column_names = [desc[0] for desc in cursor.description]
-
-# Close the database connection
 conn.close()
 
-# Convert results to a readable string
-results_str = "\n".join(
-    [", ".join(f"{col}: {val}" for col, val in zip(column_names, row)) for row in results]
-)
+# Convert to DataFrame
+df = pd.DataFrame(results, columns=column_names)
 
-# Build the enhanced prompt
+# Convert DataFrame to readable string (limited rows for clarity)
+sample_data = df.head(10).to_string(index=False)
+
+# Medium, user-friendly prompt
 prompt = (
-    f"You are a senior data analyst. You have been provided with performance data for a specific API collected over the last {time_interval}.\n"
-    "Each row in the dataset includes metrics such as:\n"
-    "- Timestamp of the request\n"
-    "- Response time (in milliseconds)\n"
-    "- Error rate (percentage of failed requests)\n"
-    "- Request volume (number of requests)\n\n"
-    f"The API being analyzed is: {api_name}\n\n"
-    "Your tasks are:\n"
-    "1. Provide a clear and concise summary of the API's overall health.\n"
-    "2. Identify any performance issues, anomalies, or error patterns.\n"
-    "3. Explain potential causes for each issue you find.\n"
-    "4. Suggest practical, data-driven solutions to improve the API's performance.\n"
-    "5. Highlight any trends or patterns you observe over time.\n"
-    "6. Generate and interpret visual graphs (line charts or bar charts) to help illustrate:\n"
-    "   - Response time trends\n"
-    "   - Error rate fluctuations\n"
-    "   - Request volume changes\n\n"
-    "This analysis should be understandable to someone who is not familiar with the API or the data.\n\n"
-    "results_str is the given data."
+    f"You are a data analyst. The following is a sample of API performance data for '{api_name}' from the last {time_interval}.\n"
+    "Each row shows:\n"
+    "- Timestamp\n"
+    "- Response Time (ms)\n"
+    "- Error Rate (%)\n"
+    "- Request Volume\n\n"
+    "Your task is to:\n"
+    "1. Briefly explain the API's performance.\n"
+    "2. Point out any slowdowns or unusual error spikes.\n"
+    "3. Suggest basic improvements.\n\n"
+    "Be concise, simple, and avoid technical jargon.\n"
+    "Make sure it's understandable by non-technical users.\n\n"
+    "Here is the data:"
 )
 
-# Function to get summary from OpenAI
-def get_openai_client(prompt):
+# Call OpenAI API
+def get_openai_summary(prompt, data):
     try:
         response = openai.ChatCompletion.create(
             deployment_id="Fourth_Chatbot",
             messages=[
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": results_str}
+                {"role": "user", "content": data}
             ],
-            max_tokens=1200,
-            temperature=0.6,
-            top_p=0.9,
+            max_tokens=800,
+            temperature=0.5,
+            top_p=0.8,
             frequency_penalty=0.2,
             presence_penalty=0.1
         )
         summary = response['choices'][0]['message']['content']
-        print("Report:\n", summary)
+        print("📊 Performance Summary:\n", summary)
     except Exception as e:
-        print(f"Error during generating the summary: {e}")
+        print(f"OpenAI error: {e}")
 
-# Call the function with the generated prompt
-get_openai_client(prompt)
+# Plot graph
+def plot_graph(df):
+    try:
+        df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+        plt.figure(figsize=(12, 6))
+
+        plt.subplot(3, 1, 1)
+        plt.plot(df['Timestamp'], df['Response Time'], color='blue', label='Response Time (ms)')
+        plt.ylabel('Response Time')
+        plt.legend()
+
+        plt.subplot(3, 1, 2)
+        plt.plot(df['Timestamp'], df['Error Rate'], color='red', label='Error Rate (%)')
+        plt.ylabel('Error Rate')
+        plt.legend()
+
+        plt.subplot(3, 1, 3)
+        plt.plot(df['Timestamp'], df['Request Volume'], color='green', label='Request Volume')
+        plt.ylabel('Request Volume')
+        plt.xlabel('Timestamp')
+        plt.legend()
+
+        plt.tight_layout()
+        plt.suptitle(f'API Performance Trends: {api_name}', fontsize=14, y=1.02)
+        plt.show()
+    except Exception as e:
+        print(f"Graph error: {e}")
+
+# Run
+get_openai_summary(prompt, sample_data)
+plot_graph(df)
