@@ -1,191 +1,92 @@
-import os
-import logging
-import json
-import re
-from base64 import b64decode
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import unpad
-from langchain_community.chat_models import AzureChatOpenAI
-from langchain.schema import HumanMessage
-import zipfile
-import xml.etree.ElementTree as ET
-import tempfile
+import mysql.connector
+import openai
+from datetime import datetime
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger()
+# Set your OpenAI API key and other configurations
+openai.api_type = "azure"
+openai.api_key = ""
+openai.api_base = "https://testopenaiassets.openai.azure.com/"
+openai.api_version = "2024-08-01-preview"
 
-# AES Decryption
-def decrypt(data, key):
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted_data = cipher.decrypt(b64decode(data))
-    decrypted_data = unpad(decrypted_data, AES.block_size)
-    return decrypted_data.decode()
+# Get user input
+api_name = input("Enter the API name (e.g., EXA-api): ").strip()
+time_interval = input("Enter the time interval (e.g., 3 HOUR, 1 DAY): ").strip().upper()
 
-# Initialize Azure OpenAI Client
-def get_openai_client(model_instance_name):
-    aes_key_base64 = os.environ['AES_KEY']
-    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-    api_version = os.environ['AZURE_API_VERSION']
+# Connect to the MySQL database
+conn = mysql.connector.connect(
+    host="localhost",
+    user="root",
+    password="Admin",
+    database="test_data"
+)
+cursor = conn.cursor()
 
-    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
-
-    if not decrypted_api_base.endswith('/'):
-        decrypted_api_base += '/'
-
-    return AzureChatOpenAI(
-        deployment_name=model_instance_name,
-        openai_api_base=decrypted_api_base,
-        openai_api_key=decrypted_api_key,
-        openai_api_version=api_version,
-        temperature=0.4,
-        max_tokens=4096
-    )
-
-# Extract structured table data using query params
-def extract_table_data_from_docx(docx_path, field_map):
-    try:
-        with zipfile.ZipFile(docx_path) as docx_zip:
-            with docx_zip.open('word/document.xml') as doc_xml:
-                tree = ET.parse(doc_xml)
-                root = tree.getroot()
-                ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
-
-                tables = root.findall('.//w:tbl', ns)
-                extracted_data = []
-
-                for tbl in tables:
-                    rows = tbl.findall('.//w:tr', ns)
-                    headers = []
-                    for idx, row in enumerate(rows):
-                        cells = row.findall('.//w:tc', ns)
-                        texts = [''.join(t.itertext()) for t in cells]
-                        if idx == 0:
-                            headers = [t.strip() for t in texts]
-                        else:
-                            row_data = {}
-                            for i, cell in enumerate(texts):
-                                key = headers[i].strip()
-                                if key in field_map.values():
-                                    row_data[key] = cell.strip()
-                            if row_data:
-                                extracted_data.append(row_data)
-        return extracted_data
-    except Exception as e:
-        logger.error(f"Failed to extract table: {e}")
-        return []
-
-# Build the prompt
-def build_prompt_from_template(template, params):
-    def replacer(match):
-        key = match.group(1)
-        return params.get(key, f"{{{key}}}")
-    return re.sub(r"\{(\w+)\}", replacer, template)
-
-# Lambda Handler
-def lambda_handler(event, context):
-    try:
-        headers = event.get("headers", {}) or {}
-        model_instance = headers.get("model_instance_name", "").strip()
-        count = int(headers.get("count", "1"))
-
-        query = event.get("queryStringParameters", {}) or {}
-
-        # Field Mapping from Query Params
-        field_map = {
-            "endpointName": query.get("endpointName", "").strip(),
-            "requestPayload": query.get("requestPayload", "").strip(),
-            "responsePayload": query.get("responsePayload", "").strip(),
-            "apiFields": query.get("apiFields", "").strip(),
-            "apiFieldType": query.get("apiFieldType", "").strip(),
-            "apiRequired": query.get("apiRequired", "").strip(),
-            "apiNullable": query.get("apiNullable", "").strip(),
-            "apiExample": query.get("apiExample", "").strip(),
-            "apiPattern": query.get("apiPattern", "").strip()
-        }
-
-        prompt_template = query.get("prompt", "").strip()
-
-        # Body File Decode
-        body_b64 = event.get("body", "")
-        if not body_b64:
-            raise ValueError("No file content found in the request body")
-
-        body = b64decode(body_b64)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
-            temp_file.write(body)
-            temp_path = temp_file.name
-
-        # Extract table data
-        table_data = extract_table_data_from_docx(temp_path, field_map)
-
-        # Build default or custom prompt
-        default_prompt = f"""
-1. Create a RAML specification for the api : {{{{endpointName}}}} as per table in the attached file.
-2. The request will be {{{{requestPayload}}}} format and response will be in {{{{responsePayload}}}} format.
-Please follow below instructions while generating the RAML: 
-a. Include the request and response in a separate file and then refer them as an example in the main raml
-b. Create a separate fragment for datatype validation of request and response which will be called in main raml.
-c. The fragment should do following:
-{{{{apiFields}}}} defines what all fields will be in request and response.
-{{{{apiFieldType}}}} defines datatype and min and max length for each api field name for both request and response 
-{{{{apiRequired}}}} defines if the fields mandatory or not. 
-{{{{apiNullable}}}} defines if the respective field can accept null values. 
-{{{{apiExample}}}} defines the pattern of each field.
-{{{{apiPattern}}}} defines what will be the pattern of values
-"""
-        chosen_template = prompt_template if prompt_template else default_prompt
-        filled_prompt = build_prompt_from_template(chosen_template, field_map)
-
-        # Format extracted table as text
-        extracted_text = ""
-        for row in table_data:
-            extracted_text += json.dumps(row, indent=2) + "\n"
-
-        instruction = f"""
-You are an expert in RAML (RESTful API Modeling Language) for designing and documenting RESTful APIs.
-Your expertise allows you to craft structured, human-readable API endpoints, methods, and data types, helping developers optimize and reuse their code efficiently.
-Create a RAML and breakdown in the parts - Metadata, Types, Resources, Query Parameters, URI Parameters, Responses.
-Additionally, Modularize the RAML, add the datatype and a common error response as fragment.
-Include sample requests and responses examples. Declare an include file for use as the example for request and response.
-Clearly define and document your security schemes in your RAML (OAuth, Basic Auth, or custom).
-Clearly specify supported MIME types using the mediaType property.
-If applicable, document filtering, sorting, searching resources.
-Define common error structures and provide meaningful error messages.
-Refer to https://raml.org/developers/raml-100-tutorial for more guidance.
-
-{filled_prompt}
-
-Here is the extracted content from the file:
-{extracted_text}
-
-Generate the RAML as described.
+# SQL query with dynamic API name and time interval
+sql_query = f"""
+SELECT *
+FROM `all api last 1 week performance report`
+WHERE `API Name` = %s
+  AND Timestamp BETWEEN (NOW() - INTERVAL {time_interval}) AND NOW()
+ORDER BY `API Name`, Timestamp ASC;
 """
 
-        # Call OpenAI
-        client = get_openai_client(model_instance)
-        response = client.invoke([HumanMessage(content=instruction)])
-        result_text = response.content.strip()
+# Execute the SQL query
+cursor.execute(sql_query, (api_name,))
+results = cursor.fetchall()
 
-        try:
-            parsed = json.loads(result_text)
-            return {
-                "statusCode": 200,
-                "headers": {"Content-Type": "application/json"},
-                "body": json.dumps(parsed, indent=2)
-            }
-        except Exception:
-            return {
-                "statusCode": 200,
-                "headers": {"Content-Type": "text/plain"},
-                "body": result_text
-            }
+# Get column names dynamically
+column_names = [desc[0] for desc in cursor.description]
 
+# Close the database connection
+conn.close()
+
+# Convert results to a readable string
+results_str = "\n".join(
+    [", ".join(f"{col}: {val}" for col, val in zip(column_names, row)) for row in results]
+)
+
+# Build the enhanced prompt
+prompt = (
+    f"You are a senior data analyst. You have been provided with performance data for a specific API collected over the last {time_interval}.\n"
+    "Each row in the dataset includes metrics such as:\n"
+    "- Timestamp of the request\n"
+    "- Response time (in milliseconds)\n"
+    "- Error rate (percentage of failed requests)\n"
+    "- Request volume (number of requests)\n\n"
+    f"The API being analyzed is: {api_name}\n\n"
+    "Your tasks are:\n"
+    "1. Provide a clear and concise summary of the API's overall health.\n"
+    "2. Identify any performance issues, anomalies, or error patterns.\n"
+    "3. Explain potential causes for each issue you find.\n"
+    "4. Suggest practical, data-driven solutions to improve the API's performance.\n"
+    "5. Highlight any trends or patterns you observe over time.\n"
+    "6. Generate and interpret visual graphs (line charts or bar charts) to help illustrate:\n"
+    "   - Response time trends\n"
+    "   - Error rate fluctuations\n"
+    "   - Request volume changes\n\n"
+    "This analysis should be understandable to someone who is not familiar with the API or the data.\n\n"
+    "results_str is the given data."
+)
+
+# Function to get summary from OpenAI
+def get_openai_client(prompt):
+    try:
+        response = openai.ChatCompletion.create(
+            deployment_id="Fourth_Chatbot",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": results_str}
+            ],
+            max_tokens=1200,
+            temperature=0.6,
+            top_p=0.9,
+            frequency_penalty=0.2,
+            presence_penalty=0.1
+        )
+        summary = response['choices'][0]['message']['content']
+        print("Report:\n", summary)
     except Exception as e:
-        logger.error(f"Error: {e}")
-        return {
-            "statusCode": 500,
-            "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"error": str(e)})
-        }
+        print(f"Error during generating the summary: {e}")
+
+# Call the function with the generated prompt
+get_openai_client(prompt)
