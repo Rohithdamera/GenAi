@@ -1,19 +1,20 @@
 import mysql.connector
 import openai
-import pandas as pd
+from datetime import datetime
 import matplotlib.pyplot as plt
+from collections import Counter
 
-# --- Configuration ---
+# Set your OpenAI API key and other configurations
 openai.api_type = "azure"
-openai.api_key = ""  # Fill in your key
+openai.api_key = ""  # Add your key
 openai.api_base = "https://testopenaiassets.openai.azure.com/"
 openai.api_version = "2024-08-01-preview"
 
-# --- Inputs ---
+# Get user input
 api_name = input("Enter the API name (e.g., EXA-api): ").strip()
 time_interval = input("Enter the time interval (e.g., 3 HOUR, 1 DAY): ").strip().upper()
 
-# --- Database Query ---
+# Connect to the MySQL database
 conn = mysql.connector.connect(
     host="localhost",
     user="root",
@@ -21,102 +22,86 @@ conn = mysql.connector.connect(
     database="test_data"
 )
 cursor = conn.cursor()
-query = f"""
+
+# SQL query with dynamic API name and time interval
+sql_query = f"""
 SELECT *
 FROM `all api last 1 week performance report`
 WHERE `API Name` = %s
   AND Timestamp BETWEEN (NOW() - INTERVAL {time_interval}) AND NOW()
-ORDER BY Timestamp ASC;
+ORDER BY `API Name`, Timestamp ASC;
 """
-cursor.execute(query, (api_name,))
-rows = cursor.fetchall()
-columns = [desc[0] for desc in cursor.description]
+
+cursor.execute(sql_query, (api_name,))
+results = cursor.fetchall()
+column_names = [desc[0] for desc in cursor.description]
 conn.close()
 
-# --- DataFrame Setup ---
-df = pd.DataFrame(rows, columns=columns)
-df.columns = [col.strip().lower() for col in df.columns]
-
-# --- Helper Function to Match Column ---
-def find_column(keywords):
-    for col in df.columns:
-        if all(kw in col for kw in keywords):
-            return col
-    return None
-
-col_timestamp = find_column(['timestamp'])
-col_response_time = find_column(['response', 'time'])
-col_request_outcome = find_column(['request', 'outcome'])
-col_status_code = find_column(['status'])  # Match status, status code, http status
-
-# --- Column Matching Feedback ---
-print(f"\n✅ Column matches:")
-print(f"- Timestamp: {col_timestamp}")
-print(f"- Response Time: {col_response_time}")
-print(f"- Request Outcome: {col_request_outcome}")
-print(f"- Status Code: {col_status_code}")
-
-missing = []
-if not col_timestamp: missing.append("timestamp")
-if not col_response_time: missing.append("response time")
-if not (col_request_outcome or col_status_code): missing.append("request outcome or status code")
-
-if missing:
-    print(f"\n❌ Graph error: Missing required columns: {', '.join(missing)}")
-    exit()
-
-# --- Prepare Data ---
-df = df.dropna(subset=[col_timestamp, col_response_time])
-df[col_response_time] = pd.to_numeric(df[col_response_time], errors='coerce')
-df = df.dropna(subset=[col_response_time])
-
-total_requests = len(df)
-
-# --- Compute Error Rate ---
-if col_status_code:
-    df[col_status_code] = pd.to_numeric(df[col_status_code], errors='coerce')
-    error_requests = df[df[col_status_code] >= 400]
-    error_rate = (len(error_requests) / total_requests) * 100 if total_requests else 0
-else:
-    df[col_request_outcome] = df[col_request_outcome].astype(str).str.lower().str.strip()
-    error_requests = df[df[col_request_outcome].isin(['fail', 'error', 'failure'])]
-    error_rate = (len(error_requests) / total_requests) * 100 if total_requests else 0
-
-avg_response_time = df[col_response_time].mean()
-
-# --- Pie Chart (Medium Size) ---
-labels = ['Error Rate (%)', 'Success Rate (%)']
-sizes = [error_rate, 100 - error_rate]
-
-plt.figure(figsize=(6, 6))  # Medium size pie
-plt.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=140)
-plt.title(f"API Error Breakdown: {api_name}", fontsize=12)
-plt.axis('equal')
-plt.tight_layout()
-plt.show()
-
-# --- AI Summary Prompt ---
-prompt = (
-    f"You are an API performance analyst. Analyze the following:\n\n"
-    f"- API Name: {api_name}\n"
-    f"- Time Interval: Last {time_interval}\n"
-    f"- Total Requests: {total_requests}\n"
-    f"- Average Response Time (ms): {avg_response_time:.2f}\n"
-    f"- Error Rate: {error_rate:.2f}%\n\n"
-    "Give a concise analysis and improvement suggestions."
+# Convert results to a readable string
+results_str = "\n".join(
+    [", ".join(f"{col}: {val}" for col, val in zip(column_names, row)) for row in results]
 )
 
-try:
-    response = openai.ChatCompletion.create(
-        deployment_id="Fourth_Chatbot",
-        messages=[
-            {"role": "system", "content": "You are an API performance analyst."},
-            {"role": "user", "content": prompt}
-        ],
-        max_tokens=600,
-        temperature=0.5
-    )
-    print("\n📊 Performance Summary:\n")
-    print(response['choices'][0]['message']['content'])
-except Exception as e:
-    print(f"❌ OpenAI Summary Error: {e}")
+# Short, clear prompt for medium-length summary
+prompt = (
+    f"You are a data analyst. Analyze the performance of the API named '{api_name}' over the last {time_interval}.\n"
+    "Here’s what you need to do:\n"
+    "1. Briefly summarize the API's overall performance.\n"
+    "2. Point out any spikes in errors or delays.\n"
+    "3. Suggest simple causes and fixes, using clear language a non-technical user can understand.\n"
+    "4. Mention noticeable trends (if any).\n\n"
+    "Do NOT use too much text – keep the explanation simple and straight to the point.\n"
+    "Here's the data:\n"
+)
+
+# Function to summarize and visualize
+def get_openai_client(prompt):
+    try:
+        response = openai.ChatCompletion.create(
+            deployment_id="Fourth_Chatbot",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": results_str}
+            ],
+            max_tokens=900,
+            temperature=0.5,
+            top_p=0.9,
+            frequency_penalty=0.2,
+            presence_penalty=0.1
+        )
+        summary = response['choices'][0]['message']['content']
+        print("📊 API Performance Summary:\n")
+        print(summary)
+
+        # Generate pie chart from status code
+        generate_status_pie_chart(results, column_names)
+
+    except Exception as e:
+        print(f"Error during generating the summary: {e}")
+
+# Function to generate pie chart
+def generate_status_pie_chart(results, column_names):
+    status_idx = column_names.index("Status Code")
+    status_counts = Counter()
+
+    for row in results:
+        status = row[status_idx]
+        if status >= 400:
+            status_counts["Failure (400+)"] += 1
+        elif status >= 200:
+            status_counts["Success (200+)"] += 1
+
+    labels = list(status_counts.keys())
+    sizes = list(status_counts.values())
+    colors = ['red', 'green']
+    explode = (0.1, 0) if "Failure (400+)" in labels else (0, 0)
+
+    plt.figure(figsize=(6, 6))
+    plt.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90, colors=colors, explode=explode)
+    plt.title(f"API Status Code Distribution for '{api_name}'")
+    plt.axis('equal')
+    plt.tight_layout()
+    plt.show()
+
+# Run
+get_openai_client(prompt)
