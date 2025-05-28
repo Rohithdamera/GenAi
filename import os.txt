@@ -1,10 +1,136 @@
-Enter the API name (e.g., EXA-api):  xy-force-system-api
-Enter the time interval (e.g., 3 HOUR, 1 DAY):  1 day
+import mysql.connector
+import openai
+import pandas as pd
+import matplotlib.pyplot as plt
+from datetime import datetime
 
-✅ Column matches:
-- Timestamp: timestamp
-- Response Time: response time
-- Error Rate: None
-- Request Volume: request outcome
+# Set Azure OpenAI config
+openai.api_type = "azure"
+openai.api_key = ""  # <-- Add your API Key
+openai.api_base = "https://testopenaiassets.openai.azure.com/"
+openai.api_version = "2024-08-01-preview"
 
-❌ Graph error: Missing required columns: error rate
+# Get input
+api_name = input("Enter the API name (e.g., EXA-api): ").strip()
+time_interval = input("Enter the time interval (e.g., 3 HOUR, 1 DAY): ").strip().upper()
+
+# Connect to MySQL
+conn = mysql.connector.connect(
+    host="localhost",
+    user="root",
+    password="Admin",
+    database="test_data"
+)
+cursor = conn.cursor()
+
+# Query data
+sql_query = f"""
+SELECT *
+FROM `all api last 1 week performance report`
+WHERE `API Name` = %s
+  AND Timestamp BETWEEN (NOW() - INTERVAL {time_interval}) AND NOW()
+ORDER BY `API Name`, Timestamp ASC;
+"""
+cursor.execute(sql_query, (api_name,))
+results = cursor.fetchall()
+column_names = [desc[0] for desc in cursor.description]
+conn.close()
+
+# Load to DataFrame
+df = pd.DataFrame(results, columns=column_names)
+df.columns = [col.strip().lower() for col in df.columns]
+
+# Column matching
+def find_column(keywords):
+    for col in df.columns:
+        if all(kw in col for kw in keywords):
+            return col
+    return None
+
+col_timestamp = find_column(['timestamp'])
+col_response = find_column(['response', 'time'])
+col_outcome = find_column(['request', 'outcome'])  # e.g., "success"/"fail"
+col_volume = find_column(['request']) or find_column(['volume'])
+
+print(f"\n✅ Column matches:\n- Timestamp: {col_timestamp}\n- Response Time: {col_response}\n- Request Outcome: {col_outcome}\n- Request Volume: {col_volume}\n")
+
+missing = []
+if not col_timestamp: missing.append("timestamp")
+if not col_response: missing.append("response time")
+if not col_outcome: missing.append("request outcome")
+if not col_volume: missing.append("request volume")
+
+if missing:
+    print(f"❌ Graph error: Missing required columns: {', '.join(missing)}")
+else:
+    try:
+        # Clean and process
+        df[col_response] = pd.to_numeric(df[col_response], errors='coerce')
+        df = df.dropna(subset=[col_response, col_outcome])
+
+        # Normalize outcome values
+        df[col_outcome] = df[col_outcome].str.lower().str.strip()
+        total_requests = len(df)
+        failed_requests = df[df[col_outcome].isin(['fail', 'error', 'failure'])]
+
+        error_rate = (len(failed_requests) / total_requests) * 100 if total_requests > 0 else 0
+        total_volume = total_requests
+        total_response_time = df[col_response].sum()
+
+        # Pie chart
+        metrics = {
+            'Total Response Time (ms)': total_response_time,
+            'Error Rate (%)': error_rate,
+            'Total Request Volume': total_volume
+        }
+
+        plt.figure(figsize=(8, 6))
+        plt.pie(metrics.values(), labels=metrics.keys(), autopct='%1.1f%%', startangle=140)
+        plt.title(f"API Performance Breakdown: {api_name}", fontsize=14)
+        plt.axis('equal')
+        plt.tight_layout()
+        plt.show()
+
+    except Exception as e:
+        print(f"❌ Pie chart generation failed: {e}")
+
+# Prepare for OpenAI
+results_str = "\n".join(
+    [", ".join(f"{col}: {val}" for col, val in zip(df.columns, row)) for row in df.values]
+)
+
+# Prompt
+prompt = (
+    f"You are a data analyst reviewing API performance logs.\n"
+    f"The API being analyzed is named **{api_name}**, and the timeframe is **last {time_interval}**.\n"
+    f"The data includes:\n"
+    "- timestamp: When the request was logged.\n"
+    "- response time (in ms): Duration for request processing.\n"
+    "- request outcome: Whether the request was a success or failure.\n"
+    "- request volume: Total request count derived from outcome rows.\n\n"
+    "Please provide:\n"
+    "1. A summary of how the API performed.\n"
+    "2. Any slowdowns, spikes in error rates, or patterns.\n"
+    "3. Likely causes and improvement tips.\n"
+    "4. Use simple, non-technical language for broad understanding.\n"
+)
+
+# Generate summary
+try:
+    response = openai.ChatCompletion.create(
+        deployment_id="Fourth_Chatbot",
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": results_str}
+        ],
+        max_tokens=900,
+        temperature=0.5,
+        top_p=0.9,
+        frequency_penalty=0.1,
+        presence_penalty=0.1
+    )
+    summary = response['choices'][0]['message']['content']
+    print("\n📊 Performance Summary:\n", summary)
+
+except Exception as e:
+    print(f"❌ Error generating summary: {e}")
