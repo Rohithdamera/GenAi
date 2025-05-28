@@ -1,8 +1,126 @@
-4. **Brief Improvement Suggestions:**
-   - **Error Handling:** Review and possibly enhance the error messaging for status code 400 to provide clearer guidance to clients on why requests are failing. This can help clients adjust their requests appropriately.
-   - **Performance Optimization:** Investigate the backend processes and server configurations contributing to the high variability in response times. Optimizing database queries, increasing server resources, or implementing load balancing might be beneficial.
-   - **Monitoring and Logs:** Enhance monitoring to pinpoint the exact cause of high response times and frequent errors. Detailed logs should help in understanding whether the issues are more related to specific times of day, certain types of requests, or other patterns.
-   - **Client Education:** Ensure that there is comprehensive documentation available for clients on how to properly form requests and what each endpoint expects in terms of parameters and payload structure.
+import mysql.connector
+import openai
+import pandas as pd
+import matplotlib.pyplot as plt
+from datetime import datetime
 
-Improving these areas should help stabilize the API's performance and reduce the frequency of client errors.
-Graph error: Missing required columns: timestamp, response time, error rate, or request volume.
+# Set your OpenAI Azure configuration
+openai.api_type = "azure"
+openai.api_key = ""  # <-- Insert your key here
+openai.api_base = "https://testopenaiassets.openai.azure.com/"
+openai.api_version = "2024-08-01-preview"
+
+# Get user input
+api_name = input("Enter the API name (e.g., EXA-api): ").strip()
+time_interval = input("Enter the time interval (e.g., 3 HOUR, 1 DAY): ").strip().upper()
+
+# Connect to MySQL
+conn = mysql.connector.connect(
+    host="localhost",
+    user="root",
+    password="Admin",
+    database="test_data"
+)
+cursor = conn.cursor()
+
+# Query the performance data
+sql_query = f"""
+SELECT *
+FROM `all api last 1 week performance report`
+WHERE `API Name` = %s
+  AND Timestamp BETWEEN (NOW() - INTERVAL {time_interval}) AND NOW()
+ORDER BY `API Name`, Timestamp ASC;
+"""
+cursor.execute(sql_query, (api_name,))
+results = cursor.fetchall()
+column_names = [desc[0] for desc in cursor.description]
+conn.close()
+
+# Convert to DataFrame
+df = pd.DataFrame(results, columns=column_names)
+
+# Normalize column names for flexible matching
+df.columns = df.columns.str.strip().str.lower()
+
+# Prepare data string for OpenAI
+results_str = "\n".join(
+    [", ".join(f"{col}: {val}" for col, val in zip(df.columns, row)) for row in results]
+)
+
+# Prompt to instruct OpenAI to summarize API behavior
+prompt = (
+    f"You are a data analyst reviewing API performance logs.\n"
+    f"The API being analyzed is named **{api_name}**, and the timeframe is **last {time_interval}**.\n"
+    f"The data includes:\n"
+    "- timestamp: When the request was logged.\n"
+    "- response time (in ms): Duration for request processing.\n"
+    "- error rate (in %): Error percentage during request.\n"
+    "- request volume: Number of requests per entry.\n\n"
+    "Please provide:\n"
+    "1. A summary of how the API performed.\n"
+    "2. Any slowdowns, spikes in error rates, or patterns.\n"
+    "3. Likely causes and improvement tips.\n"
+    "4. Use simple, non-technical language for broad understanding.\n"
+)
+
+# Function to get summary from OpenAI
+def get_openai_summary(prompt, data):
+    try:
+        response = openai.ChatCompletion.create(
+            deployment_id="Fourth_Chatbot",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": data}
+            ],
+            max_tokens=900,
+            temperature=0.5,
+            top_p=0.9,
+            frequency_penalty=0.1,
+            presence_penalty=0.1
+        )
+        summary = response['choices'][0]['message']['content']
+        print("\n📊 Performance Summary:\n", summary)
+    except Exception as e:
+        print(f"❌ Error generating summary: {e}")
+
+# Plot pie chart
+def plot_pie_charts(df):
+    try:
+        # Identify columns
+        col_response = next((c for c in df.columns if 'response' in c and 'time' in c), None)
+        col_error = next((c for c in df.columns if 'error' in c), None)
+        col_volume = next((c for c in df.columns if 'volume' in c or 'request' in c), None)
+
+        if not all([col_response, col_error, col_volume]):
+            raise ValueError("Missing required columns: response time, error rate, or request volume.")
+
+        # Convert to numeric and drop rows with NaNs
+        df[col_response] = pd.to_numeric(df[col_response], errors='coerce')
+        df[col_error] = pd.to_numeric(df[col_error], errors='coerce')
+        df[col_volume] = pd.to_numeric(df[col_volume], errors='coerce')
+        df.dropna(subset=[col_response, col_error, col_volume], inplace=True)
+
+        # Aggregate totals
+        metrics = {
+            'Total Response Time (ms)': df[col_response].sum(),
+            'Total Error Rate (%)': df[col_error].sum(),
+            'Total Request Volume': df[col_volume].sum()
+        }
+
+        # Pie chart
+        plt.figure(figsize=(8, 6))
+        plt.pie(metrics.values(), labels=metrics.keys(), autopct='%1.1f%%', startangle=140)
+        plt.title(f"API Performance Breakdown: {api_name}", fontsize=14)
+        plt.axis('equal')
+        plt.tight_layout()
+        plt.show()
+
+    except Exception as e:
+        print(f"❌ Graph error: {e}")
+
+# Run analysis
+if not df.empty:
+    get_openai_summary(prompt, results_str)
+    plot_pie_charts(df)
+else:
+    print("⚠️ No data found for the given API and time interval.")
