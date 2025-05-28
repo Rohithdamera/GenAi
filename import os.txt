@@ -79,34 +79,35 @@ def get_openai_summary(prompt, data):
     except Exception as e:
         print(f"OpenAI error: {e}")
 
-# Plot graph
-def plot_graph(df):
+# Pie chart visualization
+def plot_pie_charts(df):
     try:
-        df['Timestamp'] = pd.to_datetime(df['Timestamp'])
-        plt.figure(figsize=(12, 6))
+        # Ensure columns are numeric
+        df['Response Time'] = pd.to_numeric(df['Response Time'], errors='coerce')
+        df['Error Rate'] = pd.to_numeric(df['Error Rate'], errors='coerce')
+        df['Request Volume'] = pd.to_numeric(df['Request Volume'], errors='coerce')
 
-        plt.subplot(3, 1, 1)
-        plt.plot(df['Timestamp'], df['Response Time'], color='blue', label='Response Time (ms)')
-        plt.ylabel('Response Time')
-        plt.legend()
+        # Drop rows with NaN
+        df.dropna(subset=['Response Time', 'Error Rate', 'Request Volume'], inplace=True)
 
-        plt.subplot(3, 1, 2)
-        plt.plot(df['Timestamp'], df['Error Rate'], color='red', label='Error Rate (%)')
-        plt.ylabel('Error Rate')
-        plt.legend()
+        # Aggregate data
+        avg_metrics = {
+            'Response Time': df['Response Time'].sum(),
+            'Error Rate': df['Error Rate'].sum(),
+            'Request Volume': df['Request Volume'].sum()
+        }
 
-        plt.subplot(3, 1, 3)
-        plt.plot(df['Timestamp'], df['Request Volume'], color='green', label='Request Volume')
-        plt.ylabel('Request Volume')
-        plt.xlabel('Timestamp')
-        plt.legend()
-
+        # Pie chart
+        plt.figure(figsize=(8, 6))
+        plt.pie(avg_metrics.values(), labels=avg_metrics.keys(), autopct='%1.1f%%', startangle=140)
+        plt.title(f"API Performance Distribution: {api_name}")
+        plt.axis('equal')
         plt.tight_layout()
-        plt.suptitle(f'API Performance Trends: {api_name}', fontsize=14, y=1.02)
         plt.show()
+
     except Exception as e:
         print(f"Graph error: {e}")
 
 # Run
 get_openai_summary(prompt, sample_data)
-plot_graph(df)
+plot_pie_charts(df)
