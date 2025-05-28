@@ -4,9 +4,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-# Set your OpenAI Azure configuration
+# OpenAI Azure configuration
 openai.api_type = "azure"
-openai.api_key = ""  # <-- Insert your key
+openai.api_key = ""  # <--- Insert your key
 openai.api_base = "https://testopenaiassets.openai.azure.com/"
 openai.api_version = "2024-08-01-preview"
 
@@ -14,7 +14,7 @@ openai.api_version = "2024-08-01-preview"
 api_name = input("Enter the API name (e.g., EXA-api): ").strip()
 time_interval = input("Enter the time interval (e.g., 3 HOUR, 1 DAY): ").strip().upper()
 
-# Connect to MySQL database
+# Connect to MySQL
 conn = mysql.connector.connect(
     host="localhost",
     user="root",
@@ -23,7 +23,7 @@ conn = mysql.connector.connect(
 )
 cursor = conn.cursor()
 
-# Fetch data for the given API name and time interval
+# SQL Query
 sql_query = f"""
 SELECT *
 FROM `all api last 1 week performance report`
@@ -37,31 +37,31 @@ results = cursor.fetchall()
 column_names = [desc[0] for desc in cursor.description]
 conn.close()
 
-# Convert results to DataFrame and string
+# Convert to DataFrame
 df = pd.DataFrame(results, columns=column_names)
+
+# Convert results to string for LLM
 results_str = "\n".join(
     [", ".join(f"{col}: {val}" for col, val in zip(column_names, row)) for row in results]
 )
 
-# Build prompt for OpenAI
+# Simplified and clear prompt
 prompt = (
-    f"You are a data analyst reviewing API performance.\n"
-    f"API Name: {api_name}\n"
-    f"Time Interval: Last {time_interval}\n\n"
-    "You are given the following columns:\n"
+    f"You are a data analyst reviewing the performance of the API '{api_name}' "
+    f"for the past {time_interval}. The dataset includes:\n"
     "- Timestamp\n"
     "- Response time (ms)\n"
-    "- Error rate (as percentage)\n"
-    "- Request volume (number of requests)\n\n"
-    "Provide a medium-length summary with:\n"
-    "1. API's performance overview.\n"
-    "2. Any errors, slowdowns, or unusual patterns.\n"
-    "3. Possible causes and suggestions.\n"
-    "4. Keep it simple and easy to understand.\n"
-    "Do not provide excessive detail.\n"
+    "- Error rate (%)\n"
+    "- Request volume\n\n"
+    "Please summarize the API's performance clearly and simply. Include:\n"
+    "1. General health of the API.\n"
+    "2. Any issues or spikes in errors or response time.\n"
+    "3. Possible reasons (if any) for issues.\n"
+    "4. Brief improvement suggestions.\n"
+    "The response should be medium-length, beginner-friendly, and not overly technical."
 )
 
-# Get OpenAI summary
+# Call OpenAI to get summary
 def get_openai_summary(prompt, data):
     try:
         response = openai.ChatCompletion.create(
@@ -77,50 +77,58 @@ def get_openai_summary(prompt, data):
             presence_penalty=0.1
         )
         summary = response['choices'][0]['message']['content']
-        print("📊 Performance Summary:\n", summary)
+        print("\n📊 Performance Summary:\n")
+        print(summary)
     except Exception as e:
-        print(f"Error generating summary: {e}")
+        print(f"OpenAI summary error: {e}")
 
-# Plot pie chart of performance distribution
-def plot_pie_charts(df):
+# Bar chart visualization
+def plot_bar_chart(df):
     try:
-        print("Available columns:", df.columns.tolist())  # Debugging info
-
-        # Match common patterns in column names
+        # Match column names
+        col_time = next((col for col in df.columns if 'timestamp' in col.lower()), None)
         col_response = next((col for col in df.columns if 'response' in col.lower()), None)
         col_error = next((col for col in df.columns if 'error' in col.lower()), None)
         col_volume = next((col for col in df.columns if 'volume' in col.lower() or 'request' in col.lower()), None)
 
-        if not all([col_response, col_error, col_volume]):
-            raise ValueError("Missing required columns: response, error, or request volume.")
+        if not all([col_time, col_response, col_error, col_volume]):
+            raise ValueError("Missing required columns: timestamp, response time, error rate, or request volume.")
 
-        # Convert to numeric
+        # Clean data
+        df[col_time] = pd.to_datetime(df[col_time])
         df[col_response] = pd.to_numeric(df[col_response], errors='coerce')
         df[col_error] = pd.to_numeric(df[col_error], errors='coerce')
         df[col_volume] = pd.to_numeric(df[col_volume], errors='coerce')
-        df.dropna(subset=[col_response, col_error, col_volume], inplace=True)
+        df.dropna(subset=[col_time, col_response, col_error, col_volume], inplace=True)
 
-        # Calculate sums for pie chart
-        metrics = {
-            'Response Time': df[col_response].sum(),
-            'Error Rate': df[col_error].sum(),
-            'Request Volume': df[col_volume].sum()
-        }
+        # Plot
+        fig, ax1 = plt.subplots(figsize=(12, 6))
 
-        # Plot pie chart
-        plt.figure(figsize=(8, 6))
-        plt.pie(metrics.values(), labels=metrics.keys(), autopct='%1.1f%%', startangle=140)
-        plt.title(f"API Performance Distribution: {api_name}")
-        plt.axis('equal')
+        ax1.plot(df[col_time], df[col_response], label='Response Time (ms)', color='blue', marker='o')
+        ax1.plot(df[col_time], df[col_error], label='Error Rate (%)', color='red', marker='x')
+        ax1.set_xlabel('Time')
+        ax1.set_ylabel('Response/Error')
+        ax1.tick_params(axis='x', rotation=45)
+
+        ax2 = ax1.twinx()
+        ax2.bar(df[col_time], df[col_volume], width=0.02, alpha=0.3, color='green', label='Request Volume')
+        ax2.set_ylabel('Request Volume')
+
+        # Combine legends
+        lines_1, labels_1 = ax1.get_legend_handles_labels()
+        lines_2, labels_2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper left')
+
+        plt.title(f"API Performance Metrics: {api_name}")
         plt.tight_layout()
         plt.show()
 
     except Exception as e:
         print(f"Graph error: {e}")
 
-# Run analysis
+# Run summary and plot
 if not df.empty:
     get_openai_summary(prompt, results_str)
-    plot_pie_charts(df)
+    plot_bar_chart(df)
 else:
     print("No data found for the given API and time interval.")
