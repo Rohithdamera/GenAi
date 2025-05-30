@@ -1,58 +1,31 @@
-{
-  "bindings": [
-    {
-      "authLevel": "function",
-      "type": "httpTrigger",
-      "direction": "in",
-      "name": "req",
-      "methods": ["post"]
-    },
-    {
-      "type": "http",
-      "direction": "out",
-      "name": "$return"
-    }
-  ]
-}
+C:\Users\rdamera\Downloads\my-function-app>az login
+Select the account you want to log in with. For more information on login with Azure CLI, see https://go.microsoft.com/fwlink/?linkid=2271136
+
+Retrieving tenants and subscriptions for the selection...
+
+[Tenant and subscription selection]
+
+No     Subscription name                 Subscription ID                       Tenant
+-----  --------------------------------  ------------------------------------  ---------
+[1] *  Capgemini-AssetsDev-Subscription  c843b361-02cd-4dee-a994-1ac57285adbe  Capgemini
+
+The default is marked with an *; the default tenant is 'Capgemini' and subscription is 'Capgemini-AssetsDev-Subscription' (c843b361-02cd-4dee-a994-1ac57285adbe).
+
+Select a subscription and tenant (Type a number or Enter for no changes):
+
+Tenant: Capgemini
+Subscription: Capgemini-AssetsDev-Subscription (c843b361-02cd-4dee-a994-1ac57285adbe)
+
+[Announcements]
+With the new Azure CLI login experience, you can select the subscription you want to use more easily. Learn more about it and its configuration at https://go.microsoft.com/fwlink/?linkid=2271236
+
+If you encounter any problem, please open an issue at https://aka.ms/azclibug
+
+[Warning] The login output has been updated. Please be aware that it no longer displays the full list of available subscriptions by default.
 
 
+C:\Users\rdamera\Downloads\my-function-app>func azure functionapp publish LLMAppFunctionApp
+'func' is not recognized as an internal or external command,
+operable program or batch file.
 
-
-azure-functions
-openpyxl
-pycryptodome
-langchain
-
-
-
-
-
-{
-  "IsEncrypted": false,
-  "Values": {
-    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
-    "FUNCTIONS_WORKER_RUNTIME": "python",
-    "AES_KEY": "<your_base64_key>",
-    "ENCRYPTED_API_BASE": "<encrypted_base64_api_base>",
-    "ENCRYPTED_API_KEY": "<encrypted_base64_api_key>",
-    "AZURE_API_VERSION": "2024-08-01-preview"
-  }
-}
-
-
-
-{
-  "version": "2.0",
-  "logging": {
-    "applicationInsights": {
-      "samplingSettings": {
-        "isEnabled": true,
-        "maxTelemetryItemsPerSecond" : 5
-      }
-    },
-    "logLevel": {
-      "default": "Information",
-      "Function": "Information"
-    }
-  }
-}
+C:\Users\rdamera\Downloads\my-function-app>
