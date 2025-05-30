@@ -38,3 +38,21 @@ langchain
     "AZURE_API_VERSION": "2024-08-01-preview"
   }
 }
+
+
+
+{
+  "version": "2.0",
+  "logging": {
+    "applicationInsights": {
+      "samplingSettings": {
+        "isEnabled": true,
+        "maxTelemetryItemsPerSecond" : 5
+      }
+    },
+    "logLevel": {
+      "default": "Information",
+      "Function": "Information"
+    }
+  }
+}
