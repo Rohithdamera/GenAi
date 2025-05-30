@@ -1,107 +1,148 @@
-import mysql.connector
-from datetime import datetime
-import matplotlib.pyplot as plt
-from langchain.chat_models import ChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage
-import openai
 import os
+import logging
+import json
+from base64 import b64decode
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
+from langchain_community.chat_models import AzureChatOpenAI
+from langchain.schema import HumanMessage
+import tempfile
+import openpyxl
+from openpyxl.utils import column_index_from_string
 
-# Set OpenAI Azure configurations
-os.environ["OPENAI_API_TYPE"] = "azure"
-os.environ["OPENAI_API_KEY"] = ""  # Add your key here
-os.environ["OPENAI_API_BASE"] = "https://testopenaiassets.openai.azure.com/"
-os.environ["OPENAI_API_VERSION"] = "2024-08-01-preview"
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger()
 
-# User input
-api_name = input("Enter the API name (e.g., EXA-api): ").strip()
-time_interval = input("Enter the time interval (e.g., 3 HOUR, 1 DAY): ").strip().upper()
+# AES Decryption
+def decrypt(data, key):
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)
+    decrypted_data = cipher.decrypt(b64decode(data))
+    decrypted_data = unpad(decrypted_data, AES.block_size)
+    return decrypted_data.decode()
 
-# Connect to MySQL
-conn = mysql.connector.connect(
-    host="localhost",
-    user="root",
-    password="Admin",
-    database="test_data"
-)
-cursor = conn.cursor()
+# Azure OpenAI Client
+def get_openai_client(model_instance_name):
+    aes_key_base64 = os.environ['AES_KEY']
+    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+    api_version = os.environ['AZURE_API_VERSION']
 
-# SQL query
-sql_query = f"""
-SELECT *
-FROM `all api last 1 week performance report`
-WHERE `API Name` = %s
-  AND Timestamp BETWEEN (NOW() - INTERVAL {time_interval}) AND NOW()
-ORDER BY `API Name`, Timestamp ASC;
+    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+
+    if not decrypted_api_base.endswith('/'):
+        decrypted_api_base += '/'
+
+    return AzureChatOpenAI(
+        deployment_name=model_instance_name,
+        openai_api_base=decrypted_api_base,
+        openai_api_key=decrypted_api_key,
+        openai_api_version=api_version,
+        temperature=0.4,
+        max_tokens=4096
+    )
+
+# Convert Excel column letter to zero-based index
+def col_letter_to_index(col_letter):
+    return column_index_from_string(col_letter.upper()) - 1
+
+# Extract Excel content dynamically
+def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col):
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True)
+        sheet = wb[sheet_name]
+        data = []
+        for row in sheet.iter_rows(min_row=2, values_only=True):  # Skip header
+            source = row[source_col]
+            logic = row[logic_col]
+            target = row[target_col]
+            if source and target:
+                data.append({
+                    "source": source,
+                    "logic": logic or "",
+                    "target": target
+                })
+        return data
+    except Exception as e:
+        logger.error(f"Failed to extract Excel data: {e}")
+        return []
+
+# Build DataWeave prompt
+def build_dataweave_prompt(extracted_data):
+    prompt = (
+        "Write a DataWeave script by referring to the uploaded Excel file named {file_name}, "
+        "specifically the sheet named {sheet_name}.\n"
+        "- Column {source_system_column} contains source field details.\n"
+        "- Column {target_system_column} contains target field details.\n"
+        "- Column {business_logic_column} contains the business logic for DataWeave transformations.\n"
+        "This DataWeave script should be optimized to handle large data sets efficiently. "
+        "Use only functions available in DataWeave as documented here: "
+        "https://docs.mulesoft.com/dataweave/latest/dw-functions#dw_modules.\n"
+    )
+    prompt += "\nHere is the extracted data from the Excel sheet:\n"
+    for row in extracted_data:
+        prompt += f"- Source: {row['source']}, Target: {row['target']}, Logic: {row['logic']}\n"
+    return prompt
+
+# Lambda handler
+def lambda_handler(event, context):
+    try:
+        headers = event.get("headers", {}) or {}
+        model_instance = headers.get("model_instance_name", "")
+        query = event.get("queryStringParameters", {}) or {}
+
+        # Extract parameters from query
+        file_name = query.get("file_name", "uploaded_file.xlsx")
+        sheet_name = query.get("sheet_name")
+        source_col = col_letter_to_index(query.get("source_system_column"))
+        target_col = col_letter_to_index(query.get("target_system_column"))
+        logic_col = col_letter_to_index(query.get("business_logic_column"))
+
+        if not all([sheet_name, source_col is not None, target_col is not None, logic_col is not None]):
+            raise ValueError("Missing one or more required query parameters.")
+
+        if not event.get("isBase64Encoded", False):
+            raise ValueError("Expected base64-encoded binary file")
+
+        body_b64 = event.get("body", "")
+        if not body_b64:
+            raise ValueError("No file content found in the request body")
+
+        body = b64decode(body_b64)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as temp_file:
+            temp_file.write(body)
+            temp_file_path = temp_file.name
+
+        extracted_data = extract_excel_data(temp_file_path, sheet_name, source_col, logic_col, target_col)
+
+        prompt = build_dataweave_prompt(extracted_data)
+
+        instructions = """
+As a seasoned expert in MuleSoft Integration Services, you specialize in advanced data transformation and integration techniques, focusing on DataWeave transformations, JSON and XML handling, and complex data mappings. 
+You excel in designing and implementing robust data transformation flows that facilitate the integration. 
+This involves not only transforming and mapping data but also ensuring data consistency and integrity throughout the process. 
+You can refer to this URL for DataWeave syntax: https://docs.mulesoft.com/dataweave/latest/dw-functions#dw_modules
 """
 
-cursor.execute(sql_query, (api_name,))
-results = cursor.fetchall()
-column_names = [desc[0] for desc in cursor.description]
-conn.close()
+        full_prompt = instructions + "\n" + prompt
 
-# Prepare results as string
-results_str = "\n".join(
-    [", ".join(f"{col}: {val}" for col, val in zip(column_names, row)) for row in results]
-)
+        client = get_openai_client(model_instance)
+        response = client.invoke([
+            HumanMessage(content=full_prompt),
+            HumanMessage(content="Generate the DataWeave script.")
+        ])
 
-# Summarization prompt
-system_prompt = f"""
-You are a helpful data analyst.
-The user will provide performance metrics for the API '{api_name}' over the past {time_interval}.
-The data includes response time, error rate, request volume, timestamp, and status codes.
+        final_result = response.content.strip()
 
-Your task is to:
-- Briefly describe the overall health.
-- Mention if there are any major issues.
-- Explain any noticeable patterns (like increased error rate or slow response).
-- Suggest 1-2 possible improvements.
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "text/plain"},
+            "body": final_result
+        }
 
-Be concise and easy to understand for non-technical users.
-"""
-
-# LangChain summarization
-llm = ChatOpenAI(deployment_name="Fourth_Chatbot", temperature=0.5, max_tokens=700)
-
-messages = [
-    SystemMessage(content=system_prompt),
-    HumanMessage(content=results_str)
-]
-
-try:
-    summary = llm(messages).content
-    print("\n\n--- API Performance Summary ---\n")
-    print(summary)
-except Exception as e:
-    print(f"LangChain summary error: {e}")
-
-# ---------------------------
-# Pie chart generation logic
-# ---------------------------
-try:
-    status_col_index = column_names.index("Status Code")
-    status_counts = {"200+": 0, "400+": 0, "Other": 0}
-
-    for row in results:
-        status = int(row[status_col_index])
-        if 200 <= status < 300:
-            status_counts["200+"] += 1
-        elif 400 <= status < 500:
-            status_counts["400+"] += 1
-        else:
-            status_counts["Other"] += 1
-
-    # Pie chart
-    labels = status_counts.keys()
-    sizes = status_counts.values()
-    colors = ['#4CAF50', '#F44336', '#FFC107']
-
-    plt.figure(figsize=(5, 5))
-    plt.pie(sizes, labels=labels, autopct='%1.1f%%', colors=colors, startangle=140)
-    plt.title(f"API Status Distribution: {api_name}")
-    plt.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
-    plt.tight_layout()
-    plt.savefig("api_status_pie_chart.png")
-    plt.show()
-    print("\nPie chart generated and displayed.")
-except Exception as e:
-    print(f"Error creating pie chart: {e}")
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
