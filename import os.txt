@@ -1,27 +1,14 @@
-function_project/
-│
-├── HttpTriggerDataWeave/
-│   ├── __init__.py                  <-- Your full function code here
-│   └── function.json
-│
-├── host.json
-├── requirements.txt
-└── .funcignore                     <-- (Optional)
-
-
-
-
-
-import os
 import logging
+import os
 import json
 import re
 from base64 import b64decode
 from Crypto.Cipher import AES
+from azure.functions import HttpRequest, HttpResponse
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage
 
-logger = logging.getLogger()
+logger = logging.getLogger("azure.functions")
 logger.setLevel(logging.INFO)
 
 def unpad(data):
@@ -35,10 +22,10 @@ def decrypt(data, key):
     return decrypted_data.decode()
 
 def get_openai_client(model_instance_name):
-    aes_key_base64 = os.environ['AES_KEY']
-    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-    api_version = os.environ['AZURE_API_VERSION']
+    aes_key_base64 = os.environ["AES_KEY"]
+    encrypted_api_base = os.environ["ENCRYPTED_API_BASE"]
+    encrypted_api_key = os.environ["ENCRYPTED_API_KEY"]
+    api_version = os.environ["AZURE_API_VERSION"]
 
     decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
     decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
@@ -54,7 +41,7 @@ def get_openai_client(model_instance_name):
     )
 
 def detect_file_type(file_content):
-    if re.search(r'^(%RAML)|(^#%RAML)', file_content.strip(), re.IGNORECASE):
+    if re.search(r"^(%RAML)|(^#%RAML)", file_content.strip(), re.IGNORECASE):
         return "raml"
     elif "<xs:schema" in file_content or "http://www.w3.org/2001/XMLSchema" in file_content:
         return "xsd"
@@ -64,20 +51,16 @@ def get_instruction_and_prompt(input_type, custom_prompt=None):
     if input_type == "/sampleforraml":
         instruction = (
             "You are an expert in analysing the RAML and generating the payload from the RAML. "
-            "I am providing the RAML which will be used as an asset for designing my API. "
-            "Please analyze the RAML and generate the sample payload which will honor all the rules inside the RAML. "
-            "You can refer the link for any doubts related to RAML: https://raml.org/developers/raml-100-tutorial."
-            "\n\n**IMPORTANT**: Only return a valid JSON object or JSON array containing the payload. "
-            "Do NOT include any markdown, explanations, or extra text. The response must be parseable as JSON."
+            "Please analyze the RAML and generate the sample payload which will honor all the rules. "
+            "Only return a valid JSON object or JSON array. Do NOT include markdown or extra text."
         )
         default_prompt = "Please generate one JSON payload from the following RAML:"
         content_type = "application/json"
     elif input_type == "/sampleforxsd":
         instruction = (
             "You are an expert in analysing the XSD and generating the payload from the XSD. "
-            "I am providing the XSD which will be used as an asset for designing my API. "
-            "Please analyze the XSD and generate the sample payload which will honor all the rules inside the XSD. "
-            "You can refer the link for any doubts related to XSD: https://www.tutorialspoint.com/xsd/index.htm"
+            "Please analyze the XSD and generate the sample payload which will honor all the rules. "
+            "Only return XML output. Do NOT include markdown or extra text."
         )
         default_prompt = "Please generate one XML payload for the following XSD:"
         content_type = "application/xml"
@@ -93,18 +76,11 @@ def get_instruction_and_prompt(input_type, custom_prompt=None):
 def extract_json_from_response(text):
     try:
         return json.loads(text)
-    except Exception:
+    except:
         pass
 
     json_matches = re.findall(r"```json(.*?)```", text, re.DOTALL | re.IGNORECASE)
     for match in json_matches:
-        try:
-            return json.loads(match.strip())
-        except:
-            continue
-
-    code_matches = re.findall(r"```(.*?)```", text, re.DOTALL)
-    for match in code_matches:
         try:
             return json.loads(match.strip())
         except:
@@ -126,50 +102,27 @@ def extract_json_from_response(text):
 
     return None
 
-def lambda_handler(event, context):
+def main(req: HttpRequest) -> HttpResponse:
     try:
-        logger.info("Received event: %s", json.dumps(event)[:1000])
-
-        if 'body' not in event or 'isBase64Encoded' not in event or not event['isBase64Encoded']:
-            return {
-                "statusCode": 400,
-                "body": json.dumps({"error": "File content is missing or not base64-encoded."})
-            }
-
-        file_content = b64decode(event['body']).decode('utf-8')
-        query_params = event.get('queryStringParameters', {})
-        input_value = query_params.get('input')
-        custom_prompt = query_params.get('prompt')
+        input_value = req.params.get("input")
+        custom_prompt = req.params.get("prompt")
 
         if not input_value:
-            return {
-                "statusCode": 400,
-                "body": json.dumps({"error": "'input' parameter is missing in query string."})
-            }
+            return HttpResponse(json.dumps({"error": "'input' parameter is missing"}), status_code=400)
 
-        headers = event.get('headers', {})
-        model_instance_name = headers.get('model_instance_name')
+        model_instance_name = req.headers.get("model_instance_name")
         if not model_instance_name:
-            return {
-                "statusCode": 400,
-                "body": json.dumps({"error": "'model_instance_name' header is missing."})
-            }
+            return HttpResponse(json.dumps({"error": "'model_instance_name' header is missing"}), status_code=400)
 
-        count = int(headers.get('count', '1'))
+        count = int(req.headers.get("count", "1"))
 
+        file_content = req.get_body().decode("utf-8")
         file_type = detect_file_type(file_content)
-        logger.info(f"Detected file type: {file_type}")
 
         if input_value == "/sampleforraml" and file_type != "raml":
-            return {
-                "statusCode": 400,
-                "body": json.dumps({"error": "Only RAML or RAML-like .txt content is allowed for /sampleforraml."})
-            }
-        elif input_value == "/sampleforxsd" and file_type != "xsd":
-            return {
-                "statusCode": 400,
-                "body": json.dumps({"error": "Only XSD or XSD-like .txt content is allowed for /sampleforxsd."})
-            }
+            return HttpResponse(json.dumps({"error": "Only RAML or RAML-like .txt content is allowed"}), status_code=400)
+        if input_value == "/sampleforxsd" and file_type != "xsd":
+            return HttpResponse(json.dumps({"error": "Only XSD or XSD-like .txt content is allowed"}), status_code=400)
 
         prompt_data = get_instruction_and_prompt(input_value, custom_prompt)
         client = get_openai_client(model_instance_name)
@@ -192,21 +145,10 @@ def lambda_handler(event, context):
                 results.append(response.content.strip())
 
         if input_value == "/sampleforraml":
-            return {
-                "statusCode": 200,
-                "headers": {"Content-Type": prompt_data["content_type"]},
-                "body": json.dumps(results, indent=2)
-            }
+            return HttpResponse(json.dumps(results, indent=2), mimetype=prompt_data["content_type"])
         else:
-            return {
-                "statusCode": 200,
-                "headers": {"Content-Type": prompt_data["content_type"]},
-                "body": "\n\n".join(results)
-            }
+            return HttpResponse("\n\n".join(results), mimetype=prompt_data["content_type"])
 
     except Exception as e:
-        logger.error("Unhandled exception: %s", str(e))
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
-        }
+        logger.exception("Error processing request")
+        return HttpResponse(json.dumps({"error": str(e)}), status_code=500)
