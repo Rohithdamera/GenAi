@@ -1,154 +1,107 @@
-import logging
-import os
-import json
-import re
-from base64 import b64decode
-from Crypto.Cipher import AES
-from azure.functions import HttpRequest, HttpResponse
-from langchain_community.chat_models import AzureChatOpenAI
-from langchain.schema import HumanMessage
+do component register multiple beans
+No, not directly. A single class annotated with @Component registers only one bean, which is an instance of that class itself.
 
-logger = logging.getLogger("azure.functions")
-logger.setLevel(logging.INFO)
+If you want to register multiple beans, each with their own logic or configuration, you need to use:
 
-def unpad(data):
-    padding_length = data[-1]
-    return data[:-padding_length]
+@Configuration
+public class AppConfig {
 
-def decrypt(data, key):
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted_data = cipher.decrypt(b64decode(data))
-    decrypted_data = unpad(decrypted_data)
-    return decrypted_data.decode()
-
-def get_openai_client(model_instance_name):
-    aes_key_base64 = os.environ["AES_KEY"]
-    encrypted_api_base = os.environ["ENCRYPTED_API_BASE"]
-    encrypted_api_key = os.environ["ENCRYPTED_API_KEY"]
-    api_version = os.environ["AZURE_API_VERSION"]
-
-    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
-
-    if not decrypted_api_base.endswith('/'):
-        decrypted_api_base += '/'
-
-    return AzureChatOpenAI(
-        deployment_name=model_instance_name,
-        openai_api_base=decrypted_api_base,
-        openai_api_key=decrypted_api_key,
-        openai_api_version=api_version
-    )
-
-def detect_file_type(file_content):
-    if re.search(r"^(%RAML)|(^#%RAML)", file_content.strip(), re.IGNORECASE):
-        return "raml"
-    elif "<xs:schema" in file_content or "http://www.w3.org/2001/XMLSchema" in file_content:
-        return "xsd"
-    return "unknown"
-
-def get_instruction_and_prompt(input_type, custom_prompt=None):
-    if input_type == "/sampleforraml":
-        instruction = (
-            "You are an expert in analysing the RAML and generating the payload from the RAML. "
-            "Please analyze the RAML and generate the sample payload which will honor all the rules. "
-            "Only return a valid JSON object or JSON array. Do NOT include markdown or extra text."
-        )
-        default_prompt = "Please generate one JSON payload from the following RAML:"
-        content_type = "application/json"
-    elif input_type == "/sampleforxsd":
-        instruction = (
-            "You are an expert in analysing the XSD and generating the payload from the XSD. "
-            "Please analyze the XSD and generate the sample payload which will honor all the rules. "
-            "Only return XML output. Do NOT include markdown or extra text."
-        )
-        default_prompt = "Please generate one XML payload for the following XSD:"
-        content_type = "application/xml"
-    else:
-        raise ValueError("Unsupported input type")
-
-    return {
-        "instruction": instruction,
-        "prompt": custom_prompt or default_prompt,
-        "content_type": content_type
+    @Bean
+    public RestTemplate restTemplate() {
+        return new RestTemplate();
     }
 
-def extract_json_from_response(text):
-    try:
-        return json.loads(text)
-    except:
-        pass
+    @Bean
+    public ObjectMapper objectMapper() {
+        return new ObjectMapper();
+    }
+}
 
-    json_matches = re.findall(r"```json(.*?)```", text, re.DOTALL | re.IGNORECASE)
-    for match in json_matches:
-        try:
-            return json.loads(match.strip())
-        except:
-            continue
+What is Spring Boot Admin?
+Spring Boot Admin is a web-based dashboard for managing and monitoring Spring Boot applications in real-time. It gives you a centralized UI to view the health, metrics, logs, environment variables, and other actuator endpoints of your services.
 
-    obj_match = re.search(r"(\{.*\})", text, re.DOTALL)
-    if obj_match:
-        try:
-            return json.loads(obj_match.group(1))
-        except:
-            pass
 
-    arr_match = re.search(r"(\[.*\])", text, re.DOTALL)
-    if arr_match:
-        try:
-            return json.loads(arr_match.group(1))
-        except:
-            pass
+<!-- pom.xml -->
+<dependency>
+    <groupId>de.codecentric</groupId>
+    <artifactId>spring-boot-admin-starter-server</artifactId>
+</dependency>
 
-    return None
+// AdminServerApplication.java
+@SpringBootApplication
+@EnableAdminServer
+public class AdminServerApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(AdminServerApplication.class, args);
+    }
+}
 
-def main(req: HttpRequest) -> HttpResponse:
-    try:
-        input_value = req.params.get("input")
-        custom_prompt = req.params.get("prompt")
+“Spring Boot Admin provides a central dashboard to monitor and manage Spring Boot apps in real-time using Spring Actuator. It helps us visualize health, metrics, and logs, especially useful in microservices environments
 
-        if not input_value:
-            return HttpResponse(json.dumps({"error": "'input' parameter is missing"}), status_code=400)
+Actuator = raw metrics provider
+Spring Boot Admin = GUI built on top of Actuator
 
-        model_instance_name = req.headers.get("model_instance_name")
-        if not model_instance_name:
-            return HttpResponse(json.dumps({"error": "'model_instance_name' header is missing"}), status_code=400)
 
-        count = int(req.headers.get("count", "1"))
+Q: What is a memory leak in Java? How do you detect and fix it?
+A: A memory leak occurs when objects are no longer needed but still referenced, preventing GC. I use tools like VisualVM or Eclipse MAT to detect leaks by analyzing heap dumps. To fix them, I look for static references, long-living collections, or unremoved listeners.
+1.	
 
-        file_content = req.get_body().decode("utf-8")
-        file_type = detect_file_type(file_content)
+What are different GC algorithms in Java?
+A: Serial GC (simple, single-threaded), Parallel GC (multi-threaded), CMS (concurrent, now deprecated), G1 (region-based, default in Java 9+), ZGC and Shenandoah (for ultra-low latency and large heaps). G1 is most commonly used today as it balances throughput and pause time.
 
-        if input_value == "/sampleforraml" and file_type != "raml":
-            return HttpResponse(json.dumps({"error": "Only RAML or RAML-like .txt content is allowed"}), status_code=400)
-        if input_value == "/sampleforxsd" and file_type != "xsd":
-            return HttpResponse(json.dumps({"error": "Only XSD or XSD-like .txt content is allowed"}), status_code=400)
+Young Generation:
+o	Newly created objects.
+o	Subdivided into Eden, Survivor S0, Survivor S1.
+o	Minor GC happens here (frequent, fast).
+2.	Old Generation:
+o	Long-lived objects (promoted from young).
+o	Full GC happens here (less frequent, more expensive).
+3.	Metaspace:
+o	Stores class metadata (replaced PermGen in Java 8).
 
-        prompt_data = get_instruction_and_prompt(input_value, custom_prompt)
-        client = get_openai_client(model_instance_name)
 
-        results = []
-        for i in range(count):
-            message = [
-                HumanMessage(content=prompt_data["instruction"]),
-                HumanMessage(content=prompt_data["prompt"] + "\n\n" + file_content)
-            ]
-            response = client.invoke(message)
+when sql and no sql 
+I choose SQL when I need transactional integrity and complex querying. I choose NoSQL for scale, speed, or when the schema is flexible — for example, storing logs, analytics, or JSON documents.”
+Choosing between SQL (relational) and NoSQL (non-relational) databases depends on the type of data, scalability needs, query complexity, and consistency requirements of your application.
 
-            if input_value == "/sampleforraml":
-                parsed = extract_json_from_response(response.content.strip())
-                if parsed is not None:
-                    results.append(parsed)
-                else:
-                    logger.warning(f"Failed to parse JSON from response {i+1}")
-            else:
-                results.append(response.content.strip())
+✅ When to Use SQL (Relational DBs)
+💾 Examples: MySQL, PostgreSQL, Oracle, SQL Server
+📌 Use when:
+1.	Structured data with clear schema
+o	Tables with columns and fixed data types
+2.	Strong data consistency is critical
+o	E.g., banking, payments, inventory
+3.	Complex JOINs and relationships are needed
+o	Normalized tables with foreign keys
+4.	ACID transactions are important
+o	Atomicity, Consistency, Isolation, Durability
+5.	Predefined schema and data doesn’t change frequently
+✅ Real-World Examples:
+•	Banking systems (transaction accuracy is crucial)
+•	E-commerce order/invoice processing
+•	HR and payroll management
 
-        if input_value == "/sampleforraml":
-            return HttpResponse(json.dumps(results, indent=2), mimetype=prompt_data["content_type"])
-        else:
-            return HttpResponse("\n\n".join(results), mimetype=prompt_data["content_type"])
 
-    except Exception as e:
-        logger.exception("Error processing request")
-        return HttpResponse(json.dumps({"error": str(e)}), status_code=500)
+
+✅ When to Use NoSQL (Non-Relational DBs)
+💾 Examples:
+•	Document: MongoDB, CouchDB
+•	Key-Value: Redis, DynamoDB
+•	Column Store: Cassandra, HBase
+•	Graph: Neo4j
+📌 Use when:
+1.	Schema-less or semi-structured data
+o	JSON, XML, logs, flexible fields
+2.	High scalability and large volume of data
+o	Horizontal scaling (adding more servers)
+3.	Fast read/write access
+o	Real-time analytics, caching
+4.	Frequent schema changes expected
+5.	High availability with eventual consistency is okay
+o	E.g., social media timelines
+✅ Real-World Examples:
+•	Product catalogs (each product may have different fields)
+•	IoT data storage (high velocity, variable format)
+•	Real-time analytics dashboards
+•	Chat or messaging systems
+
