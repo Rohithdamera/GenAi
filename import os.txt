@@ -29,8 +29,7 @@ def find_all_mule_xml_files(folder_path):
     return xml_files
 
 # Summarize content of one XML file
-def summarize_xml_file(xml_path):
-    client = get_openai_client()
+def summarize_xml_file(xml_path, client):
     try:
         tree = ET.parse(xml_path)
         root = tree.getroot()
@@ -41,20 +40,19 @@ def summarize_xml_file(xml_path):
         header_prompt = (
             "You are an expert in analyzing MuleSoft XML configurations. "
             "Analyze the header of this XML file, including root tag and namespaces, "
-            "and explain its purpose, usage, and significance in the context of MuleSoft. Use examples where applicable."
+            "and explain its purpose, usage, and significance in the context of MuleSoft."
         )
 
         body_prompt = (
             "Now analyze the entire body of the MuleSoft XML configuration. "
             "Describe each component, connector, and transformation. "
-            "Explain how data flows, how processors interact, and the logic behind each step. Be thorough and detailed."
+            "Explain how data flows, how processors interact, and the logic behind each step."
         )
 
         header_summary = get_summary_from_openai(client, header_prompt, header)
         body_summary = get_summary_from_openai(client, body_prompt, body)
 
-        final_summary = combine_summaries(header_summary, body_summary)
-        return final_summary
+        return combine_summaries(header_summary, body_summary)
 
     except ET.ParseError as e:
         return f"Error parsing {xml_path}: {str(e)}"
@@ -63,8 +61,12 @@ def summarize_xml_file(xml_path):
 
 # Send prompt to Azure OpenAI
 def get_summary_from_openai(client, prompt, content):
-    response = client.invoke([HumanMessage(content=prompt + "\n\n" + content)])
-    return response.content
+    try:
+        messages = [HumanMessage(content=prompt + "\n\n" + content)]
+        response = client.invoke(messages)
+        return response.content
+    except Exception as e:
+        return f"[ERROR: Failed to summarize content] {str(e)}"
 
 # Combine header and body summaries
 def combine_summaries(header_summary, body_summary):
@@ -72,9 +74,22 @@ def combine_summaries(header_summary, body_summary):
         f"## Header Analysis ##\n{header_summary}\n\n"
         f"## Body Analysis ##\n{body_summary}\n\n"
         f"## Final Insights ##\n"
-        "Combine your understanding from the header and body to explain the overall purpose of the XML file. "
-        "Include the type of flow, data source/target, and main business logic. Be concise but comprehensive."
+        "This XML defines a structured MuleSoft flow. Review the above Header and Body sections for detailed insight.\n"
     )
+
+# Create final one-pager summary from all XML summaries
+def summarize_all_collected_content(client, all_summaries):
+    combined_content = "\n\n".join(all_summaries)
+    final_prompt = (
+        "You are an expert in analyzing Mulesoft XML configuration files used in integration applications. "
+        "Analyze the following XML content thoroughly. Explain the flow logic, processors, components used, "
+        "transformations, and the data processing pipeline. Mention important elements such as HTTP listeners, "
+        "set-payloads, transformations, loggers, connectors, and any conditional logic. "
+        "The summary should be technical but readable, detailed enough for an integration developer to understand the entire logic, "
+        "and at least 3x longer than the XML file in terms of insight and explanation."
+    )
+    summary = get_summary_from_openai(client, final_prompt, combined_content)
+    return summary
 
 # Main execution
 if __name__ == "__main__":
@@ -86,9 +101,20 @@ if __name__ == "__main__":
         if not xml_files:
             print("No MuleSoft XML files found in the specified project.")
         else:
+            client = get_openai_client()
+            xml_summaries = []
+
             for xml_path in xml_files:
-                print(f"\nProcessing: {xml_path}")
-                summary = summarize_xml_file(xml_path)
-                print(f"\nSummary for {os.path.basename(xml_path)}:\n{summary}\n" + "-"*100)
+                print(f"Processing: {xml_path}")
+                summary = summarize_xml_file(xml_path, client)
+                xml_summaries.append(summary)
+
+            print("\nAll individual XML files processed.")
+            print("Now generating ONE-PAGE technical summary...")
+
+            final_summary = summarize_all_collected_content(client, xml_summaries)
+            print("\n====== FINAL ONE-PAGER SUMMARY ======\n")
+            print(final_summary)
+
     except Exception as e:
         print(f"An error occurred: {str(e)}")
