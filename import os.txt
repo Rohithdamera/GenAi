@@ -1,107 +1,110 @@
-do component register multiple beans
-No, not directly. A single class annotated with @Component registers only one bean, which is an instance of that class itself.
+import os
+import xml.etree.ElementTree as ET
+from langchain_openai import AzureChatOpenAI
+from langchain.schema import HumanMessage
 
-If you want to register multiple beans, each with their own logic or configuration, you need to use:
+# Azure OpenAI configuration
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        deployment_name="Fourth_Chatbot",
+        openai_api_key="",
+        openai_api_version="2024-08-01-preview",
+        openai_api_type="azure",
+        max_tokens=1200, # max tockens input and output for Longer responses
+        temperature=1.0,  #  Controls the randomness of the words in the output
+        top_p=0.9,        #   More creative, less focused
+        frequency_penalty=0.2, #Less repeated words.
+        presence_penalty=0.1    #More topic variety
+    )
 
-@Configuration
-public class AppConfig {
+# Locate XML file and extract DWL references
+def create_boomi_xml_chain(folder_path):
+    for root, _, files in os.walk(folder_path):
+        if "mule" in root.lower():
+            for file in files:
+                if file.endswith(".xml"):
+                    xml_file_path = os.path.join(root, file)
+                    print(f"Found XML file: {xml_file_path}")
+                    dwl_files = extract_dwl_files_from_xml(xml_file_path)
+                    if dwl_files:
+                        print(f"Found DWL files: {', '.join(dwl_files)}")
+                        return dwl_files
+                    return "No DWL files referenced in the XML."
+    raise FileNotFoundError("No XML file found in the mule folder.")
 
-    @Bean
-    public RestTemplate restTemplate() {
-        return new RestTemplate();
-    }
+# Parse XML and find DWL file references
+def extract_dwl_files_from_xml(xml_file_path):
+    dwl_files = []
+    try:
+        tree = ET.parse(xml_file_path)
+        root = tree.getroot()
+        namespaces = {'ee': 'http://www.mulesoft.org/schema/mule/ee/core'}
+        for elem in root.findall(".//ee:set-payload", namespaces):
+            resource = elem.get("resource")
+            if resource and resource.endswith(".dwl"):
+                dwl_files.append(resource)
+    except ET.ParseError as e:
+        print(f"Error parsing XML file: {e}")
+    return dwl_files
 
-    @Bean
-    public ObjectMapper objectMapper() {
-        return new ObjectMapper();
-    }
-}
+# Locate and summarize DWL file
+def summarize_dwl_file(dwl_file_name, folder_path):
+    for root, _, files in os.walk(folder_path):
+        if dwl_file_name in files:
+            dwl_file_path = os.path.join(root, dwl_file_name)
+            print(f"Found DWL file: {dwl_file_path}")
+            return summarize_file_content(dwl_file_path)
+    return f"DWL file not found: {dwl_file_name}"
 
-What is Spring Boot Admin?
-Spring Boot Admin is a web-based dashboard for managing and monitoring Spring Boot applications in real-time. It gives you a centralized UI to view the health, metrics, logs, environment variables, and other actuator endpoints of your services.
+# Read and summarize DWL file content
+def summarize_file_content(file_path):
+    client = get_openai_client()
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as dwl_file:
+            content = dwl_file.read()
+        header = content.split("%%")[0]
+        body = content.split("%%")[1] if "%%" in content else content
 
+        header_prompt = (
+            "Analyze the header of this DataWeave script in great detail. For each library, function, and variable, "
+            "explain its role and relevance in at least 5000 words. Provide real-world examples where possible."
+        )
+        body_prompt = (
+            "Analyze the body of this DataWeave script comprehensively. For every transformation, describe the logic "
+            "step-by-step, and explain how it processes data and ensure the explanation is at least approximately 2x the length of the body content."
+        )
 
-<!-- pom.xml -->
-<dependency>
-    <groupId>de.codecentric</groupId>
-    <artifactId>spring-boot-admin-starter-server</artifactId>
-</dependency>
+        header_summary = get_summary_from_openai(client, header_prompt, header)
+        body_summary = get_summary_from_openai(client, body_prompt, body)
+        return combine_summaries(header_summary, body_summary)
+    except FileNotFoundError:
+        return f"Error: File {file_path} not found."
 
-// AdminServerApplication.java
-@SpringBootApplication
-@EnableAdminServer
-public class AdminServerApplication {
-    public static void main(String[] args) {
-        SpringApplication.run(AdminServerApplication.class, args);
-    }
-}
+# Send prompt to Azure OpenAI
+def get_summary_from_openai(client, prompt, content):
+    response = client.invoke([HumanMessage(content=prompt + "\n\n" + content)])
+    return response.content
 
-“Spring Boot Admin provides a central dashboard to monitor and manage Spring Boot apps in real-time using Spring Actuator. It helps us visualize health, metrics, and logs, especially useful in microservices environments
+# Combine header and body summaries
+def combine_summaries(header_summary, body_summary):
+    final_prompt = (
+        "Combine all sections (Header Summary:, Body Summary:) without losing any information or context with detailed description approximately 3x the combined length of the header and body content."
+    )
+    return f"Header Summary:\n{header_summary}\n\nBody Summary:\n{body_summary}"
 
-Actuator = raw metrics provider
-Spring Boot Admin = GUI built on top of Actuator
-
-
-Q: What is a memory leak in Java? How do you detect and fix it?
-A: A memory leak occurs when objects are no longer needed but still referenced, preventing GC. I use tools like VisualVM or Eclipse MAT to detect leaks by analyzing heap dumps. To fix them, I look for static references, long-living collections, or unremoved listeners.
-1.	
-
-What are different GC algorithms in Java?
-A: Serial GC (simple, single-threaded), Parallel GC (multi-threaded), CMS (concurrent, now deprecated), G1 (region-based, default in Java 9+), ZGC and Shenandoah (for ultra-low latency and large heaps). G1 is most commonly used today as it balances throughput and pause time.
-
-Young Generation:
-o	Newly created objects.
-o	Subdivided into Eden, Survivor S0, Survivor S1.
-o	Minor GC happens here (frequent, fast).
-2.	Old Generation:
-o	Long-lived objects (promoted from young).
-o	Full GC happens here (less frequent, more expensive).
-3.	Metaspace:
-o	Stores class metadata (replaced PermGen in Java 8).
-
-
-when sql and no sql 
-I choose SQL when I need transactional integrity and complex querying. I choose NoSQL for scale, speed, or when the schema is flexible — for example, storing logs, analytics, or JSON documents.”
-Choosing between SQL (relational) and NoSQL (non-relational) databases depends on the type of data, scalability needs, query complexity, and consistency requirements of your application.
-
-✅ When to Use SQL (Relational DBs)
-💾 Examples: MySQL, PostgreSQL, Oracle, SQL Server
-📌 Use when:
-1.	Structured data with clear schema
-o	Tables with columns and fixed data types
-2.	Strong data consistency is critical
-o	E.g., banking, payments, inventory
-3.	Complex JOINs and relationships are needed
-o	Normalized tables with foreign keys
-4.	ACID transactions are important
-o	Atomicity, Consistency, Isolation, Durability
-5.	Predefined schema and data doesn’t change frequently
-✅ Real-World Examples:
-•	Banking systems (transaction accuracy is crucial)
-•	E-commerce order/invoice processing
-•	HR and payroll management
-
-
-
-✅ When to Use NoSQL (Non-Relational DBs)
-💾 Examples:
-•	Document: MongoDB, CouchDB
-•	Key-Value: Redis, DynamoDB
-•	Column Store: Cassandra, HBase
-•	Graph: Neo4j
-📌 Use when:
-1.	Schema-less or semi-structured data
-o	JSON, XML, logs, flexible fields
-2.	High scalability and large volume of data
-o	Horizontal scaling (adding more servers)
-3.	Fast read/write access
-o	Real-time analytics, caching
-4.	Frequent schema changes expected
-5.	High availability with eventual consistency is okay
-o	E.g., social media timelines
-✅ Real-World Examples:
-•	Product catalogs (each product may have different fields)
-•	IoT data storage (high velocity, variable format)
-•	Real-time analytics dashboards
-•	Chat or messaging systems
-
+# Main execution
+if __name__ == "__main__":
+    root_folder_path = r"C:\Users\rdamera\Downloads\concur-journalentry-srvc-app\concur-journalentry-srvc-app"
+    try:
+        print("Finding DWL files by parsing XML ")
+        dwl_files = create_boomi_xml_chain(root_folder_path)
+        if isinstance(dwl_files, str):
+            print(dwl_files)
+        else:
+            for dwl_file in dwl_files:
+                print(f"\nsummarizing DWL file: {dwl_file}")
+                summary = summarize_dwl_file(dwl_file, root_folder_path)
+                print(f"\nSummary of {dwl_file}:\n{summary}")
+    except Exception as e:
+        print(f"An error occurred: {e}")
