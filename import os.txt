@@ -8,78 +8,58 @@ def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="Fourth_Chatbot",
-        openai_api_key="",
+        openai_api_key="",  # Insert your Azure OpenAI key here
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
-        max_tokens=1200, # max tockens input and output for Longer responses
-        temperature=1.0,  #  Controls the randomness of the words in the output
-        top_p=0.9,        #   More creative, less focused
-        frequency_penalty=0.2, #Less repeated words.
-        presence_penalty=0.1    #More topic variety
+        max_tokens=2000,
+        temperature=0.7,
+        top_p=0.9,
+        frequency_penalty=0.2,
+        presence_penalty=0.1
     )
 
-# Locate XML file and extract DWL references
-def create_boomi_xml_chain(folder_path):
+# Find all XML files inside "mule" folders recursively
+def find_all_mule_xml_files(folder_path):
+    xml_files = []
     for root, _, files in os.walk(folder_path):
         if "mule" in root.lower():
             for file in files:
                 if file.endswith(".xml"):
-                    xml_file_path = os.path.join(root, file)
-                    print(f"Found XML file: {xml_file_path}")
-                    dwl_files = extract_dwl_files_from_xml(xml_file_path)
-                    if dwl_files:
-                        print(f"Found DWL files: {', '.join(dwl_files)}")
-                        return dwl_files
-                    return "No DWL files referenced in the XML."
-    raise FileNotFoundError("No XML file found in the mule folder.")
+                    xml_files.append(os.path.join(root, file))
+    return xml_files
 
-# Parse XML and find DWL file references
-def extract_dwl_files_from_xml(xml_file_path):
-    dwl_files = []
-    try:
-        tree = ET.parse(xml_file_path)
-        root = tree.getroot()
-        namespaces = {'ee': 'http://www.mulesoft.org/schema/mule/ee/core'}
-        for elem in root.findall(".//ee:set-payload", namespaces):
-            resource = elem.get("resource")
-            if resource and resource.endswith(".dwl"):
-                dwl_files.append(resource)
-    except ET.ParseError as e:
-        print(f"Error parsing XML file: {e}")
-    return dwl_files
-
-# Locate and summarize DWL file
-def summarize_dwl_file(dwl_file_name, folder_path):
-    for root, _, files in os.walk(folder_path):
-        if dwl_file_name in files:
-            dwl_file_path = os.path.join(root, dwl_file_name)
-            print(f"Found DWL file: {dwl_file_path}")
-            return summarize_file_content(dwl_file_path)
-    return f"DWL file not found: {dwl_file_name}"
-
-# Read and summarize DWL file content
-def summarize_file_content(file_path):
+# Summarize content of one XML file
+def summarize_xml_file(xml_path):
     client = get_openai_client()
     try:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as dwl_file:
-            content = dwl_file.read()
-        header = content.split("%%")[0]
-        body = content.split("%%")[1] if "%%" in content else content
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+
+        header = f"Root Tag: {root.tag}\nNamespaces: {root.attrib}\n"
+        body = ET.tostring(root, encoding='unicode', method='xml')
 
         header_prompt = (
-            "Analyze the header of this DataWeave script in great detail. For each library, function, and variable, "
-            "explain its role and relevance in at least 5000 words. Provide real-world examples where possible."
+            "You are an expert in analyzing MuleSoft XML configurations. "
+            "Analyze the header of this XML file, including root tag and namespaces, "
+            "and explain its purpose, usage, and significance in the context of MuleSoft. Use examples where applicable."
         )
+
         body_prompt = (
-            "Analyze the body of this DataWeave script comprehensively. For every transformation, describe the logic "
-            "step-by-step, and explain how it processes data and ensure the explanation is at least approximately 2x the length of the body content."
+            "Now analyze the entire body of the MuleSoft XML configuration. "
+            "Describe each component, connector, and transformation. "
+            "Explain how data flows, how processors interact, and the logic behind each step. Be thorough and detailed."
         )
 
         header_summary = get_summary_from_openai(client, header_prompt, header)
         body_summary = get_summary_from_openai(client, body_prompt, body)
-        return combine_summaries(header_summary, body_summary)
-    except FileNotFoundError:
-        return f"Error: File {file_path} not found."
+
+        final_summary = combine_summaries(header_summary, body_summary)
+        return final_summary
+
+    except ET.ParseError as e:
+        return f"Error parsing {xml_path}: {str(e)}"
+    except Exception as e:
+        return f"Unexpected error processing {xml_path}: {str(e)}"
 
 # Send prompt to Azure OpenAI
 def get_summary_from_openai(client, prompt, content):
@@ -88,23 +68,27 @@ def get_summary_from_openai(client, prompt, content):
 
 # Combine header and body summaries
 def combine_summaries(header_summary, body_summary):
-    final_prompt = (
-        "Combine all sections (Header Summary:, Body Summary:) without losing any information or context with detailed description approximately 3x the combined length of the header and body content."
+    return (
+        f"## Header Analysis ##\n{header_summary}\n\n"
+        f"## Body Analysis ##\n{body_summary}\n\n"
+        f"## Final Insights ##\n"
+        "Combine your understanding from the header and body to explain the overall purpose of the XML file. "
+        "Include the type of flow, data source/target, and main business logic. Be concise but comprehensive."
     )
-    return f"Header Summary:\n{header_summary}\n\nBody Summary:\n{body_summary}"
 
 # Main execution
 if __name__ == "__main__":
-    root_folder_path = r"C:\Users\rdamera\Downloads\concur-journalentry-srvc-app\concur-journalentry-srvc-app"
+    project_root = r"C:\Users\rdamera\Downloads\concur-journalentry-srvc-app\concur-journalentry-srvc-app"
     try:
-        print("Finding DWL files by parsing XML ")
-        dwl_files = create_boomi_xml_chain(root_folder_path)
-        if isinstance(dwl_files, str):
-            print(dwl_files)
+        print("Scanning for MuleSoft XML files...\n")
+        xml_files = find_all_mule_xml_files(project_root)
+
+        if not xml_files:
+            print("No MuleSoft XML files found in the specified project.")
         else:
-            for dwl_file in dwl_files:
-                print(f"\nsummarizing DWL file: {dwl_file}")
-                summary = summarize_dwl_file(dwl_file, root_folder_path)
-                print(f"\nSummary of {dwl_file}:\n{summary}")
+            for xml_path in xml_files:
+                print(f"\nProcessing: {xml_path}")
+                summary = summarize_xml_file(xml_path)
+                print(f"\nSummary for {os.path.basename(xml_path)}:\n{summary}\n" + "-"*100)
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f"An error occurred: {str(e)}")
