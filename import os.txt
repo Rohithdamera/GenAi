@@ -8,7 +8,7 @@ def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="Fourth_Chatbot",
-        openai_api_key="",  # Insert your Azure OpenAI key here
+        openai_api_key="", 
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
         max_tokens=2000,
@@ -18,14 +18,16 @@ def get_openai_client():
         presence_penalty=0.1
     )
 
-# Find all XML files inside "mule" folders recursively
+# Find all XML files inside folders named exactly "mule"
 def find_all_mule_xml_files(folder_path):
     xml_files = []
-    for root, _, files in os.walk(folder_path):
-        if "mule" in root.lower():
-            for file in files:
-                if file.endswith(".xml"):
-                    xml_files.append(os.path.join(root, file))
+    for root, dirs, files in os.walk(folder_path):
+        # Check if the current folder is named "mule"
+        if os.path.basename(root).lower() == "mule":
+            for sub_root, _, sub_files in os.walk(root):
+                for file in sub_files:
+                    if file.endswith(".xml"):
+                        xml_files.append(os.path.join(sub_root, file))
     return xml_files
 
 # Summarize content of one XML file
@@ -81,12 +83,11 @@ def combine_summaries(header_summary, body_summary):
 def summarize_all_collected_content(client, all_summaries):
     combined_content = "\n\n".join(all_summaries)
     final_prompt = (
-        "You are an expert in analyzing Mulesoft XML configuration files used in integration applications. "
-        "Analyze the following XML content thoroughly. Explain the flow logic, processors, components used, "
-        "transformations, and the data processing pipeline. Mention important elements such as HTTP listeners, "
-        "set-payloads, transformations, loggers, connectors, and any conditional logic. "
-        "The summary should be technical but readable, detailed enough for an integration developer to understand the entire logic, "
-        "and at least 3x longer than the XML file in terms of insight and explanation."
+        "You are an expert in summarizing complex XML-based MuleSoft configuration files used in integration applications. "
+        "Your goal is to explain the content in a way that is clear and understandable for all types of users — including beginners, non-technical stakeholders, and experienced developers. "
+        "Carefully analyze the structure and logic of the XML file. Describe the flow of data, "
+        "the purpose of each processor or component (such as HTTP listeners, set-payloads, transformations, loggers, connectors, and conditional logic), and how they work together. "
+        "Your explanation should be detailed, insightful, and at least 3x longer than the original XML content. Focus on making the summary educational, easy to follow, and technically accurate so that anyone reading it can understand the integration logic and purpose of the flow."
     )
     summary = get_summary_from_openai(client, final_prompt, combined_content)
     return summary
@@ -99,13 +100,17 @@ if __name__ == "__main__":
         xml_files = find_all_mule_xml_files(project_root)
 
         if not xml_files:
-            print("No MuleSoft XML files found in the specified project.")
+            print("No MuleSoft XML files found in any 'mule' folder.")
         else:
+            print(f"Found {len(xml_files)} XML file(s):")
+            for file in xml_files:
+                print(f"- {os.path.basename(file)}")
+
             client = get_openai_client()
             xml_summaries = []
 
             for xml_path in xml_files:
-                print(f"Processing: {xml_path}")
+                print(f"\nProcessing: {xml_path}")
                 summary = summarize_xml_file(xml_path, client)
                 xml_summaries.append(summary)
 
