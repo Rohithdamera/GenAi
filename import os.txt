@@ -1,3 +1,8 @@
+
+
+
+
+
 import os
 import xml.etree.ElementTree as ET
 from langchain_openai import AzureChatOpenAI
@@ -8,7 +13,7 @@ def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="Fourth_Chatbot",
-        openai_api_key="",  # Add your key here
+        openai_api_key="",  # Add your actual API key
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
         max_tokens=2000,
@@ -18,20 +23,25 @@ def get_openai_client():
         presence_penalty=0.1
     )
 
-# Find all XML files under src/main/mule folders
+# Only find XML files inside folders that match src/main/mule or subfolders
 def find_all_mule_xml_files(folder_path):
     xml_files = []
 
     for root, dirs, files in os.walk(folder_path):
-        # Normalize path parts
-        parts = os.path.normpath(root).split(os.sep)
+        normalized_root = os.path.normpath(root)
+        if normalized_root.endswith(os.path.normpath(os.path.join("src", "main", "mule"))):
+            # Add .xml files directly under src/main/mule
+            for file in files:
+                if file.endswith(".xml"):
+                    xml_files.append(os.path.join(root, file))
 
-        # Check if path matches .../src/main/mule
-        if len(parts) >= 3 and parts[-3:] == ['src', 'main', 'mule']:
+            # Add .xml files in subfolders of src/main/mule
             for sub_root, _, sub_files in os.walk(root):
-                for file in sub_files:
-                    if file.endswith(".xml"):
-                        xml_files.append(os.path.join(sub_root, file))
+                if sub_root != root:
+                    for file in sub_files:
+                        if file.endswith(".xml"):
+                            xml_files.append(os.path.join(sub_root, file))
+            break  # stop after first valid src/main/mule
 
     return xml_files
 
@@ -106,7 +116,7 @@ if __name__ == "__main__":
         xml_files = find_all_mule_xml_files(project_root)
 
         if not xml_files:
-            print("No MuleSoft XML files found under any 'src/main/mule' path.")
+            print("No MuleSoft XML files found in 'src/main/mule' path.")
         else:
             print(f"Found {len(xml_files)} XML file(s):")
             for file in xml_files:
