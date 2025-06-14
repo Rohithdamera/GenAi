@@ -1,27 +1,30 @@
 import os
 import xml.etree.ElementTree as ET
-from langchain_openai import AzureChatOpenAI
 from langchain.schema import HumanMessage
+from langchain_community.chat_models import AzureChatOpenAI
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.prebuilt import create_react_agent
 
-# Azure OpenAI configuration
-def get_openai_client():
+# === Setup Azure OpenAI client with LangGraph support ===
+def get_openai_model():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="Fourth_Chatbot",
-        openai_api_key="",  # Replace with your actual API key
+        openai_api_key="YOUR_API_KEY_HERE",  # 🔐 REPLACE WITH YOUR API KEY
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
-        max_tokens=2000,
         temperature=0.7,
         top_p=0.9,
         frequency_penalty=0.2,
-        presence_penalty=0.1
+        presence_penalty=0.1,
+        max_tokens=2000,
+        model_kwargs={"api_type": "azure"}
     )
 
-# Only find XML files inside folders that match src/main/mule or subfolders
+# === Find MuleSoft XML files inside src/main/mule ===
 def find_all_mule_xml_files(folder_path):
     xml_files = []
-
     for root, dirs, files in os.walk(folder_path):
         normalized_root = os.path.normpath(root)
         if normalized_root.endswith(os.path.normpath(os.path.join("src", "main", "mule"))):
@@ -34,11 +37,10 @@ def find_all_mule_xml_files(folder_path):
                         if file.endswith(".xml"):
                             xml_files.append(os.path.join(sub_root, file))
             break
-
     return xml_files
 
-# Summarize content of one XML file using a unified prompt
-def summarize_xml_file(xml_path, client):
+# === Summarize XML content via OpenAI ===
+def summarize_xml_file(xml_path, agent_executor, config):
     try:
         tree = ET.parse(xml_path)
         root = tree.getroot()
@@ -51,97 +53,73 @@ def summarize_xml_file(xml_path, client):
             "Use clear headings and bullet points where appropriate.\n\n" + xml_content
         )
 
-        return get_summary_from_openai(client, prompt)
+        response = ""
+        for step in agent_executor.stream({"messages": [HumanMessage(content=prompt)]}, config, stream_mode="values"):
+            response += step["messages"][-1].content
+
+        return response
 
     except ET.ParseError as e:
         return f"Error parsing {xml_path}: {str(e)}"
     except Exception as e:
         return f"Unexpected error processing {xml_path}: {str(e)}"
 
-# Send prompt to Azure OpenAI
-def get_summary_from_openai(client, prompt):
-    try:
-        messages = [HumanMessage(content=prompt)]
-        response = client.invoke(messages)
-        return response.content
-    except Exception as e:
-        return f"[ERROR: Failed to summarize content] {str(e)}"
-
-# Create final one-pager summary from all XML summaries
-def summarize_all_collected_content(client, all_summaries):
+# === Final One-Pager Summary from All XML Summaries ===
+def summarize_all_collected_content(all_summaries, agent_executor, config):
     combined_content = "\n\n".join(all_summaries)
     final_prompt = (
         "You are an expert in summarizing complex XML-based MuleSoft configuration files used in integration applications. "
         "Your goal is to explain the content in a way that is clear and understandable for all types of users — including beginners, non-technical stakeholders, and experienced developers. "
         "Carefully analyze the structure and logic of the XML file. Describe the flow of data, "
         "the purpose of each processor or component (such as HTTP listeners, set-payloads, transformations, loggers, connectors, and conditional logic), and how they work together. "
-        "Your explanation should be detailed, insightful, and at least 3x longer than the original XML content. Focus on making the summary educational, easy to follow, and technically accurate so that anyone reading it can understand the integration logic and purpose of the flow."
+        "Your explanation should be detailed, insightful, and at least 3x longer than the original XML content. "
+        "Focus on making the summary educational, easy to follow, and technically accurate so that anyone reading it can understand the integration logic and purpose of the flow."
     )
-    return get_summary_from_openai(client, final_prompt + "\n\n" + combined_content)
 
-# Main execution
+    full_input = final_prompt + "\n\n" + combined_content
+
+    response = ""
+    for step in agent_executor.stream({"messages": [HumanMessage(content=full_input)]}, config, stream_mode="values"):
+        response += step["messages"][-1].content
+
+    return response
+
+# === Main Execution ===
 if __name__ == "__main__":
     project_root = r"C:\Users\rdamera\Downloads\OrderManagement 1"
 
     try:
-        print("Scanning for MuleSoft XML files...\n")
+        print("🔍 Scanning for MuleSoft XML files...\n")
         xml_files = find_all_mule_xml_files(project_root)
 
         if not xml_files:
-            print("No MuleSoft XML files found in 'src/main/mule' path.")
+            print("⚠️ No MuleSoft XML files found in 'src/main/mule'.")
         else:
-            print(f"Found {len(xml_files)} XML file(s):")
+            print(f"✅ Found {len(xml_files)} XML file(s):")
             for file in xml_files:
                 print(f"- {os.path.basename(file)}")
 
-            client = get_openai_client()
-            xml_summaries = []
+            # === Set up LangGraph agent with memory and tools ===
+            memory = MemorySaver()
+            model = get_openai_model()
+            tools = [TavilySearchResults(max_results=2)]
+            agent_executor = create_react_agent(model, tools, checkpointer=memory)
+            config = {"configurable": {"thread_id": "project-session-123"}}
 
+            # === Summarize all XML files ===
+            xml_summaries = []
             for xml_path in xml_files:
-                print(f"\nProcessing: {xml_path}")
-                summary = summarize_xml_file(xml_path, client)
+                print(f"\n📝 Summarizing: {xml_path}")
+                summary = summarize_xml_file(xml_path, agent_executor, config)
                 xml_summaries.append(summary)
 
-            print("\nAll individual XML files processed.")
-            print("Now generating technical summary...\n")
+            print("\n📦 All individual XML files processed.")
+            print("🧠 Now generating consolidated technical summary...\n")
 
-            combined_summary = summarize_all_collected_content(client, xml_summaries)
-            print("====== FINAL TECHNICAL SUMMARY ======\n")
-            print(combined_summary)
+            final_summary = summarize_all_collected_content(xml_summaries, agent_executor, config)
+
+            print("====== 📄 FINAL TECHNICAL SUMMARY ======\n")
+            print(final_summary)
 
     except Exception as e:
-        print(f"An error occurred: {str(e)}")
-
-
-
-
-# Import relevant functionality
-from langchain_anthropic import ChatAnthropic
-from langchain_community.tools.tavily_search import TavilySearchResults
-from langchain_core.messages import HumanMessage
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.prebuilt import create_react_agent
-
-# Create the agent
-memory = MemorySaver()
-model = ChatAnthropic(model_name="claude-3-sonnet-20240229")
-search = TavilySearchResults(max_results=2)
-tools = [search]
-agent_executor = create_react_agent(model, tools, checkpointer=memory)
-
-# Use the agent
-config = {"configurable": {"thread_id": "abc123"}}
-for step in agent_executor.stream(
-    {"messages": [HumanMessage(content="hi im bob! and i live in sf")]},
-    config,
-    stream_mode="values",
-):
-    step["messages"][-1].pretty_print()
-
-
-for step in agent_executor.stream(
-    {"messages": [HumanMessage(content="whats the weather where I live?")]},
-    config,
-    stream_mode="values",
-):
-    step["messages"][-1].pretty_print()
+        print(f"❌ An error occurred: {str(e)}")
