@@ -1,6 +1,6 @@
 import os
 import xml.etree.ElementTree as ET
-from langchain_core.messages import HumanMessage
+from langchain.schema import HumanMessage
 from langchain_community.chat_models import AzureChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import create_react_agent
@@ -10,7 +10,7 @@ def get_openai_model():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="Fourth_Chatbot",
-        openai_api_key="YOUR_API_KEY_HERE",  # 🔐 Replace with your actual key
+        openai_api_key="YOUR_API_KEY_HERE",  # ✅ Replace with your Azure key
         openai_api_version="2024-08-01-preview",
         temperature=0.7,
         top_p=0.9,
@@ -44,46 +44,43 @@ def summarize_xml_file(xml_path, agent_executor, config):
         xml_content = ET.tostring(root, encoding='unicode', method='xml')
 
         prompt = (
-            "You are an expert in MuleSoft XML configuration. Analyze the following XML file and generate detailed documentation. "
-            "Focus on identifying and explaining flows, subflows, message flows, and global elements. "
-            "Describe their purpose, how they interact, and their role in the overall integration logic. "
-            "Use clear headings and bullet points where appropriate.\n\n" + xml_content
+            f"You are a MuleSoft integration expert. Given the following XML file, write a detailed, plain-English explanation "
+            f"of what it does. Focus on flows, subflows, connectors, logic, and how it fits in an integration architecture.\n\n"
+            f"### XML: {os.path.basename(xml_path)}\n"
+            f"{xml_content}\n\n"
+            f"Generate a helpful summary. Don't repeat the XML. Explain its structure and meaning clearly."
         )
 
         response = ""
         for step in agent_executor.stream({"messages": [HumanMessage(content=prompt)]}, config, stream_mode="values"):
             response += step["messages"][-1].content
 
-        return response
-
+        return f"\n---\n🧾 Summary of `{os.path.basename(xml_path)}`\n{response.strip()}"
     except ET.ParseError as e:
-        return f"Error parsing {xml_path}: {str(e)}"
+        return f"❌ Error parsing {xml_path}: {str(e)}"
     except Exception as e:
-        return f"Unexpected error processing {xml_path}: {str(e)}"
+        return f"❌ Unexpected error in {xml_path}: {str(e)}"
 
-# === Combine all summaries into a final summary ===
+# === Combine all summaries into a final explanation ===
 def summarize_all_collected_content(all_summaries, agent_executor, config):
     combined_content = "\n\n".join(all_summaries)
     final_prompt = (
-        "You are an expert in summarizing complex XML-based MuleSoft configuration files used in integration applications. "
-        "Your goal is to explain the content in a way that is clear and understandable for all types of users — including beginners, non-technical stakeholders, and experienced developers. "
-        "Carefully analyze the structure and logic of the XML file. Describe the flow of data, "
-        "the purpose of each processor or component (such as HTTP listeners, set-payloads, transformations, loggers, connectors, and conditional logic), and how they work together. "
-        "Your explanation should be detailed, insightful, and at least 3x longer than the original XML content. "
-        "Focus on making the summary educational, easy to follow, and technically accurate so that anyone reading it can understand the integration logic and purpose of the flow."
+        "You are a senior MuleSoft integration expert. Given the following summaries of various XML files, "
+        "write a detailed one-pager explaining how the entire integration system works. Focus on architecture, "
+        "flows, key processors, logic, error handling, and any API endpoints involved. Keep it accurate and helpful.\n\n"
+        "### XML Summaries:\n"
+        f"{combined_content}"
     )
 
-    full_input = final_prompt + "\n\n" + combined_content
-
     response = ""
-    for step in agent_executor.stream({"messages": [HumanMessage(content=full_input)]}, config, stream_mode="values"):
+    for step in agent_executor.stream({"messages": [HumanMessage(content=final_prompt)]}, config, stream_mode="values"):
         response += step["messages"][-1].content
 
-    return response
+    return response.strip()
 
 # === MAIN ===
 if __name__ == "__main__":
-    project_root = r"C:\Users\rdamera\Downloads\OrderManagement 1"  # 👈 Change if needed
+    project_root = r"C:\Users\rdamera\Downloads\OrderManagement 1"  # 👈 Your local path
 
     try:
         print("🔍 Scanning for MuleSoft XML files...\n")
@@ -96,26 +93,26 @@ if __name__ == "__main__":
             for file in xml_files:
                 print(f"- {os.path.basename(file)}")
 
-            # === Set up LangGraph agent (NO tools) ===
+            # === Create LangGraph agent with memory ===
             memory = MemorySaver()
             model = get_openai_model()
-            tools = []  # 🧹 Clean: no Tavily or web tools
+            tools = []  # Tools can be added if needed in future
             agent_executor = create_react_agent(model, tools, checkpointer=memory)
-            config = {"configurable": {"thread_id": "project-session-123"}}
+            config = {"configurable": {"thread_id": "mule-session-001"}}
 
             # === Summarize each XML ===
             xml_summaries = []
             for xml_path in xml_files:
-                print(f"\n📝 Summarizing: {xml_path}")
+                print(f"\n📝 Summarizing: {os.path.basename(xml_path)}")
                 summary = summarize_xml_file(xml_path, agent_executor, config)
                 xml_summaries.append(summary)
 
-            print("\n📦 All individual XML files processed.")
+            print("\n📦 Finished summarizing all files.")
             print("🧠 Generating final one-pager summary...\n")
 
             final_summary = summarize_all_collected_content(xml_summaries, agent_executor, config)
 
-            print("====== 📄 FINAL TECHNICAL SUMMARY ======\n")
+            print("====== 📄 FINAL ONE-PAGER DOCUMENTATION ======\n")
             print(final_summary)
 
     except Exception as e:
