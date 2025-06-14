@@ -1,1 +1,12 @@
-pip install langgraph langchain langchain-openai langchain-community tavily-python
+🔍 Scanning for MuleSoft XML files...
+
+✅ Found 6 XML file(s):
+- error-handler.xml
+- global.xml
+- Order.xml
+- API.xml
+- Ordering.xml
+- retryOrder.xml
+❌ An error occurred: 1 validation error for TavilySearchAPIWrapper
+  Value error, Did not find tavily_api_key, please add an environment variable `TAVILY_API_KEY` which contains it, or pass `tavily_api_key` as a named parameter. [type=value_error, input_value={}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.11/v/value_error
