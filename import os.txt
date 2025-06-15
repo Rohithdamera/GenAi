@@ -1,35 +1,29 @@
-            memory = MemorySaver()
-            model = get_openai_model()
-            tools = []  # Tools can be added if needed in future
-            agent_executor = create_react_agent(model, tools, checkpointer=memory)
-            config = {"configurable": {"thread_id": "mule-session-001"}}
-
-
-
 import os
 import xml.etree.ElementTree as ET
-from langchain_openai import AzureChatOpenAI
-from langchain.schema import HumanMessage
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Azure OpenAI configuration
+from langchain.chat_models import AzureChatOpenAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+
+# 🔐 Azure OpenAI Configuration
 def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="Fourth_Chatbot",
-        openai_api_key="",  # Replace with your actual API key
+        openai_api_key="",  # Replace with your actual key
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
-        max_tokens=2000,
         temperature=0.7,
+        max_tokens=2000,
         top_p=0.9,
         frequency_penalty=0.2,
         presence_penalty=0.1
     )
 
-# Only find XML files inside folders that match src/main/mule or subfolders
+# 🔍 Find all .xml files under src/main/mule and its subfolders
 def find_all_mule_xml_files(folder_path):
     xml_files = []
-
     for root, dirs, files in os.walk(folder_path):
         normalized_root = os.path.normpath(root)
         if normalized_root.endswith(os.path.normpath(os.path.join("src", "main", "mule"))):
@@ -37,85 +31,96 @@ def find_all_mule_xml_files(folder_path):
                 if file.endswith(".xml"):
                     xml_files.append(os.path.join(root, file))
             for sub_root, _, sub_files in os.walk(root):
-                if sub_root != root:
-                    for file in sub_files:
-                        if file.endswith(".xml"):
-                            xml_files.append(os.path.join(sub_root, file))
+                for file in sub_files:
+                    if file.endswith(".xml"):
+                        xml_files.append(os.path.join(sub_root, file))
             break
-
     return xml_files
 
-# Summarize content of one XML file using a unified prompt
-def summarize_xml_file(xml_path, client):
+# 📄 LLMChain for individual XML analysis
+def build_individual_chain(llm):
+    prompt_template = PromptTemplate(
+        input_variables=["xml_content"],
+        template="""You are an expert in MuleSoft XML configuration. Analyze the following XML file and generate detailed documentation.
+Focus on identifying and explaining flows, subflows, message flows, and global elements.
+Describe their purpose, how they interact, and their role in the overall integration logic.
+Use clear headings and bullet points where appropriate.
+
+{xml_content}
+"""
+    )
+    return LLMChain(llm=llm, prompt=prompt_template)
+
+# 📄 LLMChain for final summary
+def build_summary_chain(llm):
+    prompt_template = PromptTemplate(
+        input_variables=["combined_summaries"],
+        template="""You are an expert in summarizing complex XML-based MuleSoft configuration files used in integration applications.
+Your goal is to explain the content in a way that is clear and understandable for all types of users — including beginners, non-technical stakeholders, and experienced developers.
+Carefully analyze the structure and logic of the XML file. Describe the flow of data,
+the purpose of each processor or component (such as HTTP listeners, set-payloads, transformations, loggers, connectors, and conditional logic), and how they work together.
+Your explanation should be detailed, insightful, and at least 3x longer than the original XML content.
+Focus on making the summary educational, easy to follow, and technically accurate so that anyone reading it can understand the integration logic and purpose of the flow.
+
+{combined_summaries}
+"""
+    )
+    return LLMChain(llm=llm, prompt=prompt_template)
+
+# 🧠 Summarize one XML file using the chain
+def analyze_xml_file(xml_path, llm_chain):
     try:
         tree = ET.parse(xml_path)
         root = tree.getroot()
-        xml_content = ET.tostring(root, encoding='unicode', method='xml')
-
-        prompt = (
-            "You are an expert in MuleSoft XML configuration. Analyze the following XML file and generate detailed documentation. "
-            "Focus on identifying and explaining flows, subflows, message flows, and global elements. "
-            "Describe their purpose, how they interact, and their role in the overall integration logic. "
-            "Use clear headings and bullet points where appropriate.\n\n" + xml_content
-        )
-
-        return get_summary_from_openai(client, prompt)
-
+        xml_content = ET.tostring(root, encoding="unicode", method="xml")
+        return llm_chain.run(xml_content=xml_content)
     except ET.ParseError as e:
-        return f"Error parsing {xml_path}: {str(e)}"
+        return f"❌ Error parsing {xml_path}: {str(e)}"
     except Exception as e:
-        return f"Unexpected error processing {xml_path}: {str(e)}"
+        return f"❌ Unexpected error processing {xml_path}: {str(e)}"
 
-# Send prompt to Azure OpenAI
-def get_summary_from_openai(client, prompt):
-    try:
-        messages = [HumanMessage(content=prompt)]
-        response = client.invoke(messages)
-        return response.content
-    except Exception as e:
-        return f"[ERROR: Failed to summarize content] {str(e)}"
+# 🚀 Main Execution: Parallel XML Analysis + Final Summary
+def run_parallel_xml_analysis(project_path):
+    print("🔎 Scanning for MuleSoft XML files...\n")
+    xml_files = find_all_mule_xml_files(project_path)
 
-# Create final one-pager summary from all XML summaries
-def summarize_all_collected_content(client, all_summaries):
-    combined_content = "\n\n".join(all_summaries)
-    final_prompt = (
-        "You are an expert in summarizing complex XML-based MuleSoft configuration files used in integration applications. "
-        "Your goal is to explain the content in a way that is clear and understandable for all types of users — including beginners, non-technical stakeholders, and experienced developers. "
-        "Carefully analyze the structure and logic of the XML file. Describe the flow of data, "
-        "the purpose of each processor or component (such as HTTP listeners, set-payloads, transformations, loggers, connectors, and conditional logic), and how they work together. "
-        "Your explanation should be detailed, insightful, and at least 3x longer than the original XML content. Focus on making the summary educational, easy to follow, and technically accurate so that anyone reading it can understand the integration logic and purpose of the flow."
-    )
-    return get_summary_from_openai(client, final_prompt + "\n\n" + combined_content)
+    if not xml_files:
+        print("⚠️ No XML files found under 'src/main/mule'")
+        return
 
-# Main execution
-if __name__ == "__main__":
-    project_root = r"C:\Users\rdamera\Downloads\OrderManagement 1"
+    print(f"✅ Found {len(xml_files)} XML file(s):")
+    for path in xml_files:
+        print(f"  • {os.path.basename(path)}")
 
-    try:
-        print("Scanning for MuleSoft XML files...\n")
-        xml_files = find_all_mule_xml_files(project_root)
+    # Initialize OpenAI client and LLM chains
+    client = get_openai_client()
+    individual_chain = build_individual_chain(client)
+    summary_chain = build_summary_chain(client)
 
-        if not xml_files:
-            print("No MuleSoft XML files found in 'src/main/mule' path.")
-        else:
-            print(f"Found {len(xml_files)} XML file(s):")
-            for file in xml_files:
-                print(f"- {os.path.basename(file)}")
-
-            client = get_openai_client()
-            xml_summaries = []
-
-            for xml_path in xml_files:
-                print(f"\nProcessing: {xml_path}")
-                summary = summarize_xml_file(xml_path, client)
+    # Parallel processing of each file
+    xml_summaries = []
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            executor.submit(analyze_xml_file, path, individual_chain): path for path in xml_files
+        }
+        for future in as_completed(futures):
+            path = futures[future]
+            try:
+                summary = future.result()
+                print(f"\n✅ Processed: {path}")
                 xml_summaries.append(summary)
+            except Exception as e:
+                print(f"❌ Failed: {path} — {e}")
 
-            print("\nAll individual XML files processed.")
-            print("Now generating technical summary...\n")
+    print("\n📦 All XML files processed. Generating technical summary...\n")
 
-            combined_summary = summarize_all_collected_content(client, xml_summaries)
-            print("====== FINAL TECHNICAL SUMMARY ======\n")
-            print(combined_summary)
+    # Final summary chain
+    combined_content = "\n\n".join(xml_summaries)
+    final_result = summary_chain.run(combined_summaries=combined_content)
 
-    except Exception as e:
-        print(f"An error occurred: {str(e)}")
+    print("====== FINAL TECHNICAL SUMMARY ======\n")
+    print(final_result)
+
+# ✅ Example Usage
+if __name__ == "__main__":
+    run_parallel_xml_analysis(r"C:\Users\rdamera\Downloads\OrderManagement 1")
