@@ -13,3 +13,13 @@
 | Want the model to decide which files to process, in what order | `Plan-and-Execute`               |
 | Add interactive UI where users guide analysis                  | `ConversationalAgent` or `ReAct` |
 
+
+| Approach                   | Why it fits your case                                                                 |
+| -------------------------- | ------------------------------------------------------------------------------------- |
+| **LLMChain / SimpleChain** | You are not doing multi-step reasoning, planning, or tool selection during execution. |
+|                            | You are feeding structured input (XML content) and expecting a single-shot response.  |
+|                            | It scales easily with Python's `ThreadPoolExecutor` for parallelism.                  |
+|                            | You can still *chain* multiple prompt templates (per-file summary → final summary).   |
+|                            | It's also memory-light and faster to run than agents.                                 |
+
+
