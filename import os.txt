@@ -1,229 +1,121 @@
-Scanning for MuleSoft XML files...
-
-Found 6 XML file(s):
-- error-handler.xml
-- global.xml
-- Order.xml
-- API.xml
-- Ordering.xml
-- retryOrder.xml
-
-Processing: C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement\src\main\mule\common\error-handler.xml
-
-Processing: C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement\src\main\mule\common\global.xml
-
-Processing: C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement\src\main\mule\common\Order.xml
-
-Processing: C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement\src\main\mule\implementation\API.xml
-
-Processing: C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement\src\main\mule\implementation\Ordering.xml
-
-Processing: C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement\src\main\mule\implementation\retryOrder.xml
-
-All individual XML files processed.
-Now generating technical summary...
-
-====== FINAL TECHNICAL SUMMARY ======
-
-## MuleSoft XML Configuration Documentation
-
-### Overview
-This document provides a detailed analysis of a MuleSoft XML configuration file designed to facilitate complex integration flows, focusing on error handling, data transformation, and connectivity with various services. The configuration leverages multiple components such as HTTP listeners, transformers, loggers, and connectors to create a robust system capable of managing different types of data and errors efficiently.
-
-### Global Elements
-
-#### Listener Configurations
-- **HTTP Listener Config (`api-esocial-integration-br-httpListenerConfig`)**: 
-  - **Purpose**: Serves as the entry point for incoming HTTP requests.
-  - **Details**: Configured to listen on all interfaces (0.0.0.0) at port 8081, ensuring accessibility from any client.
-
-#### HTTP Request Configurations
-- **HTTP Request Configuration for Various Services**:
-  - **Purpose**: Manages HTTP requests to external systems like Senior and Espaider, ensuring secure and efficient data exchange.
-  - **Details**: Utilizes HTTPS protocol with additional security configurations such as trust stores for SSL communication.
-
-#### Configuration Properties
-- **Environment-Specific Properties**:
-  - **Purpose**: Dynamically loads properties based on the deployment environment (e.g., preprod, production).
-  - **Details**: Helps in maintaining different configurations for various environments seamlessly.
-
-#### Secure Properties Configuration
-- **Secure Properties Handling**:
-  - **Purpose**: Enhances security by encrypting sensitive configuration data.
-  - **Details**: Uses the Blowfish algorithm for encryption with keys stored securely.
-
-#### JSON Logger Configuration
-- **Structured Logging Setup**:
-  - **Purpose**: Facilitates logging in a structured JSON format.
-  - **Details**: Makes logs easier to read and parse, aiding in faster debugging and monitoring.
-
-### Flows and Subflows
-
-#### Main API Flow
-- **Components**:
-  - **HTTP Listener**: Acts as the primary receiver of API calls.
-  - **APIkit Router**: Directs incoming requests to appropriate handlers based on predefined rules.
-  - **Error Handlers**: Each type of error (e.g., bad request, not found) is handled specifically with transformations providing meaningful feedback.
-
-#### Sub-Flow: `send-order`
-- **Purpose**: Manages the order sending process with detailed logging and error handling.
-- **Components**:
-  - **Logger**: Logs details before and after sending orders.
-  - **HTTP Requester**: Sends order data to external systems securely.
-  - **Error Handling**: Uses custom transformations to handle exceptions gracefully.
-
-### Error Handling Strategies
-
-#### General Error Handling
-- **Purpose**: Provides a fallback mechanism for any uncaught errors throughout the application flows.
-- **Components**:
-  - **Set Variable (`httpStatus`)**: Sets an HTTP status indicating an error (default is 500).
-  - **Logger**: Logs error details for auditing purposes.
-  - **Transform Message**: Converts error information into a user-friendly JSON format advising further actions or contact points.
-
-### Integration Logic and Data Flow
-
-1. **Receiving Requests**: All requests enter through the configured HTTP listener which acts based on the port and host settings.
-2. **Routing Requests**: The APIkit router evaluates incoming requests against defined rules and routes them accordingly.
-3. **Processing Data**: Depending on the operation, data might be transformed using DataWeave to meet external system requirements or to format responses back to clients.
-4. **Handling Errors**: Errors are caught at different stages; specific handlers transform these errors into readable formats and log them for troubleshooting.
-5. **Logging Activities**: Every significant action within the flows is logged in JSON format, providing clarity on operations and simplifying maintenance.
-
-### Conclusion
-
-The MuleSoft XML configuration discussed here outlines a sophisticated setup capable of handling complex integration scenarios involving multiple external systems and diverse data formats. By leveraging detailed logging, dynamic property loading, secure configurations, and meticulous error handling, the system ensures reliable data processing and integration across different platforms. This configuration not only facilitates efficient operations but also ensures that maintenance and debugging are straightforward due to its structured approach to logging and error management.
+            memory = MemorySaver()
+            model = get_openai_model()
+            tools = []  # Tools can be added if needed in future
+            agent_executor = create_react_agent(model, tools, checkpointer=memory)
+            config = {"configurable": {"thread_id": "mule-session-001"}}
 
 
 
-i want above kind of response bu i am getting below reponse update the full code and give me 
+import os
+import xml.etree.ElementTree as ET
+from langchain_openai import AzureChatOpenAI
+from langchain.schema import HumanMessage
 
+# Azure OpenAI configuration
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        deployment_name="Fourth_Chatbot",
+        openai_api_key="",  # Replace with your actual API key
+        openai_api_version="2024-08-01-preview",
+        openai_api_type="azure",
+        max_tokens=2000,
+        temperature=0.7,
+        top_p=0.9,
+        frequency_penalty=0.2,
+        presence_penalty=0.1
+    )
 
- Scanning for MuleSoft XML files...
+# Only find XML files inside folders that match src/main/mule or subfolders
+def find_all_mule_xml_files(folder_path):
+    xml_files = []
 
-✅ Found 6 XML file(s):
-- error-handler.xml
-- global.xml
-- Order.xml
-- API.xml
-- Ordering.xml
-- retryOrder.xml
+    for root, dirs, files in os.walk(folder_path):
+        normalized_root = os.path.normpath(root)
+        if normalized_root.endswith(os.path.normpath(os.path.join("src", "main", "mule"))):
+            for file in files:
+                if file.endswith(".xml"):
+                    xml_files.append(os.path.join(root, file))
+            for sub_root, _, sub_files in os.walk(root):
+                if sub_root != root:
+                    for file in sub_files:
+                        if file.endswith(".xml"):
+                            xml_files.append(os.path.join(sub_root, file))
+            break
 
-📝 Summarizing: error-handler.xml
+    return xml_files
 
-📝 Summarizing: global.xml
+# Summarize content of one XML file using a unified prompt
+def summarize_xml_file(xml_path, client):
+    try:
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+        xml_content = ET.tostring(root, encoding='unicode', method='xml')
 
-📝 Summarizing: Order.xml
+        prompt = (
+            "You are an expert in MuleSoft XML configuration. Analyze the following XML file and generate detailed documentation. "
+            "Focus on identifying and explaining flows, subflows, message flows, and global elements. "
+            "Describe their purpose, how they interact, and their role in the overall integration logic. "
+            "Use clear headings and bullet points where appropriate.\n\n" + xml_content
+        )
 
-📝 Summarizing: API.xml
+        return get_summary_from_openai(client, prompt)
 
-📝 Summarizing: Ordering.xml
+    except ET.ParseError as e:
+        return f"Error parsing {xml_path}: {str(e)}"
+    except Exception as e:
+        return f"Unexpected error processing {xml_path}: {str(e)}"
 
-📝 Summarizing: retryOrder.xml
+# Send prompt to Azure OpenAI
+def get_summary_from_openai(client, prompt):
+    try:
+        messages = [HumanMessage(content=prompt)]
+        response = client.invoke(messages)
+        return response.content
+    except Exception as e:
+        return f"[ERROR: Failed to summarize content] {str(e)}"
 
-📦 Finished summarizing all files.
-🧠 Generating final one-pager summary...
+# Create final one-pager summary from all XML summaries
+def summarize_all_collected_content(client, all_summaries):
+    combined_content = "\n\n".join(all_summaries)
+    final_prompt = (
+        "You are an expert in summarizing complex XML-based MuleSoft configuration files used in integration applications. "
+        "Your goal is to explain the content in a way that is clear and understandable for all types of users — including beginners, non-technical stakeholders, and experienced developers. "
+        "Carefully analyze the structure and logic of the XML file. Describe the flow of data, "
+        "the purpose of each processor or component (such as HTTP listeners, set-payloads, transformations, loggers, connectors, and conditional logic), and how they work together. "
+        "Your explanation should be detailed, insightful, and at least 3x longer than the original XML content. Focus on making the summary educational, easy to follow, and technically accurate so that anyone reading it can understand the integration logic and purpose of the flow."
+    )
+    return get_summary_from_openai(client, final_prompt + "\n\n" + combined_content)
 
-====== 📄 FINAL ONE-PAGER DOCUMENTATION ======
+# Main execution
+if __name__ == "__main__":
+    project_root = r"C:\Users\rdamera\Downloads\OrderManagement 1"
 
-You are a senior MuleSoft integration expert. Given the following summaries of various XML files, write a detailed one-pager explaining how the entire integration system works. Focus on architecture, flows, key processors, logic, error handling, and any API endpoints involved. Keep it accurate and helpful.
+    try:
+        print("Scanning for MuleSoft XML files...\n")
+        xml_files = find_all_mule_xml_files(project_root)
 
-### XML Summaries:
+        if not xml_files:
+            print("No MuleSoft XML files found in 'src/main/mule' path.")
+        else:
+            print(f"Found {len(xml_files)} XML file(s):")
+            for file in xml_files:
+                print(f"- {os.path.basename(file)}")
 
----
-🧾 Summary of `error-handler.xml`
-You are a MuleSoft integration expert. Given the following XML file, write a detailed, plain-English explanation of what it does. Focus on flows, subflows, connectors, logic, and how it fits in an integration architecture.
+            client = get_openai_client()
+            xml_summaries = []
 
-### XML: error-handler.xml
-<ns0:mule xmlns:ns0="http://www.mulesoft.org/schema/mule/core" xmlns:ns2="http://www.mulesoft.org/schema/mule/documentation" xmlns:ns3="http://www.mulesoft.org/schema/mule/json-logger" xmlns:ns4="http://www.mulesoft.org/schema/mule/ee/core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation=" http://www.mulesoft.org/schema/mule/email http://www.mulesoft.org/schema/mule/email/current/mule-email.xsd http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd http://www.mulesoft.org/schema/mule/json-logger http://www.mulesoft.org/schema/mule/json-logger/current/mule-json-logger.xsd">
-	<ns0:error-handler name="error-handler" ns2:id="eedd8e1b-f03c-4c53-84f1-fc146e85a3cc">
-		<ns0:on-error-propagate enableNotifications="true" logException="true" ns2:name="On Error Propagate" ns2:id="f180ce1c-92ed-4381-bd4d-683d86a0baa1" type="HTTP:BAD_REQUEST, HTTP:FORBIDDEN, HTTP:METHOD_NOT_ALLOWED, HTTP:NOT_FOUND, HTTP:TOO_MANY_REQUESTS, HTTP:UNAUTHORIZED">
-			<ns3:logger ns2:name="Logger" ns2:id="bbf727bd-15a3-45fb-a640-7dcbf9536c6c" config-ref="JSON_Logger_Config" message="#[error.description default &quot;&quot;]" priority="ERROR" />
-			<ns4:transform ns2:name="Transform Message" ns2:id="a823a2f4-ec00-4ae7-836b-731a49135f38">
-				<ns4:message>
-					<ns4:set-payload>%dw 2.0
-output application/json
----
-{		
-	"title" : error.errorType.identifier,
-	"status": error.errorMessage.attributes.statusCode,
-	"detail" : if(error.description != null or error.description != "") error.description else "The request could not be completed"	
-}</ns4:set-payload>
-				</ns4:message>
-			</ns4:transform>
-		</ns0:on-error-propagate>
-		<ns0:on-error-propagate enableNotifications="true" logException="true" ns2:name="On Error Propagate" ns2:id="3930f013-4f2e-4f53-8d65-740e376470cd" type="HTTP:BAD_GATEWAY, HTTP:INTERNAL_SERVER_ERROR, HTTP:TIMEOUT">
-			<ns3:logger ns2:name="Logger" ns2:id="1f244606-6fb1-4e05-9e50-1dd268d514d7" config-ref="JSON_Logger_Config" message="#[error.description default &quot;&quot;]" priority="ERROR" />
-			<ns4:transform ns2:name="Transform Message" ns2:id="095cfa50-b5d4-4aa3-a224-a2eb8ea6b585">
-				<ns4:message>
-					<ns4:set-payload>%dw 2.0
-output application/json
----
-{		
-	"title" : error.errorType.identifier,
-	"status": error.errorMessage.attributes.statusCode,
-	"detail" : "Unable to connect to API server"	
-}</ns4:set-payload>
-				</ns4:message>
-			</ns4:transform>
-		</ns0:on-error-propagate>
-		<ns0:on-error-propagate enableNotifications="true" logException="true" ns2:name="On Error Propagate" ns2:id="fe32d5d6-6079-40b4-a5b3-a538bc88c5da" type="HTTP:CLIENT_SECURITY, HTTP:CONNECTIVITY, HTTP:NOT_ACCEPTABLE, HTTP:PARSING, HTTP:RETRY_EXHAUSTED, HTTP:SECURITY, HTTP:SERVICE_UNAVAILABLE, HTTP:UNSUPPORTED_MEDIA_TYPE, EXPRESSION, STREAM_MAXIMUM_SIZE_EXCEEDED">
-			<ns3:logger ns2:name="Logger" ns2:id="d61f47b0-aaa5-4215-8120-b9704ba7a395" config-ref="JSON_Logger_Config" message="#[error.description default &quot;&quot;]" priority="ERROR" />
-			<ns4:transform ns2:name="Transform Message" ns2:id="4b1145b9-d112-4f9f-83f1-d858720c1448">
-				<ns4:message>
-					<ns4:set-payload>%dw 2.0
-output application/json
----
-{	
-	"title" : error.errorType.identifier,
-	"status": error.errorMessage.attributes.statusCode	
-}</ns4:set-payload>
-				</ns4:message>
-			</ns4:transform>
-		</ns0:on-error-propagate>
-		<ns0:on-error-propagate enableNotifications="true" logException="true" ns2:name="On Error Propagate" ns2:id="3699ec07-ce29-4111-9b0a-fe0bf115df6d" type="ANY">
-			<ns3:logger ns2:name="Logger" ns2:id="a961d794-7ee6-4dc1-a978-d9c6e6c9d27c" config-ref="JSON_Logger_Config" message="#[error.description default &quot;&quot;]" priority="ERROR" />
-			<ns0:set-variable value="500" ns2:name="Status Code - 500" ns2:id="64e963fa-9299-4f85-93f7-e2914c3a7bc9" variableName="httpStatus" />
-			<ns4:transform ns2:name="Internal Server Error Payload" ns2:id="4e2a7870-694b-4482-89e4-596e2e409e07">
-				<ns4:message>
-					<ns4:set-payload>%dw 2.0
-output application/json
----
-{
-	"status": "500",
-	"title": "Internal Server Error",
-	"details": "Something went wrong, please contact our help desk if the issue remains.",
-	"type": "&lt;link to error documentation&gt;",
-}</ns4:set-payload>
-				</ns4:message>
-			</ns4:transform>
-		</ns0:on-error-propagate>
-	</ns0:error-handler>
-</ns0:mule>
+            for xml_path in xml_files:
+                print(f"\nProcessing: {xml_path}")
+                summary = summarize_xml_file(xml_path, client)
+                xml_summaries.append(summary)
 
-Generate a helpful summary. Don't repeat the XML. Explain its structure and meaning clearly.The XML file `error-handler.xml` is designed for use within a MuleSoft integration application. It primarily defines an error handling strategy, specifying actions to be taken when different types of HTTP errors occur during API interactions or other processes.
+            print("\nAll individual XML files processed.")
+            print("Now generating technical summary...\n")
 
-**Structure and Components:**
+            combined_summary = summarize_all_collected_content(client, xml_summaries)
+            print("====== FINAL TECHNICAL SUMMARY ======\n")
+            print(combined_summary)
 
-1. **Error Handler**: The root element is an `<ns0:error-handler>` with a unique name attribute. This serves as a container for the various error handling strategies.
-
-2. **On Error Propagate**: Within the error handler, there are multiple `<ns0:on-error-propagate>` elements. Each of these is configured to handle a specific group of errors, identified by HTTP error codes such as `HTTP:BAD_REQUEST`, `HTTP:INTERNAL_SERVER_ERROR`, etc. The attributes `enableNotifications` and `logException` are set to true, indicating that these events should trigger notifications and log the exceptions.
-
-3. **Logging**: Inside each `<ns0:on-error-propagate>`, there's a `<ns3:logger>` component configured to log the error details. It uses a reference to a JSON logger configuration (`JSON_Logger_Config`) and logs the description of the error at an "ERROR" priority level.
-
-4. **Transform Message**: Following the logger, there is a `<ns4:transform>` element in each error handler block. This component transforms the error message into a JSON format which includes fields like `title`, `status`, and `detail`. The exact structure of the JSON payload can vary depending on the type of error being handled. For example, in some cases, it provides a default message if the error description is not available, and in others, it specifies a generic message indicating issues with connectivity or server errors.
-
-5. **Set Variable**: In the generic error handler (type="ANY"), which catches any types of errors not specifically handled by other blocks, there's an additional step where it sets a variable (`httpStatus`) to 500, indicating an internal server error.
-
-**Integration Architecture Role:**
-
-In a MuleSoft integration architecture, this `error-handler.xml` plays a critical role in ensuring that errors are managed gracefully and informatively. By logging errors and transforming them into structured JSON responses, it helps maintain clarity about issues for both end-users and system administrators. It also aids in debugging and monitoring by providing consistent and detailed information about exceptions that occur across various flows in the application.
-
-In summary, this XML configuration helps enhance the robustness of Mule applications by providing clear, actionable information on different types of errors that might occur during runtime, ensuring that all potential issues are handled systematically and transparently.
-
-
----
-🧾 Summary of `global.xml`
-You are a MuleSoft integration expert. Given the following XML file, write a detailed, plain-English explanation of what it does. Focus on flows, subflows, connectors, logic, and how it fits in an integration architecture.
-
-### XML: global.xml
-<ns0:mule xmlns:ns0="http://www.mulesoft.org/schema/mule/core" xmlns:ns2="http://www.mulesoft.org/schema/mule/http" xmlns:ns3="http://www.mulesoft.org/schema/mule/mule-apikit" xmlns:ns4="http://www.mulesoft.org/schema/mule/documentation" xmlns:ns5="http://www.mulesoft.org/schema/mule/tls" xmlns:ns6="http://www.mulesoft.org/schema/mule/secure-properties" xmlns:ns7="http://www.mulesoft.org/schema/mule/json-logger" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation=" http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd  http://www.mulesoft.o
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
