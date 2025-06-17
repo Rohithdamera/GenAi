@@ -90,6 +90,3 @@ if __name__ == "__main__":
     final_result = summarize_all_files()
     print("\n====== FINAL TECHNICAL SUMMARY ======\n")
     print(final_result)
-
-
-
