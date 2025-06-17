@@ -1,113 +1,59 @@
-import os
-import xml.etree.ElementTree as ET
-from pathlib import Path
+Scanning for MuleSoft XML files...
 
-from langchain.chat_models import AzureChatOpenAI
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-from langchain.agents import initialize_agent, Tool
-from langchain.memory import ConversationBufferMemory
+ Found 6 XML file(s):
+  • error-handler.xml
+  • global.xml
+  • Order.xml
+  • API.xml
+  • Ordering.xml
+  • retryOrder.xml
 
-# Azure OpenAI Configuration
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        deployment_name="Fourth_Chatbot",
-        openai_api_key="",  # Replace with your actual key
-        openai_api_version="2024-08-01-preview",
-        openai_api_type="azure",
-        temperature=0.7,
-        max_tokens=2000,
-        top_p=0.9,
-        frequency_penalty=0.2,
-        presence_penalty=0.1
-    )
+ Processed: C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement\src\main\mule\common\Order.xml
 
-# Globals
-project_path = r"C:\\Users\\rdamera\\Downloads\\OrderManagement 1"
-mule_root = Path(project_path) / "src" / "main" / "mule"
+ Processed: C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement\src\main\mule\implementation\API.xml
 
-# TOOL: Find all .xml files in mule folder (including subfolders)
-def find_all_mule_xml_files(folder_path): 
-    xml_files = []
-    for root, dirs, files in os.walk(folder_path):
-        normalized_root = os.path.normpath(root)
-        if normalized_root.endswith(os.path.normpath(os.path.join("src", "main", "mule"))):
-            for file in files:
-                if file.endswith(".xml"):
-                    xml_files.append(os.path.join(root, file))
-            for sub_root, _, sub_files in os.walk(root):
-                for file in sub_files:
-                    if file.endswith(".xml"):
-                        xml_files.append(os.path.join(sub_root, file))
-            break
-    return xml_files
+ Processed: C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement\src\main\mule\common\error-handler.xml
 
-def list_xml_files() -> list[str]:
-    return find_all_mule_xml_files(project_path)
+ Processed: C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement\src\main\mule\implementation\retryOrder.xml
 
-# TOOL: Read content of given file
-def read_file(file_path: str) -> str:
-    try:
-        tree = ET.parse(file_path)
-        root = tree.getroot()
-        return ET.tostring(root, encoding="unicode", method="xml")
-    except Exception as e:
-        return f"Error reading {file_path}: {str(e)}"
+ Processed: C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement\src\main\mule\common\global.xml
 
-# TOOL: Summarize XML content
-def summarize_file(xml_content: str) -> str:
-    client = get_openai_client()
-    prompt_template = PromptTemplate(
-        input_variables=["xml_content"],
-        template="""You are an expert in MuleSoft XML configuration. Analyze the following XML file and generate detailed documentation.
-Focus on identifying and explaining flows, subflows, message flows, and global elements. Describe their purpose, how they interact, and their role in the overall integration logic.
-Use clear headings and bullet points where appropriate.
+ Processed: C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement\src\main\mule\implementation\Ordering.xml
 
-{xml_content}
-"""
-    )
-    chain = LLMChain(llm=client, prompt=prompt_template)
-    return chain.run(xml_content=xml_content)
+ All XML files processed. Generating technical summary...
 
-# TOOL: Final summary
-def generate_final_summary(combined_summaries: str) -> str:
-    client = get_openai_client()
-    prompt_template = PromptTemplate(
-        input_variables=["combined_summaries"],
-        template="""You are an expert in summarizing complex XML-based MuleSoft configuration files.
-Summarize all previously processed content into a single, coherent technical overview suitable for all levels of readers.
+====== FINAL TECHNICAL SUMMARY ======
 
-{combined_summaries}
-"""
-    )
-    chain = LLMChain(llm=client, prompt=prompt_template)
-    return chain.run(combined_summaries=combined_summaries)
+## Overview
+The XML configuration provided outlines a Mule application designed to handle various integration processes, including HTTP requests, error handling, and responses. It utilizes global configurations for reusable settings and defines multiple flows to manage specific tasks. This documentation aims to clarify the structure and functionality of the components within the application.
 
-# MAIN
-if __name__ == "__main__":
-    print("Initializing MuleSummarizerAgent with Tools and Memory...")
 
-    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
 
-    tools = [
-        Tool(name="ListXMLFiles", func=lambda _: list_xml_files(), description="List all XML files under src/main/mule and its subfolders."),
-        Tool(name="ReadFile", func=read_file, description="Read content of a specific XML file by its path."),
-        Tool(name="SummarizeFile", func=summarize_file, description="Summarize XML content of a MuleSoft file."),
-        Tool(name="GenerateFinalSummary", func=generate_final_summary, description="Generate a final summary from combined MuleSoft XML summaries.")
-    ]
 
-    client = get_openai_client()
-    MuleSummarizerAgent = initialize_agent(
-        tools=tools,
-        llm=client,
-        agent_type="openai-functions",
-        memory=memory,
-        verbose=True
-    )
-
-    print("\nMuleSummarizerAgent is now deciding what to do...")
-
-    MuleSummarizerAgent.invoke(
-        "Scan all XML files inside the 'src/main/mule' folder and any subfolders, read them, summarize their integration logic, and generate a final summary."
-    )
+Action: ReadFile
+Action Input: C:\\Users\\rdamera\\Downloads\\OrderManagement 1\\OrderManagement\\src\\main\\mule\\common\\error-handler.xml
+Observation: <ns0:mule xmlns:ns0="http://www.mulesoft.org/schema/mule/core" xmlns:ns2="http://www.mulesoft.org/schema/mule/documentation" xmlns:ns3="http://www.mulesoft.org/schema/mule/json-logger" xmlns:ns4="http://www.mulesoft.org/schema/mule/ee/core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation=" http://www.mulesoft.org/schema/mule/email http://www.mulesoft.org/schema/mule/email/current/mule-email.xsd http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd http://www.mulesoft.org/schema/mule/json-logger http://www.mulesoft.org/schema/mule/json-logger/current/mule-json-logger.xsd">
+	<ns0:error-handler name="error-handler" ns2:id="eedd8e1b-f03c-4c53-84f1-fc146e85a3cc">
+		<ns0:on-error-propagate enableNotifications="true" logException="true" ns2:name="On Error Propagate" ns2:id="f180ce1c-92ed-4381-bd4d-683d86a0baa1" type="HTTP:BAD_REQUEST, HTTP:FORBIDDEN, HTTP:METHOD_NOT_ALLOWED, HTTP:NOT_FOUND, HTTP:TOO_MANY_REQUESTS, HTTP:UNAUTHORIZED">
+			<ns3:logger ns2:name="Logger" ns2:id="bbf727bd-15a3-45fb-a640-7dcbf9536c6c" config-ref="JSON_Logger_Config" message="#[error.description default &quot;&quot;]" priority="ERROR" />
+			<ns4:transform ns2:name="Transform Message" ns2:id="a823a2f4-ec00-4ae7-836b-731a49135f38">
+				<ns4:message>
+					<ns4:set-payload>%dw 2.0
+output application/json
+---
+{		
+	"title" : error.errorType.identifier,
+	"status": error.errorMessage.attributes.statusCode,
+	"detail" : if(error.description != null or error.description != "") error.description else "The request could not be completed"	
+}</ns4:set-payload>
+				</ns4:message>
+			</ns4:transform>
+		</ns0:on-error-propagate>
+		<ns0:on-error-propagate enableNotifications="true" logException="true" ns2:name="On Error Propagate" ns2:id="3930f013-4f2e-4f53-8d65-740e376470cd" type="HTTP:BAD_GATEWAY, HTTP:INTERNAL_SERVER_ERROR, HTTP:TIMEOUT">
+			<ns3:logger ns2:name="Logger" ns2:id="1f244606-6fb1-4e05-9e50-1dd268d514d7" config-ref="JSON_Logger_Config" message="#[error.description default &quot;&quot;]" priority="ERROR" />
+			<ns4:transform ns2:name="Transform Message" ns2:id="095cfa50-b5d4-4aa3-a224-a2eb8ea6b585">
+				<ns4:message>
+					<ns4:set-payload>%dw 2.0
+output application/json
+---
+{		
