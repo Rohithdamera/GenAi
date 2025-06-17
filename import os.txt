@@ -1,3 +1,7 @@
+
+
+
+
 import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -29,13 +33,11 @@ project_path = r"C:\\Users\\rdamera\\Downloads\\OrderManagement 1"
 mule_root = Path(project_path) / "src" / "main" / "mule"
 
 # TOOL: Find all .xml files in mule folder
-@tool
-def list_xml_files(_: str) -> list[str]:
+def list_xml_files() -> list[str]:
     """List all XML files under src/main/mule (recursively)."""
     return [str(p) for p in mule_root.rglob("*.xml")]
 
 # TOOL: Read content of given file
-@tool
 def read_file(file_path: str) -> str:
     """Read the content of an XML file."""
     try:
@@ -46,7 +48,6 @@ def read_file(file_path: str) -> str:
         return f"Error reading {file_path}: {str(e)}"
 
 # TOOL: Summarize XML content
-@tool
 def summarize_file(xml_content: str) -> str:
     """Summarize the given MuleSoft XML config."""
     client = get_openai_client()
@@ -63,8 +64,7 @@ Use clear headings and bullet points where appropriate.
     return chain.run(xml_content=xml_content)
 
 # TOOL: Final summary (optional, can also be LLM memory-driven)
-@tool
-def generate_final_summary(_: str) -> str:
+def generate_final_summary(combined_summaries: str) -> str:
     """Generate final summary from all previous XML summaries."""
     client = get_openai_client()
     prompt_template = PromptTemplate(
@@ -76,8 +76,7 @@ Summarize all previously processed content into a single, coherent technical ove
 """
     )
     chain = LLMChain(llm=client, prompt=prompt_template)
-    # Collect from memory externally in main
-    return chain
+    return chain.run(combined_summaries=combined_summaries)
 
 # MAIN
 if __name__ == "__main__":
@@ -85,7 +84,12 @@ if __name__ == "__main__":
 
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
 
-    tools = [list_xml_files, read_file, summarize_file]
+    tools = [
+        Tool(name="ListXMLFiles", func=lambda _: list_xml_files(), description="List all XML files under src/main/mule"),
+        Tool(name="ReadFile", func=read_file, description="Read content of a specific XML file by its path."),
+        Tool(name="SummarizeFile", func=summarize_file, description="Summarize XML content of a MuleSoft file."),
+        Tool(name="GenerateFinalSummary", func=generate_final_summary, description="Generate a final summary from combined MuleSoft XML summaries.")
+    ]
 
     client = get_openai_client()
     MuleSummarizerAgent = initialize_agent(
