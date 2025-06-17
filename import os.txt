@@ -7,7 +7,6 @@ from langchain.chains import LLMChain
 from langchain.agents import initialize_agent, Tool
 from langchain.memory import ConversationBufferMemory
 
-
 # Azure OpenAI Configuration
 def get_openai_client():
     return AzureChatOpenAI(
@@ -28,34 +27,33 @@ project_path = r"C:\Users\rdamera\Downloads\OrderManagement 1"
 last_file_list = []
 combined_summaries = ""
 
-# === Find all XML files recursively under src/main/mule or its subfolders
-def find_all_mule_xml_files(full_path):
+# === TOOL 1: Auto-detect mule XML files in the project
+def find_all_mule_xml_files(project_dir):
     xml_files = []
-    for root, _, files in os.walk(full_path):
-        for file in files:
-            if file.lower().endswith(".xml"):
-                xml_files.append(os.path.normpath(os.path.join(root, file)))
+    for root, dirs, files in os.walk(project_dir):
+        normalized_root = os.path.normpath(root)
+        if normalized_root.endswith(os.path.normpath(os.path.join("src", "main", "mule"))):
+            for sub_root, _, sub_files in os.walk(root):
+                for file in sub_files:
+                    if file.lower().endswith(".xml"):
+                        full_path = os.path.normpath(os.path.join(sub_root, file))
+                        xml_files.append(full_path)
     return xml_files
 
-# === TOOL 1: List XML files (dynamic path from input)
-def list_xml_files(input_path: str) -> str:
+def list_mule_xml_files(_: str) -> str:
     global last_file_list
 
-    full_path = os.path.normpath(os.path.join(project_path, input_path.strip()))
-    if not os.path.exists(full_path):
-        return f"Provided path does not exist: {full_path}"
+    mule_xml_files = find_all_mule_xml_files(project_path)
+    if not mule_xml_files:
+        return "No XML files found under any src/main/mule directory."
 
-    xml_files = find_all_mule_xml_files(full_path)
-    if not xml_files:
-        return "No XML files found."
+    last_file_list = mule_xml_files
+    return f"Found {len(mule_xml_files)} MuleSoft XML files:\n" + "\n".join(mule_xml_files)
 
-    last_file_list = xml_files
-    return f"Found {len(xml_files)} XML files:\n" + "\n".join(xml_files)
-
-# === TOOL 2: Summarize XML files
+# === TOOL 2: Summarize each XML file
 def summarize_all_files(_: str) -> str:
     if not last_file_list:
-        return "No XML files loaded for summarization."
+        return "No XML files loaded to summarize."
 
     client = get_openai_client()
     prompt_template = PromptTemplate(
@@ -84,16 +82,16 @@ You are a MuleSoft expert. Analyze the following XML configuration and generate 
     combined_summaries = "\n\n".join(summaries)
     return "All XML files have been summarized."
 
-# === TOOL 3: Generate final technical summary
+# === TOOL 3: Generate final overall summary
 def generate_final_summary(_: str) -> str:
     if not combined_summaries:
-        return "No summaries available."
+        return "No summaries available to compile."
 
     client = get_openai_client()
     prompt_template = PromptTemplate(
         input_variables=["combined_summaries"],
         template="""
-You are an expert in MuleSoft architecture. Summarize the following XML file summaries into a single cohesive technical overview.
+You are an expert in MuleSoft architecture. Summarize the following XML summaries into a single cohesive technical overview.
 Include:
 - Major flows/subflows
 - Key global configurations or services
@@ -112,9 +110,9 @@ if __name__ == "__main__":
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
 
     tools = [
-        Tool(name="ListXMLFiles", func=list_xml_files, description="List all XML files under given folder relative to the project root."),
-        Tool(name="SummarizeAllFiles", func=summarize_all_files, description="Summarize all listed Mule XML files."),
-        Tool(name="GenerateFinalSummary", func=generate_final_summary, description="Generate final summary from combined summaries.")
+        Tool(name="ListMuleXMLFiles", func=list_mule_xml_files, description="Auto-detect and list all MuleSoft XML files in any src/main/mule folder."),
+        Tool(name="SummarizeAllFiles", func=summarize_all_files, description="Summarize all loaded Mule XML files."),
+        Tool(name="GenerateFinalSummary", func=generate_final_summary, description="Generate final overview summary from all MuleSoft file summaries.")
     ]
 
     client = get_openai_client()
@@ -129,5 +127,5 @@ if __name__ == "__main__":
     print("MuleSummarizerAgent is now deciding what to do...\n")
 
     agent.invoke(
-        "List all XML files in src/main/mule and its subfolders, summarize their content, and generate one final technical summary."
+        "Detect and list all XML files inside any 'src/main/mule' folders in the project, summarize each one, and create a final overall summary."
     )
