@@ -1,4 +1,5 @@
 import os
+import asyncio
 from pathlib import Path
 
 from langchain.chat_models import AzureChatOpenAI
@@ -7,119 +8,105 @@ from langchain.chains import LLMChain
 from langchain.agents import initialize_agent, Tool
 from langchain.memory import ConversationBufferMemory
 
-# Azure OpenAI Configuration
+# === Configuration ===
 def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="Fourth_Chatbot",
-        openai_api_key="",  # Your Azure API key here
+        openai_api_key="",  # add your key
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
         temperature=0.7,
         max_tokens=2000,
         top_p=0.9,
         frequency_penalty=0.2,
-        presence_penalty=0.1
+        presence_penalty=0.1,
+        # Enable async
+        streaming=False
     )
 
-# === Globals ===
 project_path = r"C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement"
 last_file_list = []
 combined_summaries = ""
 
-# === TOOL 1: Find only .xml files inside valid src/main/mule folders (exclude target folders)
+# === Utility to find XMLs only in src/main/mule (no target) ===
 def find_all_mule_xml_files(project_dir):
     xml_files = []
     for root, dirs, files in os.walk(project_dir):
-        # Skip build/target folders
-        if any(part.lower() == "target" for part in Path(root).parts):
+        if "target" in root.lower().split(os.sep):
             continue
-
-        # Match only those that are exactly under src/main/mule
-        normalized_root = os.path.normpath(root)
-        if normalized_root.endswith(os.path.normpath(os.path.join("src", "main", "mule"))):
-            for sub_root, _, sub_files in os.walk(root):
-                for file in sub_files:
-                    if file.lower().endswith(".xml"):
-                        xml_files.append(os.path.normpath(os.path.join(sub_root, file)))
-
+        normalized = os.path.normpath(root)
+        if normalized.endswith(os.path.normpath(os.path.join("src","main","mule"))):
+            for sub, _, subfiles in os.walk(root):
+                for f in subfiles:
+                    if f.lower().endswith(".xml"):
+                        xml_files.append(os.path.normpath(os.path.join(sub, f)))
     return xml_files
 
+# === Tool 1: List files ===
 def list_mule_xml_files(_: str) -> str:
     global last_file_list
-
-    mule_xml_files = find_all_mule_xml_files(project_path)
-    if not mule_xml_files:
-        return "No XML files found under valid src/main/mule folders."
-
-    last_file_list = mule_xml_files
-    return f"Found {len(mule_xml_files)} MuleSoft XML files:\n" + "\n".join(mule_xml_files)
-
-# === TOOL 2: Summarize each XML file
-def summarize_all_files(_: str) -> str:
+    last_file_list = find_all_mule_xml_files(project_path)
     if not last_file_list:
-        return "No XML files loaded to summarize."
+        return "No XML files found under any src/main/mule path."
+    return f"Found {len(last_file_list)} MuleSoft XML files:\n" + "\n".join(last_file_list)
+
+# === Async Tool 2: Parallel summarization ===
+async def summarize_all_files(_: str) -> str:
+    global combined_summaries
+    if not last_file_list:
+        return "No XML files available to summarize."
 
     client = get_openai_client()
-    prompt_template = PromptTemplate(
+    prompt = PromptTemplate(
         input_variables=["xml_content"],
         template="""
 You are a MuleSoft expert. Analyze the following XML configuration and generate a concise technical summary:
-- Identify any flows, subflows, or global elements
-- Summarize the integration logic clearly
+- Identify flows, subflows, globals
+- Summarize integration logic
 
 {xml_content}
 """
     )
-    chain = LLMChain(llm=client, prompt=prompt_template)
-    summaries = []
+    chain = LLMChain(llm=client, prompt=prompt)
 
-    for path in last_file_list:
+    # Function to read and summarize one file
+    async def summarize_file(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
-                xml_content = f.read()
-            summary = chain.run(xml_content=xml_content)
-            summaries.append(f"File: {path}\n{summary}\n")
+                xml = f.read()
+            return f"File: {path}\n" + await chain.arun(xml_content=xml) + "\n"
         except Exception as e:
-            summaries.append(f"Error reading {path}: {str(e)}")
+            return f"Error reading {path}: {e}\n"
 
-    global combined_summaries
-    combined_summaries = "\n\n".join(summaries)
-    return "All XML files have been summarized."
+    tasks = [summarize_file(fp) for fp in last_file_list]
+    summaries = await asyncio.gather(*tasks)
+    combined_summaries = "\n".join(summaries)
+    return "All XML files have been summarized in parallel."
 
-# === TOOL 3: Generate final overall summary
+# === Tool 3: Final combined summary ===
 def generate_final_summary(_: str) -> str:
     if not combined_summaries:
-        return "No summaries available to compile."
-
+        return "No summaries to compile."
     client = get_openai_client()
-    prompt_template = PromptTemplate(
+    prompt = PromptTemplate(
         input_variables=["combined_summaries"],
         template="""
-You are an expert in MuleSoft architecture. Summarize the following XML summaries into a single cohesive technical overview.
-Include:
-- Major flows/subflows
-- Key global configurations or services
-- Overall integration flow and purpose
-
+You are a MuleSoft architecture expert. Create a single cohesive technical overview from these XML summaries:
 {combined_summaries}
 """
     )
-    chain = LLMChain(llm=client, prompt=prompt_template)
+    chain = LLMChain(llm=client, prompt=prompt)
     return chain.run(combined_summaries=combined_summaries)
 
-# === MAIN ===
+# === Main entrypoint ===
 if __name__ == "__main__":
-    print("Initializing MuleSummarizerAgent with Tools and Memory...\n")
-
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
     tools = [
-        Tool(name="ListMuleXMLFiles", func=list_mule_xml_files, description="List XML files only under valid src/main/mule folders (excluding target folders)."),
-        Tool(name="SummarizeAllFiles", func=summarize_all_files, description="Summarize all loaded Mule XML files."),
-        Tool(name="GenerateFinalSummary", func=generate_final_summary, description="Generate final overview summary from all MuleSoft file summaries.")
+        Tool(name="ListMuleXMLFiles", func=list_mule_xml_files, description="List XML files under src/main/mule."),
+        Tool(name="SummarizeAllFiles", func=summarize_all_files, description="Summarize XMLs in parallel async."),
+        Tool(name="GenerateFinalSummary", func=generate_final_summary, description="Compile all summaries."),
     ]
-
     client = get_openai_client()
     agent = initialize_agent(
         tools=tools,
@@ -129,8 +116,8 @@ if __name__ == "__main__":
         verbose=True
     )
 
-    print("MuleSummarizerAgent is now deciding what to do...\n")
-
+    print("Initializing Agent... Executing in async parallel mode.\n")
+    # Run agent synchronously; internally, SummarizeAllFiles runs async tasks
     agent.invoke(
-        "List all XML files only under src/main/mule folders in the project (not from target or build folders), summarize each one, and give a final project-level technical summary."
+        "List XML files under any src/main/mule folder, summarize them in parallel, then generate a final summary."
     )
