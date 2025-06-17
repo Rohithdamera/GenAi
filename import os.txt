@@ -25,6 +25,7 @@ def get_openai_client():
 
 # Globals
 project_path = r"C:\\Users\\rdamera\\Downloads\\OrderManagement 1"
+mule_root = Path(project_path) / "src" / "main" / "mule"
 
 # TOOL: Find all .xml files in mule folder (including subfolders)
 def find_all_mule_xml_files(folder_path): 
@@ -42,42 +43,40 @@ def find_all_mule_xml_files(folder_path):
             break
     return xml_files
 
-def summarize_single_file(file_path: str) -> str:
+def list_xml_files() -> list[str]:
+    return find_all_mule_xml_files(project_path)
+
+# TOOL: Read content of given file
+def read_file(file_path: str) -> str:
     try:
         tree = ET.parse(file_path)
         root = tree.getroot()
-        xml_content = ET.tostring(root, encoding="unicode", method="xml")
-        client = get_openai_client()
-        prompt_template = PromptTemplate(
-            input_variables=["xml_content"],
-            template="""You are an expert in MuleSoft XML configuration. Analyze the following XML file and generate a short, clear, high-level summary.
-Only provide a summary. Do not include the original XML content. Focus on explaining integration logic briefly.
+        return ET.tostring(root, encoding="unicode", method="xml")
+    except Exception as e:
+        return f"Error reading {file_path}: {str(e)}"
+
+# TOOL: Summarize XML content
+def summarize_file(xml_content: str) -> str:
+    client = get_openai_client()
+    prompt_template = PromptTemplate(
+        input_variables=["xml_content"],
+        template="""You are an expert in MuleSoft XML configuration. Analyze the following XML file and generate detailed documentation.
+Focus on identifying and explaining flows, subflows, message flows, and global elements. Describe their purpose, how they interact, and their role in the overall integration logic.
+Use clear headings and bullet points where appropriate.
 
 {xml_content}
 """
-        )
-        chain = LLMChain(llm=client, prompt=prompt_template)
-        return chain.run(xml_content=xml_content)
-    except Exception as e:
-        return f"Error processing {file_path}: {str(e)}"
+    )
+    chain = LLMChain(llm=client, prompt=prompt_template)
+    return chain.run(xml_content=xml_content)
 
-def summarize_all_files():
-    xml_files = find_all_mule_xml_files(project_path)
-    if not xml_files:
-        return "No MuleSoft XML files found in the project."
-
-    summaries = []
-    for file_path in xml_files:
-        summary = summarize_single_file(file_path)
-        summaries.append(summary)
-
-    combined_summaries = "\n\n".join(summaries)
+# TOOL: Final summary
+def generate_final_summary(combined_summaries: str) -> str:
     client = get_openai_client()
     prompt_template = PromptTemplate(
         input_variables=["combined_summaries"],
-        template="""You are an expert in summarizing multiple MuleSoft configuration summaries.
-Based on the following input summaries from multiple XML files, generate one clean, concise, human-readable summary.
-Keep it short and helpful for understanding the project.
+        template="""You are an expert in summarizing complex XML-based MuleSoft configuration files.
+Summarize all previously processed content into a single, coherent technical overview suitable for all levels of readers.
 
 {combined_summaries}
 """
@@ -87,6 +86,28 @@ Keep it short and helpful for understanding the project.
 
 # MAIN
 if __name__ == "__main__":
-    final_result = summarize_all_files()
-    print("\n====== FINAL TECHNICAL SUMMARY ======\n")
-    print(final_result)
+    print("Initializing MuleSummarizerAgent with Tools and Memory...")
+
+    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+
+    tools = [
+        Tool(name="ListXMLFiles", func=lambda _: list_xml_files(), description="List all XML files under src/main/mule and its subfolders."),
+        Tool(name="ReadFile", func=read_file, description="Read content of a specific XML file by its path."),
+        Tool(name="SummarizeFile", func=summarize_file, description="Summarize XML content of a MuleSoft file."),
+        Tool(name="GenerateFinalSummary", func=generate_final_summary, description="Generate a final summary from combined MuleSoft XML summaries.")
+    ]
+
+    client = get_openai_client()
+    MuleSummarizerAgent = initialize_agent(
+        tools=tools,
+        llm=client,
+        agent_type="openai-functions",
+        memory=memory,
+        verbose=True
+    )
+
+    print("\nMuleSummarizerAgent is now deciding what to do...")
+
+    MuleSummarizerAgent.invoke(
+        "Scan all XML files inside the 'src/main/mule' folder and any subfolders, read them, summarize their integration logic, and generate a final summary."
+    )
