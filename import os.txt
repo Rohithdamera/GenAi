@@ -1,25 +1,128 @@
-| Approach                   | Why Not Ideal in Your Scenario                       |
-| -------------------------- | ---------------------------------------------------- |
-| **ReAct Agent**            | Overhead of reasoning & planning not needed per file |
-| **Plan-and-Execute**       | No branching/multistep plan per file; linear task    |
-| **Function-Calling Agent** | You don’t need dynamic tool calling yet              |
-| **ToolCallingAgent**       | Better for well-defined external API calls           |
-| **Conversational Agent**   | You're not doing chat/dialog-style tasks             |
+import os
+import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from langchain.chat_models import AzureChatOpenAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
 
-| If You Add This...                                             | Then Use This Agent              |
-| -------------------------------------------------------------- | -------------------------------- |
-| Need to detect & call APIs from XML                            | `FunctionCallingAgent`           |
-| Want the model to decide which files to process, in what order | `Plan-and-Execute`               |
-| Add interactive UI where users guide analysis                  | `ConversationalAgent` or `ReAct` |
+# Azure OpenAI Configuration
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        deployment_name="Fourth_Chatbot",
+        openai_api_key="",  # Replace with your actual key
+        openai_api_version="2024-08-01-preview",
+        openai_api_type="azure",
+        temperature=0.7,
+        max_tokens=2000,
+        top_p=0.9,
+        frequency_penalty=0.2,
+        presence_penalty=0.1
+    )
 
+#  Find all .xml files under src/main/mule and its subfolders
+def find_all_mule_xml_files(folder_path):
+    xml_files = []
+    for root, dirs, files in os.walk(folder_path):
+        normalized_root = os.path.normpath(root)
+        if normalized_root.endswith(os.path.normpath(os.path.join("src", "main", "mule"))):
+            for file in files:
+                if file.endswith(".xml"):
+                    xml_files.append(os.path.join(root, file))
+            for sub_root, _, sub_files in os.walk(root):
+                for file in sub_files:
+                    if file.endswith(".xml"):
+                        xml_files.append(os.path.join(sub_root, file))
+            break
+    return xml_files
 
-| Approach                   | Why it fits your case                                                                 |
-| -------------------------- | ------------------------------------------------------------------------------------- |
-| **LLMChain / SimpleChain** | You are not doing multi-step reasoning, planning, or tool selection during execution. |
-|                            | You are feeding structured input (XML content) and expecting a single-shot response.  |
-|                            | It scales easily with Python's `ThreadPoolExecutor` for parallelism.                  |
-|                            | You can still *chain* multiple prompt templates (per-file summary → final summary).   |
-|                            | It's also memory-light and faster to run than agents.                                 |
+# LLMChain for individual XML analysis
+def build_individual_chain(llm):
+    prompt_template = PromptTemplate(
+        input_variables=["xml_content"],
+        template="""You are an expert in MuleSoft XML configuration. Analyze the following XML file and generate detailed documentation.
+Focus on identifying and explaining flows, subflows, message flows, and global elements.
+Describe their purpose, how they interact, and their role in the overall integration logic.
+Use clear headings and bullet points where appropriate.
 
+{xml_content}
+"""
+    )
+    return LLMChain(llm=llm, prompt=prompt_template)
 
+#  LLMChain for final summary
+def build_summary_chain(llm):
+    prompt_template = PromptTemplate(
+        input_variables=["combined_summaries"],
+        template="""You are an expert in summarizing complex XML-based MuleSoft configuration files used in integration applications.
+Your goal is to explain the content in a way that is clear and understandable for all types of users — including beginners, non-technical stakeholders, and experienced developers.
+Carefully analyze the structure and logic of the XML file. Describe the flow of data,
+Focus on identifying and explaining flows, subflows, message flows, and global elements.
+Describe their purpose, how they interact, and their role in the overall integration logic
+the purpose of each processor or component (such as HTTP listeners, set-payloads, transformations, loggers, connectors, and conditional logic), and how they work together.
+Your explanation should be detailed, insightful.
+Focus on making the summary educational, easy to follow, and technically accurate so that anyone reading it can understand the integration logic and purpose of the flow.
+
+{combined_summaries}
+"""
+    )
+    return LLMChain(llm=llm, prompt=prompt_template)
+
+#  Summarize one XML file using the chain
+def analyze_xml_file(xml_path, llm_chain):
+    try:
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+        xml_content = ET.tostring(root, encoding="unicode", method="xml")
+        return llm_chain.run(xml_content=xml_content)
+    except ET.ParseError as e:
+        return f" Error parsing {xml_path}: {str(e)}"
+    except Exception as e:
+        return f" Unexpected error processing {xml_path}: {str(e)}"
+
+# Main Execution: Parallel XML Analysis + Final Summary
+def run_parallel_xml_analysis(project_path):
+    print(" Scanning for MuleSoft XML files...\n")
+    xml_files = find_all_mule_xml_files(project_path)
+
+    if not xml_files:
+        print(" No XML files found under 'src/main/mule'")
+        return
+
+    print(f" Found {len(xml_files)} XML file(s):")
+    for path in xml_files:
+        print(f"  • {os.path.basename(path)}")
+
+    # Initialize OpenAI client and LLM chains
+    client = get_openai_client()
+    individual_chain = build_individual_chain(client)
+    summary_chain = build_summary_chain(client)
+
+    # Parallel processing of each file
+    xml_summaries = []
+    with ThreadPoolExecutor(max_workers=9) as executor:
+        futures = {
+            executor.submit(analyze_xml_file, path, individual_chain): path for path in xml_files
+        }
+        for future in as_completed(futures):
+            path = futures[future]
+            try:
+                summary = future.result()
+                print(f"\n Processed: {path}")
+                xml_summaries.append(summary)
+            except Exception as e:
+                print(f" Failed: {path} — {e}")
+
+    print("\n All XML files processed. Generating technical summary...\n")
+
+    # Final summary chain
+    combined_content = "\n\n".join(xml_summaries)
+    final_result = summary_chain.run(combined_summaries=combined_content)
+
+    print("====== FINAL TECHNICAL SUMMARY ======\n")
+    print(final_result)
+
+#  Example Usage
+if __name__ == "__main__":
+    run_parallel_xml_analysis(r"C:\Users\rdamera\Downloads\OrderManagement 1")
