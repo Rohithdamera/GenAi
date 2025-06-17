@@ -12,7 +12,7 @@ def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="Fourth_Chatbot",
-        openai_api_key="",  # Replace with your actual key
+        openai_api_key="",  # Your Azure API key here
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
         temperature=0.7,
@@ -23,21 +23,26 @@ def get_openai_client():
     )
 
 # === Globals ===
-project_path = r"C:\Users\rdamera\Downloads\OrderManagement 1"
+project_path = r"C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement"
 last_file_list = []
 combined_summaries = ""
 
-# === TOOL 1: Auto-detect mule XML files in the project
+# === TOOL 1: Find only .xml files inside valid src/main/mule folders (exclude target folders)
 def find_all_mule_xml_files(project_dir):
     xml_files = []
     for root, dirs, files in os.walk(project_dir):
+        # Skip build/target folders
+        if any(part.lower() == "target" for part in Path(root).parts):
+            continue
+
+        # Match only those that are exactly under src/main/mule
         normalized_root = os.path.normpath(root)
         if normalized_root.endswith(os.path.normpath(os.path.join("src", "main", "mule"))):
             for sub_root, _, sub_files in os.walk(root):
                 for file in sub_files:
                     if file.lower().endswith(".xml"):
-                        full_path = os.path.normpath(os.path.join(sub_root, file))
-                        xml_files.append(full_path)
+                        xml_files.append(os.path.normpath(os.path.join(sub_root, file)))
+
     return xml_files
 
 def list_mule_xml_files(_: str) -> str:
@@ -45,7 +50,7 @@ def list_mule_xml_files(_: str) -> str:
 
     mule_xml_files = find_all_mule_xml_files(project_path)
     if not mule_xml_files:
-        return "No XML files found under any src/main/mule directory."
+        return "No XML files found under valid src/main/mule folders."
 
     last_file_list = mule_xml_files
     return f"Found {len(mule_xml_files)} MuleSoft XML files:\n" + "\n".join(mule_xml_files)
@@ -110,7 +115,7 @@ if __name__ == "__main__":
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
 
     tools = [
-        Tool(name="ListMuleXMLFiles", func=list_mule_xml_files, description="Auto-detect and list all MuleSoft XML files in any src/main/mule folder."),
+        Tool(name="ListMuleXMLFiles", func=list_mule_xml_files, description="List XML files only under valid src/main/mule folders (excluding target folders)."),
         Tool(name="SummarizeAllFiles", func=summarize_all_files, description="Summarize all loaded Mule XML files."),
         Tool(name="GenerateFinalSummary", func=generate_final_summary, description="Generate final overview summary from all MuleSoft file summaries.")
     ]
@@ -127,5 +132,5 @@ if __name__ == "__main__":
     print("MuleSummarizerAgent is now deciding what to do...\n")
 
     agent.invoke(
-        "Detect and list all XML files inside any 'src/main/mule' folders in the project, summarize each one, and create a final overall summary."
+        "List all XML files only under src/main/mule folders in the project (not from target or build folders), summarize each one, and give a final project-level technical summary."
     )
