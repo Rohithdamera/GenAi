@@ -32,42 +32,28 @@ def get_openai_client(model_instance_name: str) -> AzureChatOpenAI:
         temperature=0.3,
         max_tokens=2048,
         model_kwargs={
-            "top_p": 0.9,
-            "frequency_penalty": 0,
-            "presence_penalty": 0
+            "top_p": 0.8,
+            "frequency_penalty": 0.0,
+            "presence_penalty": 0.0
         }
     )
 
-# Force output to be Mermaid only, no explanation
-MERMAID_ONLY_PROMPT = (
-    "You are an AI that strictly generates **only Mermaid diagrams** from BizTalk .odx or JSON config content.\n\n"
-    "Do NOT write paragraphs, summaries, or descriptions.\n"
-    "Only respond using the :::mermaid code block.\n"
-    "Start with :::mermaid and end with :::.\n"
-    "Use flowchart TD format.\n"
-    "Make sure the diagram shows all steps and transitions clearly.\n"
-    "Example format:\n"
+# Minimal prompt to get only mermaid graph, nothing else
+DEFAULT_PROMPT = (
+    "You are an expert in BizTalk orchestrations and Mermaid diagrams.\n"
+    "From the content of the uploaded .odx or .json file, extract the orchestration process.\n"
+    "Only return a valid mermaid flowchart graph.\n"
+    "Do not write any explanation or markdown formatting other than :::mermaid and ::: tags.\n"
+    "Output format:\n"
     ":::mermaid\n"
-    "flowchart TD\n"
-    "    Step1[Step 1]\n"
-    "    Step2[Step 2]\n"
-    "    Step1 --> Step2\n"
+    "<mermaid flowchart>\n"
     ":::\n"
 )
 
 def process_with_openai(client: AzureChatOpenAI, file_text: str, prompt: str) -> str:
-    messages = [
-        SystemMessage(content=prompt),
-        HumanMessage(content=file_text)
-    ]
-    result = client.invoke(messages).content.strip()
-    # Extract only :::mermaid block
-    if ":::mermaid" in result and ":::” in result:
-        start = result.find(":::mermaid")
-        end = result.find(":::", start + 10)
-        mermaid_block = result[start:end+3]
-        return mermaid_block
-    return result  # fallback
+    system_msg = SystemMessage(content=prompt)
+    user_msg = HumanMessage(content=file_text)
+    return client.invoke([system_msg, user_msg]).content.strip()
 
 def detect_file_type_and_decode(raw_body: str) -> str:
     try:
@@ -81,6 +67,7 @@ def lambda_handler(event: dict, context: dict) -> dict:
         if not raw_body:
             raise ValueError("Missing request body.")
 
+        # Decode base64 if needed
         if event.get("isBase64Encoded", False):
             raw_body = b64decode(raw_body)
         else:
@@ -91,18 +78,18 @@ def lambda_handler(event: dict, context: dict) -> dict:
         if not model_instance_name:
             raise ValueError("Missing 'model_instance_name' in headers.")
 
-        # Use custom prompt only if absolutely needed
+        # Take custom prompt if provided
         custom_prompt = headers.get('prompt', '').strip()
-        final_prompt = custom_prompt if custom_prompt else MERMAID_ONLY_PROMPT
+        prompt_to_use = custom_prompt if custom_prompt else DEFAULT_PROMPT
 
         file_text = detect_file_type_and_decode(raw_body)
         client = get_openai_client(model_instance_name)
-        result = process_with_openai(client, file_text, final_prompt)
+        result = process_with_openai(client, file_text, prompt_to_use)
 
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"output": result})
+            "body": json.dumps({"mermaid": result})
         }
 
     except Exception as e:
