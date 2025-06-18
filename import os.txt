@@ -51,13 +51,15 @@ def list_mule_xml_files(_: str) -> str:
     mule_xml_files = find_all_mule_xml_files(project_path)
     last_file_list = mule_xml_files
     if not mule_xml_files:
-        return "No XML files found under valid src/main/mule folders."
-    return f"Found {len(mule_xml_files)} MuleSoft XML files:\n" + "\n".join(mule_xml_files)
+        return "[STOP] No XML files found under valid src/main/mule folders."
+    return f"[SUCCESS] Found {len(mule_xml_files)} MuleSoft XML files:\n" + "\n".join(mule_xml_files)
 
 # === TOOL 2: Summarize XML Files ===
 def summarize_all_files(_: str) -> str:
+    global combined_summaries
     if not last_file_list:
-        return "No XML files loaded to summarize."
+        return "[SKIP] No files loaded from previous step. Skipping summarization."
+
     client = get_openai_client()
 
     prompt = PromptTemplate(
@@ -71,24 +73,32 @@ Describe their purpose and how they interact. Use clear headings and bullet poin
 """
     )
 
-    summarize_chain = (
-        RunnablePassthrough()
-        | RunnableLambda(lambda paths: [Path(path).read_text(encoding="utf-8") for path in paths])
-        | RunnableLambda(lambda contents: [{"xml_content": c} for c in contents])
-        | RunnableMap({"xml_content": RunnablePassthrough()})
-        | prompt
-        | client
-        | StrOutputParser()
-    )
+    try:
+        summarize_chain = (
+            RunnablePassthrough()
+            | RunnableLambda(lambda paths: [Path(path).read_text(encoding="utf-8") for path in paths])
+            | RunnableLambda(lambda contents: [{"xml_content": c} for c in contents])
+            | RunnableMap({"xml_content": RunnablePassthrough()})
+            | prompt
+            | client
+            | StrOutputParser()
+        )
 
-    global combined_summaries
-    combined_summaries = summarize_chain.invoke(last_file_list)
-    return "All XML files have been summarized using LangChain's internal parallel processing."
+        combined_summaries = summarize_chain.invoke(last_file_list)
+        if not combined_summaries:
+            return "[SKIP] Summarization chain completed but returned empty result."
+
+        return "[SUCCESS] All XML files summarized successfully."
+
+    except Exception as e:
+        return f"[ERROR] Failed to summarize files: {str(e)}"
 
 # === TOOL 3: Final Overall Summary ===
 def generate_final_summary(_: str) -> str:
+    global combined_summaries
     if not combined_summaries:
-        return "No summaries available to compile."
+        return "[SKIP] No summaries available. Skipping final summary."
+
     client = get_openai_client()
     prompt_template = PromptTemplate(
         input_variables=["combined_summaries"],
@@ -105,8 +115,12 @@ Include:
 {combined_summaries}
 """
     )
-    chain = LLMChain(llm=client, prompt=prompt_template)
-    return chain.run(combined_summaries="\n\n".join(combined_summaries) if isinstance(combined_summaries, list) else combined_summaries)
+
+    try:
+        chain = LLMChain(llm=client, prompt=prompt_template)
+        return chain.run(combined_summaries="\n\n".join(combined_summaries) if isinstance(combined_summaries, list) else combined_summaries)
+    except Exception as e:
+        return f"[ERROR] Final summary generation failed: {str(e)}"
 
 # === MAIN EXECUTION ===
 if __name__ == "__main__":
@@ -131,20 +145,6 @@ if __name__ == "__main__":
 
     print("MuleSummarizerAgent is now deciding what to do...\n")
 
-    # === Step 1: List XML files ===
-    result1 = tools[0].func("")
-    print(f"\n[STEP 1] XML Listing Result:\n{result1}\n")
-
-    if "No XML files" in result1:
-        print("[STOP] No XML files found. Exiting pipeline.")
-    else:
-        # === Step 2: Summarize Files ===
-        result2 = tools[1].func("")
-        print(f"\n[STEP 2] Summary Result:\n{result2}\n")
-
-        if "summarized" not in result2.lower():
-            print("[SKIP] Summarization failed or no valid content. Skipping final summary.")
-        else:
-            # === Step 3: Final Summary ===
-            result3 = tools[2].func("")
-            print(f"\n[STEP 3] Final Project Summary:\n\n{result3}")
+    agent.invoke(
+        "Find and summarize all MuleSoft XML files strictly inside any src/main/mule folders and generate a final summary."
+    )
