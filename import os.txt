@@ -5,9 +5,8 @@ from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from langchain.agents import initialize_agent, Tool
 from langchain.memory import ConversationBufferMemory
-from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
 from langchain.schema.output_parser import StrOutputParser
-from langchain.schema.runnable import RunnableMap
+from langchain.schema.runnable import RunnableLambda, RunnablePassthrough, RunnableMap
 
 # === Azure OpenAI client ===
 def get_openai_client():
@@ -40,6 +39,7 @@ def find_all_xml_files(base_path: str, subfolder: str) -> list:
 # === AGENT 1: Mule XML Summarizer ===
 mule_files = []
 mule_summary = ""
+combined_summaries = []
 
 def list_mule_xml_files(_: str) -> str:
     global mule_files
@@ -49,10 +49,13 @@ def list_mule_xml_files(_: str) -> str:
     return f"Found {len(mule_files)} Mule XML files:\n" + "\n".join(mule_files)
 
 def summarize_all_files(_: str) -> str:
+    global mule_summary, combined_summaries
     if not mule_files:
         return "[SKIP] No Mule files to summarize."
+
     client = get_openai_client()
-    prompt = PromptTemplate(
+
+    parallel_prompt = PromptTemplate(
         input_variables=["xml_content"],
         template="""
 You are an expert in MuleSoft. Explain this XML configuration clearly for developers and architects.
@@ -61,23 +64,48 @@ Focus on flows, subflows, processors, and global configs.
 {xml_content}
 """
     )
+
     chain = (
         RunnablePassthrough()
         | RunnableLambda(lambda paths: [Path(p).read_text(encoding="utf-8") for p in paths])
         | RunnableLambda(lambda contents: [{"xml_content": c} for c in contents])
         | RunnableMap({"xml_content": RunnablePassthrough()})
-        | prompt
+        | parallel_prompt
         | client
         | StrOutputParser()
     )
-    global mule_summary
+
     mule_summary = chain.invoke(mule_files)
+    combined_summaries = mule_summary if isinstance(mule_summary, list) else [mule_summary]
+
     return "[SUCCESS] All XML files summarized successfully."
 
 def generate_final_summary(_: str) -> str:
-    if not mule_summary:
-        return "[SKIP] Mule summary not available."
-    return mule_summary  # Stored for Agent 3
+    global combined_summaries
+    if not combined_summaries:
+        return "[SKIP] No summaries available. Skipping final summary."
+
+    client = get_openai_client()
+    prompt_template = PromptTemplate(
+        input_variables=["combined_summaries"],
+        template="""
+You are an expert in summarizing complex XML-based MuleSoft configuration files used in integration applications.
+Explain the logic in a clear and understandable way for beginners, non-technical stakeholders, and developers.
+Focus on identifying and explaining flows, global configurations, data flow, and how components interact.
+
+Include:
+- Major flows/subflows
+- Key global configurations or services
+- Overall integration flow and purpose
+
+{combined_summaries}
+"""
+    )
+    try:
+        chain = LLMChain(llm=client, prompt=prompt_template)
+        return chain.run(combined_summaries="\n\n".join(combined_summaries))
+    except Exception as e:
+        return f"[ERROR] Final summary generation failed: {str(e)}"
 
 # === AGENT 2: pom.xml Summarizer ===
 pom_summary = ""
@@ -136,11 +164,10 @@ POM Summary:
 """
     )
     chain = LLMChain(llm=client, prompt=prompt)
-    return chain.run(mule_summary=mule_summary, pom_summary=pom_summary)
+    return chain.run(mule_summary="\n\n".join(combined_summaries), pom_summary=pom_summary)
 
 # === MAIN ===
 if __name__ == "__main__":
-    # Agent 1
     print("\n=== Agent 1: Mule Folder XML Analysis ===")
     memory1 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
     agent1 = initialize_agent(
@@ -156,7 +183,6 @@ if __name__ == "__main__":
     )
     agent1.invoke("List MuleSoft XML files strictly under src/main/mule, summarize and store the summary internally. Do not print.")
 
-    # Agent 2
     print("\n=== Agent 2: pom.xml Analyzer ===")
     memory2 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
     agent2 = initialize_agent(
@@ -171,7 +197,6 @@ if __name__ == "__main__":
     )
     agent2.invoke("Locate and summarize pom.xml, store internally for Agent 3.")
 
-    # Agent 3
     print("\n=== Agent 3: Unified Summary Generator ===")
     memory3 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
     agent3 = initialize_agent(
