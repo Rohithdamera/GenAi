@@ -1,11 +1,10 @@
 import json
 import requests
 from sseclient import SSEClient
-import re
+from urllib.parse import urljoin, urlparse
 
-# MCP config
-MCP_URL = "https://your.mcp.server.url"  # Replace with actual MCP base URL
-MCP_HEADERS = {"Content-Type": "application/json"}
+# Step 1: MCP connection to get sessionId
+MCP_URL = "https://your.mcp.server.url"  # Replace this
 MCP_PAYLOAD = {
     "method": "tools/call",
     "params": {
@@ -14,59 +13,78 @@ MCP_PAYLOAD = {
     }
 }
 
-def extract_session_id(event_data: str):
-    # Extract sessionId from /message?sessionId=....
-    match = re.search(r"sessionId=([a-f0-9\-]+)", event_data)
-    return match.group(1) if match else None
+def extract_base_url(mcp_url):
+    parsed = urlparse(mcp_url)
+    return f"{parsed.scheme}://{parsed.netloc}"
 
-def get_vendor_data_from_session(session_id: str):
-    message_url = f"{MCP_URL}/message?sessionId={session_id}"
+def step1_get_session_id():
     try:
-        print(f"📡 Connecting to message endpoint: {message_url}")
-        response = requests.get(message_url, timeout=300)
-
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        print(f"[ERROR] Failed to fetch from /message: {e}")
-        return None
-
-def get_vendor_data():
-    try:
-        print("⏳ Step 1: Connect to MCP and initiate stream...")
+        print("🔌 Step 1: Connect to MCP and initiate stream...")
 
         response = requests.post(
             MCP_URL,
             json=MCP_PAYLOAD,
-            headers=MCP_HEADERS,
+            headers={"Content-Type": "application/json"},
             stream=True,
             timeout=300
         )
 
         client = SSEClient(response)
+        print("👂 Waiting for sessionId in event stream...")
 
-        print("🔄 Waiting for sessionId in event stream...\n")
         for event in client.events():
-            print(f"📨 Event received: {event.data.strip()}")
-            session_id = extract_session_id(event.data)
-            if session_id:
-                print(f"✅ Found sessionId: {session_id}")
-                print("⏳ Step 2: Calling /message to fetch vendor data...")
-                return get_vendor_data_from_session(session_id)
-
-        print("❌ sessionId not found in stream.")
+            session_line = event.data.strip()
+            if "sessionId=" in session_line:
+                print(f"✅ Found sessionId: {session_line}")
+                return session_line  # e.g. /message?sessionId=...
         return None
-
     except Exception as e:
-        print(f"[ERROR] Streaming failed: {e}")
+        print(f"[ERROR] Failed to get sessionId from MCP: {e}")
         return None
 
-# === Run ===
-if __name__ == "__main__":
-    vendor_data = get_vendor_data()
+def step2_get_vendor_data(message_path: str):
+    try:
+        base_url = extract_base_url(MCP_URL)
+        
+        # IMPORTANT: fix the wrong URL if "/sse" causes 404
+        # Postman probably calls just base + message path
+        full_url = urljoin(base_url, message_path)  # do NOT prepend /sse/
+        
+        print(f"🔁 Step 2: Calling message endpoint: {full_url}")
 
-    if vendor_data:
-        print("\n✅ FINAL VENDOR DATA:\n")
-        print(json.dumps(vendor_data, indent=2))
+        response = requests.get(
+            full_url,
+            headers={"Accept": "text/event-stream"},
+            stream=True,
+            timeout=300
+        )
+
+        client = SSEClient(response)
+        for event in client.events():
+            data = event.data.strip()
+            try:
+                parsed = json.loads(data)
+                print("✅ Vendor JSON received successfully!")
+                return parsed
+            except json.JSONDecodeError:
+                print("⏳ Still waiting for JSON data...\n")
+
+        return None
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch from /message: {e}")
+        return None
+
+# === Main Execution ===
+if __name__ == "__main__":
+    message_path = step1_get_session_id()
+
+    if not message_path:
+        print("❌ No sessionId received from MCP. Cannot proceed.")
     else:
-        print("\n❌ Vendor JSON not received. Something is wrong.")
+        result = step2_get_vendor_data(message_path)
+
+        if result:
+            print("\n✅ FINAL VENDOR DATA:\n")
+            print(json.dumps(result, indent=2))
+        else:
+            print("\n❌ Vendor JSON not received. Something is wrong.")
