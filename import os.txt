@@ -1,6 +1,5 @@
+import urllib3
 import json
-import http.client
-from urllib.parse import urlparse
 from langchain.chat_models import AzureChatOpenAI
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
@@ -8,8 +7,9 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.agents import Tool, initialize_agent
 from langchain.memory import ConversationBufferMemory
 
-# === MCP Configuration ===
-MCP_URL = "https://your.mcp.server.url"  # ✅ Replace with actual working MCP endpoint
+# === MCP Server Setup ===
+MCP_URL = "https://your.mcp.server.url"  # Replace with your actual URL
+MCP_HEADERS = {"Content-Type": "application/json"}
 MCP_PAYLOAD = {
     "method": "tools/call",
     "params": {
@@ -17,19 +17,15 @@ MCP_PAYLOAD = {
         "arguments": {}
     }
 }
-MCP_HEADERS = {
-    "Content-Type": "application/json"
-}
 
-# === Global Store ===
 mcp_raw_data = ""
 
-# === Azure OpenAI Setup ===
+# === Azure OpenAI Config ===
 def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="Fourth_Chatbot",
-        openai_api_key="",  # 🔑 Add key
+        openai_api_key="",  # Insert your Azure key
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
         temperature=0.5,
@@ -37,77 +33,72 @@ def get_openai_client():
         model_kwargs={"top_p": 0.9}
     )
 
-# === TOOL 1: Custom MCP Fetch using raw HTTP ===
+# === TOOL 1: MCP Raw Streaming Fetch ===
 def fetch_and_store_mcp_data(_: str) -> str:
     global mcp_raw_data
+
     try:
-        print("⏳ Connecting to MCP with raw HTTP...")
+        print("⏳ Connecting to MCP server using raw stream...")
 
-        # Parse URL parts
-        parsed = urlparse(MCP_URL)
-        conn = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=300)
+        http = urllib3.PoolManager(timeout=urllib3.util.Timeout(connect=30, read=300))
 
-        # Prepare path
-        path = parsed.path or "/"
+        encoded_body = json.dumps(MCP_PAYLOAD).encode("utf-8")
+        response = http.request(
+            "POST",
+            MCP_URL,
+            headers=MCP_HEADERS,
+            body=encoded_body,
+            preload_content=False  # <== KEY: stream the response
+        )
 
-        # Encode body
-        body = json.dumps(MCP_PAYLOAD)
+        raw_chunks = b""
+        for chunk in response.stream(amt=4096):
+            raw_chunks += chunk
 
-        # Send request
-        conn.request("POST", path, body=body, headers=MCP_HEADERS)
+        response.release_conn()
+        raw_text = raw_chunks.decode("utf-8")
+        parsed_json = json.loads(raw_text)
+        mcp_raw_data = json.dumps(parsed_json, indent=2)
 
-        # Read response
-        response = conn.getresponse()
-        if response.status != 200:
-            return f"[ERROR] MCP server responded with status code: {response.status}"
-
-        raw_bytes = response.read()  # Fully read the stream
-        raw_text = raw_bytes.decode("utf-8")
-
-        # Try parsing to JSON
-        mcp_raw_data = json.dumps(json.loads(raw_text), indent=2)
-        return "[SUCCESS] MCP data fetched and stored."
-
+        return "[SUCCESS] MCP data fetched and stored successfully."
     except Exception as e:
-        return f"[ERROR] Raw MCP fetch failed: {str(e)}"
+        return f"[ERROR] MCP stream fetch failed: {str(e)}"
 
-# === TOOL 2: Summarize JSON chunks ===
+# === TOOL 2: Summarize MCP JSON ===
 def summarize_mcp_data(_: str) -> str:
     global mcp_raw_data
     if not mcp_raw_data:
-        return "[SKIP] MCP data not fetched. Run fetch first."
+        return "[SKIP] MCP data not available."
 
     try:
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
         chunks = splitter.split_text(mcp_raw_data)
 
-        client = get_openai_client()
+        llm = get_openai_client()
         prompt = PromptTemplate(
             input_variables=["chunk"],
             template="""
-You are an assistant. Summarize the following vendor JSON data.
-
-- List vendor names
-- Mention any fields, IDs, or relationships
-- Keep it simple and readable
+You are an assistant. Summarize the following vendor JSON in plain English:
+- Vendor names
+- Key properties
+- Any unique configs or fields
 
 Chunk:
 {chunk}
 """
         )
-        chain = LLMChain(llm=client, prompt=prompt)
+        chain = LLMChain(llm=llm, prompt=prompt)
         summaries = [chain.run({"chunk": c}) for c in chunks]
-
         return "\n\n".join(summaries)
     except Exception as e:
-        return f"[ERROR] Failed to summarize MCP data: {str(e)}"
+        return f"[ERROR] Failed to summarize: {str(e)}"
 
 # === LangChain Agent Setup ===
 def run_agent():
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
     tools = [
-        Tool(name="FetchMCPData", func=fetch_and_store_mcp_data, description="Fetch vendor data using raw HTTP."),
-        Tool(name="SummarizeMCPData", func=summarize_mcp_data, description="Summarize fetched vendor data.")
+        Tool(name="FetchMCPData", func=fetch_and_store_mcp_data, description="Fetch from MCP using raw streaming."),
+        Tool(name="SummarizeMCPData", func=summarize_mcp_data, description="Summarize vendor response.")
     ]
     return initialize_agent(
         tools=tools,
@@ -119,9 +110,8 @@ def run_agent():
 
 # === MAIN ===
 if __name__ == "__main__":
-    print("🔧 MCP Raw Agent Starting...")
+    print("🔧 Starting MCP Agent with streaming...")
     agent = run_agent()
-    print("\n🚀 Running full pipeline...\n")
     result = agent.invoke("Fetch vendor data from MCP and summarize it.")
     print("\n✅ Final Summary Output:\n")
     print(result)
