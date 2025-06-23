@@ -1,155 +1,108 @@
-import os
-from pathlib import Path
-
+import json
+import requests
 from langchain.chat_models import AzureChatOpenAI
 from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-from langchain.agents import initialize_agent, Tool
-from langchain.memory import ConversationBufferMemory
 from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
 from langchain.schema.output_parser import StrOutputParser
-from langchain.schema.runnable import RunnableMap
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.chains import LLMChain
+from langchain.agents import Tool, initialize_agent
+from langchain.memory import ConversationBufferMemory
 
-# === Azure OpenAI Configuration ===
+# === MCP Server Configuration ===
+MCP_URL = "https://your.mcp.server.url"  # replace with actual URL
+
+# === Azure OpenAI Client Setup ===
 def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="Fourth_Chatbot",
-        openai_api_key="",  # Add your Azure API key
+        openai_api_key="",  # insert key
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
-        temperature=0.7,
-        max_tokens=2000,
-        model_kwargs={
-            "top_p": 0.9,
-            "frequency_penalty": 0.2,
-            "presence_penalty": 0.1
+        temperature=0.5,
+        max_tokens=1500,
+        model_kwargs={"top_p": 0.9}
+    )
+
+# === Tool 1: Call MCP and Get Data ===
+def call_mcp_server(_: str) -> str:
+    payload = {
+        "method": "tools/call",
+        "params": {
+            "name": "get-vendors",
+            "arguments": {}
         }
+    }
+    try:
+        response = requests.post(MCP_URL, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return f"[ERROR] MCP call failed: {str(e)}"
+
+# === Tool 2: Chunk the JSON Text ===
+def chunk_response_data(text: str) -> list[str]:
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=100,
+        separators=["\n", " ", ","]
     )
+    return splitter.split_text(text)
 
-# === Globals ===
-project_path = r"C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement"
-last_file_list = []
-combined_summaries = ""
-
-# === TOOL 1: List Mule XML Files ===
-def find_all_mule_xml_files(project_dir):
-    xml_files = []
-    for root, dirs, files in os.walk(project_dir):
-        if any(part.lower() == "target" for part in Path(root).parts):
-            continue
-        normalized_root = os.path.normpath(root)
-        if normalized_root.endswith(os.path.normpath(os.path.join("src", "main", "mule"))):
-            for sub_root, _, sub_files in os.walk(root):
-                for file in sub_files:
-                    if file.lower().endswith(".xml"):
-                        xml_files.append(os.path.normpath(os.path.join(sub_root, file)))
-    return xml_files
-
-def list_mule_xml_files(_: str) -> str:
-    global last_file_list
-    mule_xml_files = find_all_mule_xml_files(project_path)
-    last_file_list = mule_xml_files
-    if not mule_xml_files:
-        return "[STOP] No XML files found under valid src/main/mule folders."
-    return f"[SUCCESS] Found {len(mule_xml_files)} MuleSoft XML files:\n" + "\n".join(mule_xml_files)
-
-# === TOOL 2: Summarize XML Files ===
-def summarize_all_files(_: str) -> str:
-    global combined_summaries
-    if not last_file_list:
-        return "[SKIP] No files loaded from previous step. Skipping summarization."
-
-    client = get_openai_client()
-
+# === Tool 3: Summarize a Chunk ===
+def summarize_chunk(chunk: str) -> str:
+    llm = get_openai_client()
     prompt = PromptTemplate(
-        input_variables=["xml_content"],
+        input_variables=["chunk"],
         template="""
-You are an expert in MuleSoft XML configuration. Analyze the following XML file and generate detailed documentation. "
-            "Focus on identifying and explaining flows, subflows, message flows, and global elements. "
-            "Describe their purpose, how they interact, and their role in the overall integration logic,Summarize the integration logic clearly "
-            "Use clear headings and bullet points where appropriate.\n\n"
+You are a data analyst assistant. Summarize the following data chunk in plain English.
+Be concise, but highlight any vendors, configurations, or actions being taken.
 
-
-{xml_content}
+Data:
+{chunk}
 """
     )
+    chain = LLMChain(llm=llm, prompt=prompt)
+    return chain.run({"chunk": chunk})
 
-    try:
-        summarize_chain = (
-            RunnablePassthrough()
-            | RunnableLambda(lambda paths: [Path(path).read_text(encoding="utf-8") for path in paths])
-            | RunnableLambda(lambda contents: [{"xml_content": c} for c in contents])
-            | RunnableMap({"xml_content": RunnablePassthrough()})
-            | prompt
-            | client
-            | StrOutputParser()
-        )
+# === Tool Wrappers for LangChain Agent ===
+def fetch_and_chunk(_: str) -> str:
+    raw_data = call_mcp_server("")
+    if raw_data.startswith("[ERROR]"):
+        return raw_data
+    chunks = chunk_response_data(raw_data)
+    return f"[SUCCESS] MCP data fetched and split into {len(chunks)} chunks."
 
-        combined_summaries = summarize_chain.invoke(last_file_list)
-        if not combined_summaries:
-            return "[SKIP] Summarization chain completed but returned empty result."
+def summarize_all_chunks(_: str) -> str:
+    raw_data = call_mcp_server("")
+    if raw_data.startswith("[ERROR]"):
+        return raw_data
+    chunks = chunk_response_data(raw_data)
+    summaries = [summarize_chunk(c) for c in chunks]
+    return "\n\n".join(summaries)
 
-        return "[SUCCESS] All XML files summarized successfully."
-
-    except Exception as e:
-        return f"[ERROR] Failed to summarize files: {str(e)}"
-
-# === TOOL 3: Final Overall Summary ===
-def generate_final_summary(_: str) -> str:
-    global combined_summaries
-    if not combined_summaries:
-        return "[SKIP] No summaries available. Skipping final summary."
-
-    client = get_openai_client()
-    prompt_template = PromptTemplate(
-        input_variables=["combined_summaries"],
-        template="""
-You are an expert in summarizing complex XML-based MuleSoft configuration files used in integration applications. "
-"Your goal is to explain the content in a way that is clear and understandable for all types of users — including beginners, non-technical stakeholders, and experienced developers. "
-"Carefully analyze the structure and logic of the XML data. Describe the flow of data, "
-"Focus on identifying and explaining flows, subflows, message flows, and global elements. "
-"the purpose of each processor or component (such as HTTP listeners, set-payloads, transformations, loggers, connectors, and conditional logic), and how they work together. "
-"Your explanation should be detailed, insightful, and at least 3x longer than the original XML content. Focus on making the summary educational, easy to follow, and technically accurate so that anyone reading it can understand the integration logic and purpose of the flow."
-"Summarize the integration logic clearly "  
-Include:
-- Major flows/subflows
-- Key global configurations or services
-- Overall integration flow and purpose
-
-{combined_summaries}
-"""
-    )
-
-    try:
-        chain = LLMChain(llm=client, prompt=prompt_template)
-        return chain.run(combined_summaries="\n\n".join(combined_summaries) if isinstance(combined_summaries, list) else combined_summaries)
-    except Exception as e:
-        return f"[ERROR] Final summary generation failed: {str(e)}"
-
-# === MAIN EXECUTION ===
-if __name__ == "__main__":
-    print("Initializing MuleSummarizerAgent with Tools and Memory...\n")
-
+# === LangChain Agent Setup ===
+def run_agent():
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
     tools = [
-        Tool(name="ListMuleXMLFiles", func=list_mule_xml_files, description="List XML files only under valid src/main/mule folders (excluding target folders)."),
-        Tool(name="SummarizeAllFiles", func=summarize_all_files, description="Summarize all loaded Mule XML files."),
-        Tool(name="GenerateFinalSummary", func=generate_final_summary, description="Generate final overview summary from all MuleSoft file summaries.")
+        Tool(name="FetchAndChunkMCPData", func=fetch_and_chunk, description="Fetch and chunk the MCP server response."),
+        Tool(name="SummarizeChunks", func=summarize_all_chunks, description="Summarize all the MCP data chunks."),
     ]
-
-    client = get_openai_client()
     agent = initialize_agent(
         tools=tools,
-        llm=client,
+        llm=get_openai_client(),
         agent_type="openai-functions",
         memory=memory,
         verbose=True
     )
+    return agent
 
-    print("MuleSummarizerAgent is now deciding what to do...\n")
-
-    agent.invoke(
-        "Find and summarize all MuleSoft XML files strictly inside any src/main/mule folders and generate a final summary."
-    )
+# === MAIN ===
+if __name__ == "__main__":
+    agent = run_agent()
+    print("\n>> MCP Summarization Agent Running...\n")
+    result = agent.invoke("Fetch data from the MCP server and summarize all results.")
+    print("\n=== FINAL SUMMARY ===\n")
+    print(result)
