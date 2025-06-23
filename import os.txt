@@ -1,85 +1,101 @@
 import os
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from langchain.chat_models import AzureChatOpenAI
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from langchain.agents import initialize_agent, Tool
 from langchain.memory import ConversationBufferMemory
+from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
 from langchain.schema.output_parser import StrOutputParser
-from langchain.schema.runnable import RunnableLambda, RunnablePassthrough, RunnableMap
+from langchain.schema.runnable import RunnableMap
 
-# === Azure OpenAI client ======================================================
+# === Azure OpenAI Configuration ===
 def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="Fourth_Chatbot",
-        openai_api_key="",  # TODO: add key
+        openai_api_key="",  # Add your Azure API key
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
         temperature=0.7,
         max_tokens=2000,
-        model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1},
+        model_kwargs={
+            "top_p": 0.9,
+            "frequency_penalty": 0.2,
+            "presence_penalty": 0.1
+        }
     )
 
-project_path = r"C:\\Users\\rdamera\\Downloads\\OrderManagement 1\\OrderManagement"
+# === Globals ===
+project_path = r"C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement"
+last_file_list = []
+combined_summaries = ""
 
-# Shared helper
-
-def find_all_xml_files(base_path: str, subfolder: str) -> list[str]:
+# === TOOL 1: List Mule XML Files ===
+def find_all_mule_xml_files(project_dir):
     xml_files = []
-    for root, _, files in os.walk(base_path):
-        if any("target" in part.lower() for part in Path(root).parts):
+    for root, dirs, files in os.walk(project_dir):
+        if any(part.lower() == "target" for part in Path(root).parts):
             continue
-        if os.path.normpath(root).endswith(os.path.normpath(subfolder)):
-            xml_files += [
-                os.path.join(root, f) for f in files if f.lower().endswith(".xml")
-            ]
+        normalized_root = os.path.normpath(root)
+        if normalized_root.endswith(os.path.normpath(os.path.join("src", "main", "mule"))):
+            for sub_root, _, sub_files in os.walk(root):
+                for file in sub_files:
+                    if file.lower().endswith(".xml"):
+                        xml_files.append(os.path.normpath(os.path.join(sub_root, file)))
     return xml_files
 
-# === Agent 1: Mule XML Summariser ============================================
-mule_files: list[str] = []
-mule_summary: str | list[str] = ""
-combined_summaries: list[str] = []
-
 def list_mule_xml_files(_: str) -> str:
-    global mule_files
-    mule_files = find_all_xml_files(project_path, os.path.join("src", "main", "mule"))
-    if not mule_files:
-        return "[STOP] No Mule XML files found."
-    return f"Found {len(mule_files)} Mule XML files:\n" + "\n".join(mule_files)
+    global last_file_list
+    mule_xml_files = find_all_mule_xml_files(project_path)
+    last_file_list = mule_xml_files
+    if not mule_xml_files:
+        return "[STOP] No XML files found under valid src/main/mule folders."
+    return f"[SUCCESS] Found {len(mule_xml_files)} MuleSoft XML files:\n" + "\n".join(mule_xml_files)
 
+# === TOOL 2: Summarize XML Files ===
 def summarize_all_files(_: str) -> str:
-    global mule_summary, combined_summaries
-    if not mule_files:
-        return "[SKIP] No Mule files to summarize."
+    global combined_summaries
+    if not last_file_list:
+        return "[SKIP] No files loaded from previous step. Skipping summarization."
 
     client = get_openai_client()
 
-    parallel_prompt = PromptTemplate(
+    prompt = PromptTemplate(
         input_variables=["xml_content"],
         template="""
-You are an expert in MuleSoft. Explain this XML configuration clearly for developers and architects.
-Focus on flows, subflows, processors, and global configs.
+You are an expert in MuleSoft XML configuration. Analyze the following XML file and generate detailed documentation. "
+            "Focus on identifying and explaining flows, subflows, message flows, and global elements. "
+            "Describe their purpose, how they interact, and their role in the overall integration logic,Summarize the integration logic clearly "
+            "Use clear headings and bullet points where appropriate.\n\n"
+
 
 {xml_content}
-""",
+"""
     )
 
-    chain = (
-        RunnablePassthrough()
-        | RunnableLambda(lambda paths: [Path(p).read_text(encoding="utf-8") for p in paths])
-        | RunnableLambda(lambda contents: [{"xml_content": c} for c in contents])
-        | RunnableMap({"xml_content": RunnablePassthrough()})
-        | parallel_prompt
-        | client
-        | StrOutputParser()
-    )
+    try:
+        summarize_chain = (
+            RunnablePassthrough()
+            | RunnableLambda(lambda paths: [Path(path).read_text(encoding="utf-8") for path in paths])
+            | RunnableLambda(lambda contents: [{"xml_content": c} for c in contents])
+            | RunnableMap({"xml_content": RunnablePassthrough()})
+            | prompt
+            | client
+            | StrOutputParser()
+        )
 
-    mule_summary = chain.invoke(mule_files)
-    combined_summaries = mule_summary if isinstance(mule_summary, list) else [mule_summary]
-    return "[SUCCESS] All XML files summarized successfully."
+        combined_summaries = summarize_chain.invoke(last_file_list)
+        if not combined_summaries:
+            return "[SKIP] Summarization chain completed but returned empty result."
 
+        return "[SUCCESS] All XML files summarized successfully."
+
+    except Exception as e:
+        return f"[ERROR] Failed to summarize files: {str(e)}"
+
+# === TOOL 3: Final Overall Summary ===
 def generate_final_summary(_: str) -> str:
     global combined_summaries
     if not combined_summaries:
@@ -89,217 +105,51 @@ def generate_final_summary(_: str) -> str:
     prompt_template = PromptTemplate(
         input_variables=["combined_summaries"],
         template="""
-You are an expert in summarizing complex XML-based MuleSoft configuration files used in integration applications.
-Explain the logic in a clear and understandable way for beginners, non-technical stakeholders, and developers.
-Focus on identifying and explaining flows, global configurations, data flow, and how components interact.
-
+You are an expert in summarizing complex XML-based MuleSoft configuration files used in integration applications. "
+"Your goal is to explain the content in a way that is clear and understandable for all types of users — including beginners, non-technical stakeholders, and experienced developers. "
+"Carefully analyze the structure and logic of the XML data. Describe the flow of data, "
+"Focus on identifying and explaining flows, subflows, message flows, and global elements. "
+"the purpose of each processor or component (such as HTTP listeners, set-payloads, transformations, loggers, connectors, and conditional logic), and how they work together. "
+"Your explanation should be detailed, insightful, and at least 3x longer than the original XML content. Focus on making the summary educational, easy to follow, and technically accurate so that anyone reading it can understand the integration logic and purpose of the flow."
+"Summarize the integration logic clearly "  
 Include:
 - Major flows/subflows
 - Key global configurations or services
 - Overall integration flow and purpose
 
 {combined_summaries}
-""",
+"""
     )
+
     try:
         chain = LLMChain(llm=client, prompt=prompt_template)
-        return chain.run(combined_summaries="\n\n".join(combined_summaries))
+        return chain.run(combined_summaries="\n\n".join(combined_summaries) if isinstance(combined_summaries, list) else combined_summaries)
     except Exception as e:
         return f"[ERROR] Final summary generation failed: {str(e)}"
 
-# === Agent 2: pom.xml Summariser =============================================
-pom_summary: str = ""
-pom_file: str = ""
-
-def find_pom_file(_: str) -> str:
-    global pom_file
-    pom_file = os.path.join(project_path, "pom.xml")
-    if not os.path.exists(pom_file):
-        return "[STOP] pom.xml not found."
-    return f"Found pom.xml at: {pom_file}"
-
-def summarize_pom(_: str) -> str:
-    global pom_summary
-    if not os.path.exists(pom_file):
-        return "[SKIP] pom.xml not available."
-
-    client = get_openai_client()
-    prompt = PromptTemplate(
-        input_variables=["xml_content"],
-        template="""
-You are an expert in analyzing Maven pom.xml files. Given a pom.xml, summarize its contents in a clear and structured manner...
-
-{xml_content}
-""",
-    )
-    with open(pom_file, encoding="utf-8") as f:
-        xml_content = f.read()
-    chain = LLMChain(llm=client, prompt=prompt)
-    pom_summary = chain.run(xml_content=xml_content)
-    return "[SUCCESS] pom.xml summarized successfully."
-
-# === Agent 3: WSDL / DWL Summariser ==========================================
-wsdl_files: list[str] = []
-wsdl_summary: str | list[str] = ""
-wsdl_combined_summaries: list[str] = []
-wsdl_final_summary: str = ""
-
-def find_wsdl_dwl_files(base_path: str) -> list[str]:
-    result = []
-    for root, _, files in os.walk(base_path):
-        if any("target" in part.lower() for part in Path(root).parts):
-            continue
-        expected = os.path.normpath(os.path.join("src", "main", "resources", "api"))
-        if os.path.normpath(root).endswith(expected):
-            result += [
-                os.path.join(root, f)
-                for f in files
-                if f.lower().endswith((".wsdl", ".dwl"))
-            ]
-    return result
-
-def list_wsdl_dwl_files(_: str) -> str:
-    global wsdl_files
-    wsdl_files = find_wsdl_dwl_files(project_path)
-    if not wsdl_files:
-        return "[STOP] No .wsdl files or .dwl files found."
-    return f"Found {len(wsdl_files)} .wsdl/.dwl files:\n" + "\n".join(wsdl_files)
-
-def summarize_wsdl_dwl_files(_: str) -> str:
-    global wsdl_summary, wsdl_combined_summaries
-    if not wsdl_files:
-        return "[SKIP] No .wsdl/.dwl files to summarize."
-
-    client = get_openai_client()
-    parallel_prompt = PromptTemplate(
-        input_variables=["wsdl_or_dwl"],
-        template="""
-You are an expert in integration artifacts. Analyze the given .wsdl or .dwl file...
-
-{wsdl_or_dwl}
-""",
-    )
-
-    chain = (
-        RunnablePassthrough()
-        | RunnableLambda(lambda paths: [Path(path).read_text(encoding="utf-8") for path in paths])
-        | RunnableLambda(lambda contents: [{"wsdl_or_dwl": c} for c in contents])
-        | RunnableMap({"wsdl_or_dwl": RunnablePassthrough()})
-        | parallel_prompt
-        | client
-        | StrOutputParser()
-    )
-
-    wsdl_summary = chain.invoke(wsdl_files)
-    wsdl_combined_summaries = (
-        wsdl_summary if isinstance(wsdl_summary, list) else [wsdl_summary]
-    )
-    return "[SUCCESS] All .wsdl/.dwl files summarized successfully and stored."
-
-def generate_wsdl_final_summary(_: str) -> str:
-    global wsdl_final_summary
-    if not wsdl_combined_summaries:
-        return "[SKIP] No WSDL/DWL summaries. Skipping."
-
-    client = get_openai_client()
-    final_prompt = PromptTemplate(
-        input_variables=["wsdl_summaries"],
-        template="""
-You will receive multiple summaries of .wsdl and .dwl files. Combine them into a single, clear,
-and well-structured report that explains how these components work together within the integration layer.
-Ensure the output is easy to understand for a new developer reviewing the system.
-
-{wsdl_summaries}
-""",
-    )
-    chain = LLMChain(llm=client, prompt=final_prompt)
-    wsdl_final_summary = chain.run(wsdl_summaries="\n\n".join(wsdl_combined_summaries))
-    return "[SUCCESS] WSDL/DWL summaries aggregated successfully."
-
-# === Agent 4: Unified Summary =================================================
-def generate_unified_report_all(_: str) -> str:
-    if not (combined_summaries and pom_summary and wsdl_final_summary):
-        return "[SKIP] One or more summaries missing; cannot generate unified report."
-
-    client = get_openai_client()
-    prompt = PromptTemplate(
-        input_variables=["mule_summary", "pom_summary", "wsdl_summary"],
-        template="""
-You are Agent4, responsible for producing a single, developer friendly technical report...
-
-Mule XML Summary:
-{mule_summary}
-
-pom.xml Summary:
-{pom_summary}
-
-WSDL / DWL Summary:
-{wsdl_summary}
-""",
-    )
-    chain = LLMChain(llm=client, prompt=prompt)
-    return chain.run(
-        mule_summary="\n\n".join(combined_summaries),
-        pom_summary=pom_summary,
-        wsdl_summary=wsdl_final_summary,
-    )
-
-# === MAIN ====================================================================
+# === MAIN EXECUTION ===
 if __name__ == "__main__":
-    memory1 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-    tools1 = [
-        Tool(name="ListMuleXMLFiles", func=list_mule_xml_files, description="List Mule XMLs under src/main/mule."),
-        Tool(name="SummarizeAllFiles", func=summarize_all_files, description="Summarize Mule XMLs."),
-        Tool(name="GenerateFinalSummary", func=generate_final_summary, description="Generate Mule XML summary (stored)."),
+    print("Initializing MuleSummarizerAgent with Tools and Memory...\n")
+
+    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+
+    tools = [
+        Tool(name="ListMuleXMLFiles", func=list_mule_xml_files, description="List XML files only under valid src/main/mule folders (excluding target folders)."),
+        Tool(name="SummarizeAllFiles", func=summarize_all_files, description="Summarize all loaded Mule XML files."),
+        Tool(name="GenerateFinalSummary", func=generate_final_summary, description="Generate final overview summary from all MuleSoft file summaries.")
     ]
-    agent1 = initialize_agent(tools=tools1, llm=get_openai_client(), agent_type="openai-functions", memory=memory1, verbose=True)
 
-    memory2 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-    tools2 = [
-        Tool(name="FindPOM", func=find_pom_file, description="Find pom.xml."),
-        Tool(name="SummarizePOM", func=summarize_pom, description="Summarize pom.xml structure & dependencies."),
-    ]
-    agent2 = initialize_agent(tools=tools2, llm=get_openai_client(), agent_type="openai-functions", memory=memory2, verbose=True)
+    client = get_openai_client()
+    agent = initialize_agent(
+        tools=tools,
+        llm=client,
+        agent_type="openai-functions",
+        memory=memory,
+        verbose=True
+    )
 
-    memory3 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-    tools3 = [
-        Tool(name="ListWSDLorDWLFiles", func=list_wsdl_dwl_files, description="List .wsdl/.dwl files under src/main/resources/api."),
-        Tool(name="SummarizeWSDLorDWLFiles", func=summarize_wsdl_dwl_files, description="Summarize all listed .wsdl/.dwl files."),
-        Tool(name="GenerateWSDLFinalSummary", func=generate_wsdl_final_summary, description="Return combined WSDL/DWL summary."),
-    ]
-    agent3 = initialize_agent(tools=tools3, llm=get_openai_client(), agent_type="openai-functions", memory=memory3, verbose=True)
+    print("MuleSummarizerAgent is now deciding what to do...\n")
 
-    memory4 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-    tools4 = [
-        Tool(name="GenerateUnifiedSummary", func=generate_unified_report_all, description="Combine Mule, pom.xml, and WSDL/DWL summaries."),
-    ]
-    agent4 = initialize_agent(tools=tools4, llm=get_openai_client(), agent_type="openai-functions", memory=memory4, verbose=True)
-
-    tasks = {
-        "Agent1": (
-            agent1,
-            "List MuleSoft XML files strictly under src/main/mule, summarize and store the summary internally. Do not print.",
-        ),
-        "Agent2": (
-            agent2,
-            "Locate and summarize pom.xml, store internally for Agent 4.",
-        ),
-        "Agent3": (
-            agent3,
-            "Find and summarize all .wsdl and .dwl files strictly under src/main/resources/api; store the final summary internally. Do not print.",
-        ),
-    }
-
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {pool.submit(agent.invoke, prompt): name for name, (agent, prompt) in tasks.items()}
-        for future in as_completed(futures):
-            name = futures[future]
-            try:
-                _ = future.result()
-                print(f"{name}: completed.")
-            except Exception as e:
-                print(f"{name}: failed with {e}")
-
-    final_report = agent4.invoke("Generate final unified summary of all collected artefact summaries.")
-    print("\n[FINAL UNIFIED SUMMARY]\n")
-    print(final_report)
+    agent.invoke(
+        "Find and summarize all MuleSoft XML files strictly inside any src/main/mule folders and generate a final summary."
+    )
