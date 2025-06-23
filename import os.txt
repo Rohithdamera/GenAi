@@ -1,9 +1,11 @@
 import json
 import requests
 from sseclient import SSEClient
+import re
 
-# MCP Configuration
-MCP_URL = "https://your.mcp.server.url"  # Replace with actual MCP URL
+# MCP config
+MCP_URL = "https://your.mcp.server.url"  # Replace with actual MCP base URL
+MCP_HEADERS = {"Content-Type": "application/json"}
 MCP_PAYLOAD = {
     "method": "tools/call",
     "params": {
@@ -12,35 +14,47 @@ MCP_PAYLOAD = {
     }
 }
 
-def stream_until_vendor_data():
+def extract_session_id(event_data: str):
+    # Extract sessionId from /message?sessionId=....
+    match = re.search(r"sessionId=([a-f0-9\-]+)", event_data)
+    return match.group(1) if match else None
+
+def get_vendor_data_from_session(session_id: str):
+    message_url = f"{MCP_URL}/message?sessionId={session_id}"
     try:
-        print("⏳ Connecting to MCP server (event-stream)...")
+        print(f"📡 Connecting to message endpoint: {message_url}")
+        response = requests.get(message_url, timeout=300)
+
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch from /message: {e}")
+        return None
+
+def get_vendor_data():
+    try:
+        print("⏳ Step 1: Connect to MCP and initiate stream...")
 
         response = requests.post(
             MCP_URL,
             json=MCP_PAYLOAD,
-            headers={"Content-Type": "application/json"},
+            headers=MCP_HEADERS,
             stream=True,
-            timeout=600  # ⏲️ Wait up to 10 minutes if needed
+            timeout=300
         )
-
-        print("🔄 Listening to MCP event stream...\n")
 
         client = SSEClient(response)
 
+        print("🔄 Waiting for sessionId in event stream...\n")
         for event in client.events():
-            print(f"🔹 Event received:")
-            print(event.data.strip())
+            print(f"📨 Event received: {event.data.strip()}")
+            session_id = extract_session_id(event.data)
+            if session_id:
+                print(f"✅ Found sessionId: {session_id}")
+                print("⏳ Step 2: Calling /message to fetch vendor data...")
+                return get_vendor_data_from_session(session_id)
 
-            try:
-                # Attempt to parse JSON
-                parsed = json.loads(event.data)
-                print("\n✅ Parsed JSON received!")
-                return parsed
-            except json.JSONDecodeError:
-                continue  # Not JSON yet — wait for next event
-
-        print("\n❌ No valid vendor data was received.")
+        print("❌ sessionId not found in stream.")
         return None
 
     except Exception as e:
@@ -49,10 +63,10 @@ def stream_until_vendor_data():
 
 # === Run ===
 if __name__ == "__main__":
-    vendor_data = stream_until_vendor_data()
+    vendor_data = get_vendor_data()
 
     if vendor_data:
         print("\n✅ FINAL VENDOR DATA:\n")
         print(json.dumps(vendor_data, indent=2))
     else:
-        print("\n❌ Vendor JSON not received from stream.")
+        print("\n❌ Vendor JSON not received. Something is wrong.")
