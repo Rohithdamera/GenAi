@@ -1,10 +1,11 @@
 import json
 import requests
 from sseclient import SSEClient
-from urllib.parse import urljoin, urlparse
 
-# Step 1: MCP connection to get sessionId
-MCP_URL = "https://your.mcp.server.url"  # Replace this
+# === CONFIG ===
+MCP_URL = "https://your.mcp.server.url"  # Step 1 endpoint
+MESSAGE_BASE_URL = "https://vendorstool-app-6b0n96.dw4w1g-1.gbr-e1.cloudhub.io"  # Step 2 domain
+
 MCP_PAYLOAD = {
     "method": "tools/call",
     "params": {
@@ -13,11 +14,7 @@ MCP_PAYLOAD = {
     }
 }
 
-def extract_base_url(mcp_url):
-    parsed = urlparse(mcp_url)
-    return f"{parsed.scheme}://{parsed.netloc}"
-
-def step1_get_session_id():
+def step1_get_message_path():
     try:
         print("🔌 Step 1: Connect to MCP and initiate stream...")
 
@@ -33,24 +30,25 @@ def step1_get_session_id():
         print("👂 Waiting for sessionId in event stream...")
 
         for event in client.events():
-            session_line = event.data.strip()
-            if "sessionId=" in session_line:
-                print(f"✅ Found sessionId: {session_line}")
-                return session_line  # e.g. /message?sessionId=...
+            data = event.data.strip()
+            if "sessionId=" in data:
+                print(f"✅ Found session path: {data}")
+                return data  # example: /message?sessionId=...
         return None
+
     except Exception as e:
         print(f"[ERROR] Failed to get sessionId from MCP: {e}")
         return None
 
-def step2_get_vendor_data(message_path: str):
+def step2_get_vendor_json(message_path: str):
     try:
-        base_url = extract_base_url(MCP_URL)
-        
-        # IMPORTANT: fix the wrong URL if "/sse" causes 404
-        # Postman probably calls just base + message path
-        full_url = urljoin(base_url, message_path)  # do NOT prepend /sse/
-        
-        print(f"🔁 Step 2: Calling message endpoint: {full_url}")
+        # Combine manual domain + message path
+        if message_path.startswith("/"):
+            full_url = f"{MESSAGE_BASE_URL}{message_path}"
+        else:
+            full_url = f"{MESSAGE_BASE_URL}/{message_path}"
+
+        print(f"🔁 Step 2: Connecting to message endpoint: {full_url}")
 
         response = requests.get(
             full_url,
@@ -74,17 +72,16 @@ def step2_get_vendor_data(message_path: str):
         print(f"[ERROR] Failed to fetch from /message: {e}")
         return None
 
-# === Main Execution ===
+# === MAIN ===
 if __name__ == "__main__":
-    message_path = step1_get_session_id()
+    message_path = step1_get_message_path()
 
     if not message_path:
-        print("❌ No sessionId received from MCP. Cannot proceed.")
+        print("❌ No sessionId path received from MCP.")
     else:
-        result = step2_get_vendor_data(message_path)
-
-        if result:
+        vendor_data = step2_get_vendor_json(message_path)
+        if vendor_data:
             print("\n✅ FINAL VENDOR DATA:\n")
-            print(json.dumps(result, indent=2))
+            print(json.dumps(vendor_data, indent=2))
         else:
-            print("\n❌ Vendor JSON not received. Something is wrong.")
+            print("\n❌ Vendor JSON not received.")
