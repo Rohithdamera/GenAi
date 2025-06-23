@@ -1,8 +1,9 @@
-import requests
-import sseclient
 import json
+import requests
+from sseclient import SSEClient
 
-MCP_URL = "https://your.mcp.server.url"  # Replace with real MCP server
+# MCP Configuration
+MCP_URL = "https://your.mcp.server.url"  # Replace with actual MCP URL
 MCP_PAYLOAD = {
     "method": "tools/call",
     "params": {
@@ -11,51 +12,47 @@ MCP_PAYLOAD = {
     }
 }
 
-def fetch_mcp_stream():
-    print("⏳ Connecting to MCP server (event-stream)...")
-
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream"
-    }
-
+def stream_until_vendor_data():
     try:
+        print("⏳ Connecting to MCP server (event-stream)...")
+
         response = requests.post(
             MCP_URL,
             json=MCP_PAYLOAD,
-            headers=headers,
+            headers={"Content-Type": "application/json"},
             stream=True,
-            timeout=180
+            timeout=600  # ⏲️ Wait up to 10 minutes if needed
         )
 
-        client = sseclient.SSEClient(response)
+        print("🔄 Listening to MCP event stream...\n")
 
-        all_data = []
-
-        print("🔄 Listening to MCP event stream...")
+        client = SSEClient(response)
 
         for event in client.events():
-            print(f"📩 Event received: {event.data}")
+            print(f"🔹 Event received:")
+            print(event.data.strip())
 
             try:
-                # Try to parse as JSON
+                # Attempt to parse JSON
                 parsed = json.loads(event.data)
-                all_data.append(parsed)
+                print("\n✅ Parsed JSON received!")
+                return parsed
             except json.JSONDecodeError:
-                # Save raw if not JSON
-                all_data.append({"raw": event.data})
+                continue  # Not JSON yet — wait for next event
 
-        return all_data
-
-    except Exception as e:
-        print(f"[ERROR] Failed to read SSE from MCP: {e}")
+        print("\n❌ No valid vendor data was received.")
         return None
 
-# === RUN ===
+    except Exception as e:
+        print(f"[ERROR] Streaming failed: {e}")
+        return None
+
+# === Run ===
 if __name__ == "__main__":
-    data = fetch_mcp_stream()
-    if data:
-        print("\n✅ Final Parsed Event Stream Data:\n")
-        print(json.dumps(data, indent=2))
+    vendor_data = stream_until_vendor_data()
+
+    if vendor_data:
+        print("\n✅ FINAL VENDOR DATA:\n")
+        print(json.dumps(vendor_data, indent=2))
     else:
-        print("\n❌ No usable data received from stream.")
+        print("\n❌ Vendor JSON not received from stream.")
