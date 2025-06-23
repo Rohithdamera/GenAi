@@ -2,15 +2,14 @@ import json
 import requests
 from langchain.chat_models import AzureChatOpenAI
 from langchain.prompts import PromptTemplate
-from langchain.schema.output_parser import StrOutputParser
-from langchain.schema.runnable import RunnablePassthrough, RunnableLambda
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import LLMChain
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.agents import Tool, initialize_agent
 from langchain.memory import ConversationBufferMemory
 
 # === MCP Server Configuration ===
-MCP_URL = "https://your.mcp.server.url"  # 🔁 Replace with actual URL
+MCP_URL = "https://your.mcp.server.url"  # 🔁 Replace with actual server URL
+
 MCP_PAYLOAD = {
     "method": "tools/call",
     "params": {
@@ -19,15 +18,15 @@ MCP_PAYLOAD = {
     }
 }
 
-# === Global store ===
+# === Global store for response ===
 mcp_raw_data = ""
 
-# === Azure OpenAI Setup ===
+# === Azure OpenAI Config ===
 def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="Fourth_Chatbot",
-        openai_api_key="",  # 🔑 Replace with your Azure key
+        openai_api_key="",  # 🔑 Put your key here
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
         temperature=0.5,
@@ -35,60 +34,68 @@ def get_openai_client():
         model_kwargs={"top_p": 0.9}
     )
 
-# === TOOL 1: Step 1 — MCP Server Connection Check ===
-def check_mcp_server(_: str) -> str:
-    try:
-        print("⏳ Connecting to MCP server (up to 2.5 minutes)...")
-        response = requests.get(MCP_URL, timeout=180)  # ⏲️ Increased timeout to 3 minutes
-        if response.status_code == 200:
-            return "[SUCCESS] MCP server is reachable."
-        return f"[FAILURE] MCP responded with status code: {response.status_code}"
-    except Exception as e:
-        return f"[ERROR] MCP connection failed: {str(e)}"
-
-# === TOOL 2: Step 2 — Fetch data from MCP server ===
+# === Tool 1: Fetch MCP data via POST (like Postman) ===
 def fetch_mcp_data(_: str) -> str:
     global mcp_raw_data
-    try:
-        print("⏳ Sending POST request to MCP server (up to 3 minutes)...")
-        response = requests.post(MCP_URL, json=MCP_PAYLOAD, timeout=180)  # ⏲️ 3 minutes timeout
-        response.raise_for_status()
-        mcp_raw_data = json.dumps(response.json(), indent=2)
-        return "[SUCCESS] MCP data fetched and stored."
-    except Exception as e:
-        return f"[ERROR] MCP data fetch failed: {str(e)}"
 
-# === TOOL 3: Step 3 — Summarize the response ===
+    try:
+        print("⏳ Fetching from MCP server... Please wait (may take up to 3 minutes)...")
+
+        headers = {
+            "Content-Type": "application/json"
+        }
+
+        response = requests.post(
+            MCP_URL,
+            json=MCP_PAYLOAD,
+            headers=headers,
+            timeout=180  # wait 3 mins max
+        )
+
+        if response.status_code != 200:
+            return f"[ERROR] MCP responded with status code {response.status_code}: {response.text}"
+
+        mcp_raw_data = json.dumps(response.json(), indent=2)
+        return "[SUCCESS] MCP data fetched successfully and stored."
+    except requests.exceptions.Timeout:
+        return "[ERROR] MCP server timeout (took more than 3 minutes)."
+    except Exception as e:
+        return f"[ERROR] MCP fetch failed: {str(e)}"
+
+# === Tool 2: Summarize the MCP data ===
 def summarize_mcp_data(_: str) -> str:
     global mcp_raw_data
     if not mcp_raw_data:
-        return "[SKIP] No MCP data found. Please run fetch step first."
+        return "[SKIP] No data available. Run 'FetchMCPData' first."
 
     try:
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=100
+        )
         chunks = splitter.split_text(mcp_raw_data)
 
-        client = get_openai_client()
         prompt = PromptTemplate(
             input_variables=["chunk"],
             template="""
-You are an assistant. Summarize the following JSON chunk about vendor data in simple, clear language.
+You are a helpful assistant. Summarize this JSON chunk about vendor data in plain language.
 
-Highlight:
-- Key vendor names or info
-- Configurations or fields present
-- Important values or relationships
+Focus on:
+- Key vendors
+- Important fields or settings
+- Any data patterns
 
-Chunk:
 {chunk}
 """
         )
-        summarize_chain = LLMChain(llm=client, prompt=prompt)
-        all_summaries = [summarize_chain.run({"chunk": c}) for c in chunks]
-        return "\n\n".join(all_summaries)
+
+        chain = LLMChain(llm=get_openai_client(), prompt=prompt)
+
+        summaries = [chain.run({"chunk": chunk}) for chunk in chunks]
+        return "\n\n".join(summaries)
 
     except Exception as e:
-        return f"[ERROR] Failed to summarize MCP data: {str(e)}"
+        return f"[ERROR] Summarization failed: {str(e)}"
 
 # === LangChain Agent Setup ===
 def run_agent():
@@ -96,19 +103,14 @@ def run_agent():
 
     tools = [
         Tool(
-            name="CheckMCPServer",
-            func=check_mcp_server,
-            description="Step 1: Check if MCP server is reachable (may take ~2 mins)."
-        ),
-        Tool(
             name="FetchMCPData",
             func=fetch_mcp_data,
-            description="Step 2: Fetch vendor data from MCP server (may take ~1 min)."
+            description="Connect to MCP server and fetch vendor data (just like Postman)."
         ),
         Tool(
             name="SummarizeMCPData",
             func=summarize_mcp_data,
-            description="Step 3: Summarize the vendor data into user-friendly format."
+            description="Summarize the MCP vendor data in clear language."
         )
     ]
 
@@ -119,14 +121,15 @@ def run_agent():
         memory=memory,
         verbose=True
     )
+
     return agent
 
-# === MAIN EXECUTION ===
+# === MAIN ===
 if __name__ == "__main__":
-    print("🔧 Initializing MCP Workflow Agent...")
+    print("🔧 Initializing MCP LangChain Agent...\n")
     agent = run_agent()
 
-    print("\n🚀 Running Step-by-Step MCP Data Extraction...\n")
-    result = agent.invoke("First check the MCP server, then fetch vendor data and finally summarize it.")
-    print("\n✅ Final Output:\n")
+    print("🚀 Starting: Fetch and summarize MCP vendor data...\n")
+    result = agent.invoke("Fetch MCP data and summarize it.")
+    print("\n✅ FINAL OUTPUT:\n")
     print(result)
