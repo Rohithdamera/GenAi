@@ -1,11 +1,8 @@
-import http.client
+import requests
+import sseclient
 import json
-from urllib.parse import urlparse
-from http.client import IncompleteRead
 
-# === MCP Configuration ===
-MCP_URL = "https://your.mcp.server.url"  # Replace this with real one
-
+MCP_URL = "https://your.mcp.server.url"  # Replace with real MCP server
 MCP_PAYLOAD = {
     "method": "tools/call",
     "params": {
@@ -14,59 +11,51 @@ MCP_PAYLOAD = {
     }
 }
 
-# === Workaround to read incomplete response ===
-def safe_read_response(response):
-    try:
-        return response.read().decode("utf-8", errors="ignore")
-    except IncompleteRead as e:
-        print(f"[WARN] IncompleteRead, recovering partial content ({len(e.partial)} bytes)...")
-        return e.partial.decode("utf-8", errors="ignore")
+def fetch_mcp_stream():
+    print("⏳ Connecting to MCP server (event-stream)...")
 
-# === Main Fetch Function ===
-def fetch_raw_from_mcp():
-    parsed = urlparse(MCP_URL)
-    host = parsed.hostname
-    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
-    path = parsed.path or "/"
-
-    print("⏳ Connecting via raw socket with recovery...")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream"
+    }
 
     try:
-        conn = http.client.HTTPSConnection(host, port, timeout=180)
-        headers = {
-            "Content-Type": "application/json",
-            "Connection": "keep-alive"
-        }
+        response = requests.post(
+            MCP_URL,
+            json=MCP_PAYLOAD,
+            headers=headers,
+            stream=True,
+            timeout=180
+        )
 
-        body = json.dumps(MCP_PAYLOAD)
-        conn.request("POST", path, body=body, headers=headers)
-        response = conn.getresponse()
+        client = sseclient.SSEClient(response)
 
-        raw_data = safe_read_response(response)
+        all_data = []
 
-        # Try to parse JSON
-        try:
-            parsed_json = json.loads(raw_data)
-            print("✅ Parsed valid JSON response!")
-            return parsed_json
-        except json.JSONDecodeError:
-            print("⚠️ JSON parsing failed. Dumping raw text:")
-            print(raw_data)
-            return raw_data  # Return raw text if parsing fails
+        print("🔄 Listening to MCP event stream...")
+
+        for event in client.events():
+            print(f"📩 Event received: {event.data}")
+
+            try:
+                # Try to parse as JSON
+                parsed = json.loads(event.data)
+                all_data.append(parsed)
+            except json.JSONDecodeError:
+                # Save raw if not JSON
+                all_data.append({"raw": event.data})
+
+        return all_data
 
     except Exception as e:
-        print(f"[ERROR] MCP raw fetch failed: {e}")
+        print(f"[ERROR] Failed to read SSE from MCP: {e}")
         return None
 
-# === Run ===
+# === RUN ===
 if __name__ == "__main__":
-    result = fetch_raw_from_mcp()
-
-    if isinstance(result, dict):
-        print("\n✅ Final Parsed Response:\n")
-        print(json.dumps(result, indent=2))
-    elif isinstance(result, str):
-        print("\n⚠️ Raw MCP response (non-parsable):\n")
-        print(result)
+    data = fetch_mcp_stream()
+    if data:
+        print("\n✅ Final Parsed Event Stream Data:\n")
+        print(json.dumps(data, indent=2))
     else:
-        print("\n❌ Could not retrieve or decode MCP response.")
+        print("\n❌ No usable data received from stream.")
