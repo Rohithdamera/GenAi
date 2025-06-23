@@ -1,17 +1,11 @@
 import http.client
 import json
 from urllib.parse import urlparse
+from http.client import IncompleteRead
 
-# Your MCP URL
-MCP_URL = "https://your.mcp.server.url"  # Replace with real one
+# === MCP Configuration ===
+MCP_URL = "https://your.mcp.server.url"  # Replace this with real one
 
-# Parse the URL
-parsed_url = urlparse(MCP_URL)
-host = parsed_url.hostname
-port = parsed_url.port or (443 if parsed_url.scheme == 'https' else 80)
-path = parsed_url.path
-
-# JSON body you send in Postman
 MCP_PAYLOAD = {
     "method": "tools/call",
     "params": {
@@ -20,45 +14,59 @@ MCP_PAYLOAD = {
     }
 }
 
-# === Fetch from MCP Server ===
-def fetch_raw_from_mcp():
+# === Workaround to read incomplete response ===
+def safe_read_response(response):
     try:
-        print("⏳ Connecting via raw socket...")
+        return response.read().decode("utf-8", errors="ignore")
+    except IncompleteRead as e:
+        print(f"[WARN] IncompleteRead, recovering partial content ({len(e.partial)} bytes)...")
+        return e.partial.decode("utf-8", errors="ignore")
 
+# === Main Fetch Function ===
+def fetch_raw_from_mcp():
+    parsed = urlparse(MCP_URL)
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    path = parsed.path or "/"
+
+    print("⏳ Connecting via raw socket with recovery...")
+
+    try:
         conn = http.client.HTTPSConnection(host, port, timeout=180)
-
         headers = {
             "Content-Type": "application/json",
             "Connection": "keep-alive"
         }
 
         body = json.dumps(MCP_PAYLOAD)
-
         conn.request("POST", path, body=body, headers=headers)
         response = conn.getresponse()
 
-        raw_data = response.read().decode("utf-8", errors="ignore")
+        raw_data = safe_read_response(response)
 
+        # Try to parse JSON
         try:
-            parsed = json.loads(raw_data)
-            print("✅ Parsed JSON received successfully!")
-            return parsed
+            parsed_json = json.loads(raw_data)
+            print("✅ Parsed valid JSON response!")
+            return parsed_json
         except json.JSONDecodeError:
-            print("⚠️ JSON decoding failed. Dumping raw response:")
+            print("⚠️ JSON parsing failed. Dumping raw text:")
             print(raw_data)
-            return None
+            return raw_data  # Return raw text if parsing fails
 
     except Exception as e:
         print(f"[ERROR] MCP raw fetch failed: {e}")
         return None
 
-
-# === RUN ===
+# === Run ===
 if __name__ == "__main__":
     result = fetch_raw_from_mcp()
 
-    if result:
-        print("\n✅ Final Response from MCP:\n")
+    if isinstance(result, dict):
+        print("\n✅ Final Parsed Response:\n")
         print(json.dumps(result, indent=2))
+    elif isinstance(result, str):
+        print("\n⚠️ Raw MCP response (non-parsable):\n")
+        print(result)
     else:
-        print("\n❌ Could not decode valid JSON response.")
+        print("\n❌ Could not retrieve or decode MCP response.")
