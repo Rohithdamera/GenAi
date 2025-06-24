@@ -18,134 +18,59 @@ payload = {
     }
 }
 
-def get_session_id_from_sse(prompt="Waiting for session ID...", timeout=300):
-    print(prompt)
-    try:
-        with requests.get(SSE_URL, stream=True, timeout=timeout) as response:
-            if response.status_code == 200:
-                for line in response.iter_lines():
-                    if line:
-                        decoded = line.decode('utf-8')
-                        print("SSE:", decoded)
-                        match = re.search(r'data: /message\?sessionId=([a-f0-9\-]+)', decoded)
-                        if match:
-                            session_id = match.group(1)
-                            print("Session ID found:", session_id)
-                            return session_id
-            else:
-                print("Failed to connect to SSE. Status:", response.status_code)
-    except requests.exceptions.RequestException as e:
-        print("SSE connection failed:", e)
-    return None
-
 def send_post_request(session_id, label=""):
     url = f"{BASE_MESSAGE_URL}?sessionId={session_id}"
     try:
-        print(f"Sending {label} POST request to get vendor data...")
+        print(f"🔸 Sending {label} POST request to get vendor data...")
         response = requests.post(url, json=payload, headers=headers, timeout=300)
-        print(f"{label} POST Status Code: {response.status_code}")
-        print(f"{label} POST Response:", response.text)
+        print(f"✅ {label} POST Status Code: {response.status_code}")
+        print(f"📩 {label} POST Response: {response.text}")
         return response
     except requests.exceptions.RequestException as e:
-        print(f"{label} POST request failed:", e)
+        print(f"❌ {label} POST request failed:", e)
     return None
 
-def listen_for_final_data(timeout=180):
-    print("🔁 Reconnecting to SSE to listen for final vendor data...")
+def listen_and_respond(timeout=300):
+    seen_sessions = set()
+    print("🔁 Listening to SSE stream for all session IDs and data...")
     try:
         with requests.get(SSE_URL, stream=True, timeout=timeout) as response:
             if response.status_code == 200:
                 for line in response.iter_lines():
                     if line:
                         decoded = line.decode('utf-8')
-                        print("📦 SSE Message:", decoded)
+                        print("📦 SSE:", decoded)
 
-                        # Check for session ID
+                        # Extract sessionId
                         match = re.search(r'data: /message\?sessionId=([a-f0-9\-]+)', decoded)
                         if match:
-                            final_session_id = match.group(1)
-                            print("✅ Final data session ID received:", final_session_id)
-                            send_post_request(final_session_id, label="Final Data")
-                        else:
-                            # Try to extract actual data
-                            data_match = re.search(r'data: (.+)', decoded)
-                            if data_match:
-                                try:
-                                    data_json = json.loads(data_match.group(1))
-                                    print("📄 Final Vendor Data Received:")
-                                    print(json.dumps(data_json, indent=2))
-                                    return
-                                except json.JSONDecodeError:
-                                    print("⚠️ Received data is not valid JSON:", data_match.group(1))
+                            session_id = match.group(1)
+                            if session_id not in seen_sessions:
+                                seen_sessions.add(session_id)
+                                send_post_request(session_id, label="Detected")
+                            continue
+
+                        # Extract actual data
+                        data_match = re.search(r'data: (.+)', decoded)
+                        if data_match:
+                            try:
+                                data_json = json.loads(data_match.group(1))
+                                print("✅✅ Final Vendor Data Received:")
+                                print(json.dumps(data_json, indent=2))
+                                return True  # Exit once final data received
+                            except json.JSONDecodeError:
+                                print("⚠️ Invalid JSON, skipping:", data_match.group(1))
             else:
-                print("Failed to reconnect to SSE. Status:", response.status_code)
+                print("❌ Failed to connect to SSE. Status:", response.status_code)
     except requests.exceptions.RequestException as e:
-        print("SSE reconnection failed:", e)
+        print("❌ SSE stream error:", e)
+    return False
 
 if __name__ == "__main__":
-    first_session_id = get_session_id_from_sse("Connecting to MCP server via SSE...")
-    if first_session_id:
-        print("✅ Server is connected.")
-        send_post_request(first_session_id, label="Initial")
+    print("🚀 Connecting to MCP server via SSE...")
 
-        print("⏳ Waiting 120 seconds for server to initialize...")
-        time.sleep(120)
-
-        second_session_id = get_session_id_from_sse("Listening for response session ID...")
-        if second_session_id:
-            send_post_request(second_session_id, label="Run")
-
-            print("⏳ Waiting 10 seconds before listening for final session ID...")
-            time.sleep(10)
-
-            third_session_id = get_session_id_from_sse("Listening for final data session ID...")
-            if third_session_id:
-                send_post_request(third_session_id, label="Final")
-
-                print("⏳ Waiting 5 seconds before listening for final data...")
-                time.sleep(5)
-
-                listen_for_final_data(timeout=180)
-            else:
-                print("❌ No final session ID received.")
-        else:
-            print("❌ No response session ID received.")
+    success = listen_and_respond(timeout=600)
+    if success:
+        print("✅ Process completed successfully with final vendor data.")
     else:
-        print("❌ Server is not connected.")
-
-
-
-
-Connecting to MCP server via SSE...
-SSE: event: endpoint
-SSE: data: /message?sessionId=d568584d-6922-4dbb-b25e-ea8d80203a62
-Session ID found: d568584d-6922-4dbb-b25e-ea8d80203a62
-✅ Server is connected.
-Sending Initial POST request to get vendor data...
-Initial POST Status Code: 202
-Initial POST Response: Accepted
-⏳ Waiting 120 seconds for server to initialize...
-Listening for response session ID...
-SSE: event: endpoint
-SSE: data: /message?sessionId=1967ec2d-658d-4169-8525-cedd66889e37
-Session ID found: 1967ec2d-658d-4169-8525-cedd66889e37
-Sending Run POST request to get vendor data...
-Run POST Status Code: 202
-Run POST Response: Accepted
-⏳ Waiting 10 seconds before listening for final session ID...
-Listening for final data session ID...
-SSE: event: endpoint
-SSE: data: /message?sessionId=f040936e-69e5-4ff4-bc76-459b4fb28c6c
-Session ID found: f040936e-69e5-4ff4-bc76-459b4fb28c6c
-Sending Final POST request to get vendor data...
-Final POST Status Code: 202
-Final POST Response: Accepted
-⏳ Waiting 5 seconds before listening for final data...
-🔁 Reconnecting to SSE to listen for final vendor data...
-📦 SSE Message: event: endpoint
-📦 SSE Message: data: /message?sessionId=9f0c0d8a-10cf-4589-95ea-9af34041ba7e
-✅ Final data session ID received: 9f0c0d8a-10cf-4589-95ea-9af34041ba7e
-Sending Final Data POST request to get vendor data...
-Final Data POST Status Code: 202
-Final Data POST Response: Accepted
-SSE reconnection failed: Response ended prematurely
+        print("❌ Vendor data was not received.")
