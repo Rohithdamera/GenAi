@@ -1,6 +1,3 @@
-
-
-
 import requests
 import time
 import re
@@ -21,8 +18,8 @@ payload = {
     }
 }
 
-def wait_for_initial_session_id(timeout=60):
-    print("🔌 Waiting for initial session ID...")
+def get_session_id(prompt, timeout=300):
+    print(prompt)
     try:
         with requests.get(SSE_URL, stream=True, timeout=timeout) as response:
             if response.status_code == 200:
@@ -30,32 +27,31 @@ def wait_for_initial_session_id(timeout=60):
                     if line:
                         decoded = line.decode("utf-8")
                         print("📡 SSE:", decoded)
-
                         match = re.search(r'data: /message\?sessionId=([a-f0-9\-]+)', decoded)
                         if match:
                             session_id = match.group(1)
-                            print("✅ Initial Session ID:", session_id)
+                            print("✅ Session ID found:", session_id)
                             return session_id
             else:
                 print("❌ Could not connect to SSE. Status:", response.status_code)
     except Exception as e:
-        print("❌ Exception while waiting for session ID:", e)
+        print("❌ SSE connection error:", e)
     return None
 
-def send_post(session_id, label="Request"):
+def send_post(session_id, label):
     url = f"{BASE_MESSAGE_URL}?sessionId={session_id}"
     try:
-        print(f"📤 Sending {label} POST to MCP...")
+        print(f"📤 Sending {label} POST to server...")
         response = requests.post(url, headers=headers, json=payload, timeout=60)
         print(f"✅ {label} POST Status: {response.status_code}")
         print(f"📨 {label} Response: {response.text}")
-        return response
+        return response.status_code == 200 or response.status_code == 202
     except Exception as e:
-        print(f"❌ Failed to send {label} POST:", e)
-    return None
+        print(f"❌ {label} POST failed:", e)
+    return False
 
 def listen_for_final_data(timeout=180):
-    print("👂 Listening for final data...")
+    print("👂 Listening for final vendor data...")
     try:
         with requests.get(SSE_URL, stream=True, timeout=timeout) as response:
             if response.status_code == 200:
@@ -68,12 +64,11 @@ def listen_for_final_data(timeout=180):
                         if data_match:
                             raw = data_match.group(1)
                             try:
-                                json_data = json.loads(raw)
+                                data_json = json.loads(raw)
                                 print("✅✅ Final Vendor Data Received:")
-                                print(json.dumps(json_data, indent=2))
+                                print(json.dumps(data_json, indent=2))
                                 return True
                             except json.JSONDecodeError:
-                                # Ignore invalid JSON (still session links or intermediate logs)
                                 continue
             else:
                 print("❌ SSE reconnect failed. Status:", response.status_code)
@@ -82,25 +77,38 @@ def listen_for_final_data(timeout=180):
     return False
 
 if __name__ == "__main__":
-    print("🚀 Connecting to MCP...")
+    print("🚀 Connecting to MCP server...")
 
-    # STEP 1: Get initial session ID
-    session_id = wait_for_initial_session_id()
+    # Step 1: Initial Session ID
+    initial_session_id = get_session_id("🔌 Waiting for initial session ID...")
+    if initial_session_id:
+        print("✅ Server is connected.")
 
-    if session_id:
-        # STEP 2: Send actual payload POST
-        send_post(session_id, label="Initial")
+        # Step 2: Initial POST
+        if send_post(initial_session_id, label="Initial"):
+            print("⏳ Waiting 120 seconds for server to initialize...")
+            time.sleep(120)
 
-        # STEP 3: Wait a bit (depends on server processing time)
-        print("⏳ Waiting 10 seconds for server to process...")
-        time.sleep(10)
+            # Step 3: Second Session ID for run trigger
+            run_session_id = get_session_id("🎯 Waiting for run session ID...")
+            if run_session_id and send_post(run_session_id, label="Run"):
+                print("⏳ Waiting 5 seconds before final session ID...")
+                time.sleep(5)
 
-        # STEP 4: Listen for final vendor data in SSE
-        success = listen_for_final_data()
+                # Step 4: Final session ID
+                final_session_id = get_session_id("🧾 Waiting for final data session ID...")
+                if final_session_id and send_post(final_session_id, label="Final"):
+                    print("⏳ Waiting 5 seconds before listening for final data...")
+                    time.sleep(5)
 
-        if success:
-            print("🎉 Final vendor data received successfully.")
+                    # Step 5: Final data
+                    if not listen_for_final_data():
+                        print("❌ Final vendor data not received.")
+                else:
+                    print("❌ Final session ID or POST failed.")
+            else:
+                print("❌ Run session ID or POST failed.")
         else:
-            print("❌ Failed to receive final vendor data.")
+            print("❌ Initial POST failed. Server rejected the request.")
     else:
-        print("❌ No session ID received. Exiting.")
+        print("❌ No initial session ID received. Server not connected.")
