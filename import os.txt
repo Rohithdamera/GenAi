@@ -1,3 +1,6 @@
+
+
+
 import requests
 import time
 import re
@@ -18,59 +21,86 @@ payload = {
     }
 }
 
-def send_post_request(session_id, label=""):
-    url = f"{BASE_MESSAGE_URL}?sessionId={session_id}"
-    try:
-        print(f"🔸 Sending {label} POST request to get vendor data...")
-        response = requests.post(url, json=payload, headers=headers, timeout=300)
-        print(f"✅ {label} POST Status Code: {response.status_code}")
-        print(f"📩 {label} POST Response: {response.text}")
-        return response
-    except requests.exceptions.RequestException as e:
-        print(f"❌ {label} POST request failed:", e)
-    return None
-
-def listen_and_respond(timeout=300):
-    seen_sessions = set()
-    print("🔁 Listening to SSE stream for all session IDs and data...")
+def wait_for_initial_session_id(timeout=60):
+    print("🔌 Waiting for initial session ID...")
     try:
         with requests.get(SSE_URL, stream=True, timeout=timeout) as response:
             if response.status_code == 200:
                 for line in response.iter_lines():
                     if line:
-                        decoded = line.decode('utf-8')
-                        print("📦 SSE:", decoded)
+                        decoded = line.decode("utf-8")
+                        print("📡 SSE:", decoded)
 
-                        # Extract sessionId
                         match = re.search(r'data: /message\?sessionId=([a-f0-9\-]+)', decoded)
                         if match:
                             session_id = match.group(1)
-                            if session_id not in seen_sessions:
-                                seen_sessions.add(session_id)
-                                send_post_request(session_id, label="Detected")
-                            continue
+                            print("✅ Initial Session ID:", session_id)
+                            return session_id
+            else:
+                print("❌ Could not connect to SSE. Status:", response.status_code)
+    except Exception as e:
+        print("❌ Exception while waiting for session ID:", e)
+    return None
 
-                        # Extract actual data
+def send_post(session_id, label="Request"):
+    url = f"{BASE_MESSAGE_URL}?sessionId={session_id}"
+    try:
+        print(f"📤 Sending {label} POST to MCP...")
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        print(f"✅ {label} POST Status: {response.status_code}")
+        print(f"📨 {label} Response: {response.text}")
+        return response
+    except Exception as e:
+        print(f"❌ Failed to send {label} POST:", e)
+    return None
+
+def listen_for_final_data(timeout=180):
+    print("👂 Listening for final data...")
+    try:
+        with requests.get(SSE_URL, stream=True, timeout=timeout) as response:
+            if response.status_code == 200:
+                for line in response.iter_lines():
+                    if line:
+                        decoded = line.decode("utf-8")
+                        print("📦 SSE:", decoded)
+
                         data_match = re.search(r'data: (.+)', decoded)
                         if data_match:
+                            raw = data_match.group(1)
                             try:
-                                data_json = json.loads(data_match.group(1))
+                                json_data = json.loads(raw)
                                 print("✅✅ Final Vendor Data Received:")
-                                print(json.dumps(data_json, indent=2))
-                                return True  # Exit once final data received
+                                print(json.dumps(json_data, indent=2))
+                                return True
                             except json.JSONDecodeError:
-                                print("⚠️ Invalid JSON, skipping:", data_match.group(1))
+                                # Ignore invalid JSON (still session links or intermediate logs)
+                                continue
             else:
-                print("❌ Failed to connect to SSE. Status:", response.status_code)
-    except requests.exceptions.RequestException as e:
-        print("❌ SSE stream error:", e)
+                print("❌ SSE reconnect failed. Status:", response.status_code)
+    except Exception as e:
+        print("❌ Exception while listening for final data:", e)
     return False
 
 if __name__ == "__main__":
-    print("🚀 Connecting to MCP server via SSE...")
+    print("🚀 Connecting to MCP...")
 
-    success = listen_and_respond(timeout=600)
-    if success:
-        print("✅ Process completed successfully with final vendor data.")
+    # STEP 1: Get initial session ID
+    session_id = wait_for_initial_session_id()
+
+    if session_id:
+        # STEP 2: Send actual payload POST
+        send_post(session_id, label="Initial")
+
+        # STEP 3: Wait a bit (depends on server processing time)
+        print("⏳ Waiting 10 seconds for server to process...")
+        time.sleep(10)
+
+        # STEP 4: Listen for final vendor data in SSE
+        success = listen_for_final_data()
+
+        if success:
+            print("🎉 Final vendor data received successfully.")
+        else:
+            print("❌ Failed to receive final vendor data.")
     else:
-        print("❌ Vendor data was not received.")
+        print("❌ No session ID received. Exiting.")
