@@ -1,127 +1,175 @@
-import requests
-import time
-import re
+import asyncio
 import json
-
-# === Endpoints ===
-SSE_URL = "https://vendorstool-app-6b0n96.dw4w1g-1.gbr-e1.cloudhub.io/sse"
-BASE_MESSAGE_URL = "https://vendorstool-app-6b1n96.dw4w1g-1.gbr-e1.cloudhub.io/message"
-
-# === Headers and Payload ===
-headers = {
-    "Content-Type": "application/json"
-}
-
-payload = {
-    "method": "tools/call",
-    "params": {
-        "name": "get-vendors",
-        "arguments": {}
-    }
-}
-
-# === Utilities ===
-def get_session_id(prompt, timeout=300):
-    print(prompt)
+import nest_asyncio
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+from langgraph.graph import StateGraph
+from langchain.chat_models import AzureChatOpenAI
+ 
+nest_asyncio.apply()
+ 
+# === Azure OpenAI Client ===
+def get_openai_client():
+    return AzureChatOpenAI(
+        openai_api_base="https://testopenaiassets.openai.azure.com",
+        openai_api_version="2024-08-01-preview",
+        deployment_name="Fourth_Chatbot",
+        openai_api_key="",
+        openai_api_type="azure",
+        temperature=0.7,
+        max_tokens=2000,
+        model_kwargs={
+            "top_p": 0.9,
+            "frequency_penalty": 0.2,
+            "presence_penalty": 0.1
+        }
+    )
+ 
+# === Globals ===
+available_tools = []
+sse_url = ""
+ 
+# === Fetch Tools from MCP ===
+def list_available_tools(_: str = "") -> str:
+    global available_tools
+ 
+    async def fetch_tools():
+        async with sse_client(url=sse_url) as streams:
+            async with ClientSession(streams[0], streams[1]) as session:
+                await session.initialize()
+                return await session.list_tools()
+ 
     try:
-        with requests.get(SSE_URL, stream=True, timeout=timeout) as response:
-            if response.status_code == 200:
-                for line in response.iter_lines():
-                    if line:
-                        decoded = line.decode("utf-8")
-                        print("📡 SSE:", decoded)
-                        match = re.search(r'data: /message\?sessionId=([a-f0-9\-]+)', decoded)
-                        if match:
-                            session_id = match.group(1)
-                            print("✅ Session ID found:", session_id)
-                            return session_id
-            else:
-                print("❌ Failed to connect to SSE. Status:", response.status_code)
+        loop = asyncio.get_event_loop()
+        result = loop.run_until_complete(fetch_tools())
+        raw_tools = getattr(result, "tools", [])
+        available_tools.clear()
+        for tool in raw_tools:
+            available_tools.append({
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": tool.inputSchema
+            })
+        return "[SUCCESS] Tools loaded."
     except Exception as e:
-        print("❌ SSE connection error:", e)
-    return None
-
-def send_request(session_id, method="GET", label="Request"):
-    url = f"{BASE_MESSAGE_URL}?sessionId={session_id}"
+        return f"[ERROR] Failed to fetch tools: {str(e)}"
+ 
+# === Tool Classifier ===
+def classify_tool_with_llm(user_input: str) -> str:
+    llm = get_openai_client()
+    tool_list = "\n".join([f"- {tool['name']}: {tool['description']}" for tool in available_tools])
+    prompt = f"""
+You are a tool router. Based on the user's input, choose the most appropriate tool from the list below.
+ 
+Available tools:
+{tool_list}
+ 
+User input: "{user_input}"
+ 
+Return only the tool name (e.g., get_vendor_list, generate_report).
+"""
+    response = llm.invoke(prompt)
+    return response.content.strip()
+ 
+# === Extract Tool Input from User Request ===
+def extract_tool_input_with_llm(user_input: str, tool_schema: dict) -> dict:
+    llm = get_openai_client()
+    schema_description = "\n".join([f"- {key}: {val}" for key, val in tool_schema.items()])
+    prompt = f"""
+You are a tool input extractor. Based on the user's request and the tool's input schema, extract the correct input values.
+ 
+Tool input schema:
+{schema_description}
+ 
+User request: "{user_input}"
+ 
+Return a JSON object with the correct keys and values.
+"""
+    response = llm.invoke(prompt)
+    print("🔍 Raw LLM response for input extraction:", response.content)
     try:
-        print(f"📤 Sending {label} {method.upper()} request to server...")
-        if method.upper() == "POST":
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-        else:
-            response = requests.get(url, timeout=60)
-
-        print(f"✅ {label} {method.upper()} Status: {response.status_code}")
-        print(f"📨 {label} Response: {response.text}")
-        return response.status_code in [200, 202]
+        return json.loads(response.content)
     except Exception as e:
-        print(f"❌ {label} {method.upper()} request failed:", e)
-    return False
-
-def listen_for_final_data(timeout=180):
-    print("👂 Listening for final vendor data...")
+        print("❌ Failed to parse tool input:", e)
+        return {}
+ 
+# === Normalize Input to Match Schema Keys ===
+def normalize_input_to_schema(tool_input: dict, tool_schema: dict) -> dict:
+    mapped_input = {}
+    for schema_key in tool_schema:
+        for input_key, input_value in tool_input.items():
+            if input_key.strip().lower() == schema_key.strip().lower():
+                mapped_input[schema_key] = input_value
+                break
+    return mapped_input
+ 
+# === Call Tool by Name with Input ===
+def call_tool_by_name(tool_name: str, tool_input: dict) -> str:
+    tool_schema = next((tool["inputSchema"] for tool in available_tools if tool["name"] == tool_name), {})
+    print("🔍 Tool schema keys:", list(tool_schema.keys()))
+    print("🔍 Extracted input keys:", list(tool_input.keys()))
+ 
+    mapped_input = normalize_input_to_schema(tool_input, tool_schema)
+    print(f"🛠️ Final mapped input for '{tool_name}':", mapped_input)
+ 
+    async def call_tool():
+        async with sse_client(url=sse_url) as streams:
+            async with ClientSession(streams[0], streams[1]) as session:
+                await session.initialize()
+                return await session.call_tool(tool_name, mapped_input)
+ 
     try:
-        with requests.get(SSE_URL, stream=True, timeout=timeout) as response:
-            if response.status_code == 200:
-                for line in response.iter_lines():
-                    if line:
-                        decoded = line.decode("utf-8")
-                        print("📦 SSE:", decoded)
-
-                        data_match = re.search(r'data: (.+)', decoded)
-                        if data_match:
-                            raw = data_match.group(1)
-                            try:
-                                data_json = json.loads(raw)
-                                print("✅✅ Final Vendor Data Received:")
-                                print(json.dumps(data_json, indent=2))
-
-                                # Optionally write to file
-                                with open("final_vendor_data.json", "w") as f:
-                                    json.dump(data_json, f, indent=2)
-                                print("💾 Final data saved to final_vendor_data.json")
-
-                                return True
-                            except json.JSONDecodeError:
-                                continue
-            else:
-                print("❌ SSE reconnect failed. Status:", response.status_code)
+        loop = asyncio.get_event_loop()
+        result = loop.run_until_complete(call_tool())
+        return f"[SUCCESS] Tool '{tool_name}' executed:\n{result}"
     except Exception as e:
-        print("❌ Error while listening for final data:", e)
-    return False
-
-# === Main Flow ===
+        return f"[ERROR] Failed to call tool '{tool_name}': {str(e)}"
+ 
+# === LangGraph Nodes ===
+def router_node(state: dict) -> dict:
+    print("Router received state:", state)
+    user_input = state.get("user_input", "")
+    tool_name = classify_tool_with_llm(user_input)
+    print("LLM selected tool:", tool_name)
+    state["__next__"] = tool_name if tool_name in [tool["name"] for tool in available_tools] else "default"
+    return state
+ 
+def tool_node_factory(tool_name: str, input_schema: dict):
+    def tool_node(state: dict) -> dict:
+        user_input = state.get("user_input", "")
+        tool_input = extract_tool_input_with_llm(user_input, input_schema)
+        result = call_tool_by_name(tool_name, tool_input)
+        return {"result": result}
+    return tool_node
+ 
+def default_node(state: dict) -> dict:
+    return {"result": "No matching tool found."}
+ 
+# === Build LangGraph ===
+def build_graph():
+    list_available_tools()
+ 
+    graph = StateGraph(dict)
+    graph.add_node("router", router_node)
+    graph.add_node("default", default_node)
+ 
+    for tool in available_tools:
+        graph.add_node(tool["name"], tool_node_factory(tool["name"], tool["inputSchema"]))
+ 
+    graph.add_conditional_edges(
+        "router",
+        lambda state: state["__next__"],
+        {tool["name"]: tool["name"] for tool in available_tools} | {"default": "default"}
+    )
+ 
+    graph.set_entry_point("router")
+    return graph.compile()
+ 
+# === Run ===
 if __name__ == "__main__":
-    print("🚀 Connecting to MCP server...")
-
-    # Step 1: Get initial session ID
-    initial_session_id = get_session_id("🔌 Waiting for initial session ID...")
-    if initial_session_id:
-        print("✅ Server is connected.")
-
-        # Step 2: Send initial GET (based on your Postman behavior)
-        if send_request(initial_session_id, method="GET", label="Initial"):
-            print("⏳ Waiting 120 seconds for server to initialize...")
-            time.sleep(120)
-
-            # Step 3: Trigger run session
-            run_session_id = get_session_id("🎯 Waiting for run session ID...")
-            if run_session_id and send_request(run_session_id, method="GET", label="Run"):
-                print("⏳ Waiting 5 seconds before final session ID...")
-                time.sleep(5)
-
-                # Step 4: Final session
-                final_session_id = get_session_id("🧾 Waiting for final session ID...")
-                if final_session_id and send_request(final_session_id, method="GET", label="Final"):
-                    print("⏳ Waiting 5 seconds before listening for final data...")
-                    time.sleep(5)
-
-                    if not listen_for_final_data():
-                        print("❌ Final vendor data not received.")
-                else:
-                    print("❌ Final session ID or GET failed.")
-            else:
-                print("❌ Run session ID or GET failed.")
-        else:
-            print("❌ Initial GET failed. Server rejected the request.")
-    else:
-        print("❌ No session ID received. Server not connected.")
+    print("Building LangGraph with MCP tools...\n")
+    runnable = build_graph()
+ 
+    user_input = input("Describe the tool you want to use: ")
+    result = runnable.invoke({"user_input": user_input})
+    print("\n🔧 Tool Output:\n", result.get("result", "No result returned."))
