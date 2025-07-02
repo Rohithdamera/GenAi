@@ -1,4 +1,5 @@
 
+
 import asyncio
 import json
 import nest_asyncio
@@ -16,7 +17,7 @@ def get_openai_client():
         azure_deployment="Fourth_Chatbot",
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         openai_api_version="2024-08-01-preview",
-        openai_api_key="",  # Add your key via env
+        openai_api_key="",  # Set via environment securely
         temperature=0.7,
         max_tokens=2000,
         model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
@@ -25,7 +26,7 @@ def get_openai_client():
 # === SSE URL ===
 sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
 
-# === Sync Wrapper for Async Tool Fetch ===
+# === Sync Tool Fetch ===
 def sync_fetch_tools():
     async def fetch():
         async with sse_client(url=sse_url) as streams:
@@ -46,7 +47,120 @@ def sync_call_tool(tool_name: str, tool_input: dict):
     except Exception as e:
         return f"[ERROR] {e}"
 
-# === Node: List All Tools ===
+# === LLM Utility Functions ===
+def extract_entities(user_input: str, entity_type: str = "projects") -> list:
+    llm = get_openai_client()
+    prompt = f"""Extract a list of {entity_type} mentioned in the user query:
+Query: "{user_input}"
+Return a JSON list like ["project1", "project2", ...]"""
+    try:
+        response = llm.invoke(prompt).content
+        return json.loads(response)
+    except Exception as e:
+        print("[Entity Extract Error]", e)
+        return []
+
+def extract_input(user_input: str, tool_name: str, schema: dict, context: dict) -> dict:
+    llm = get_openai_client()
+    schema_str = "\n".join(f"- {k}: {v}" for k, v in schema.get("properties", {}).items())
+    context_str = ", ".join(f"{k}={v}" for k, v in context.items())
+    prompt = f"""Based on the user query: "{user_input}" and context: {context_str},
+and the input schema of {tool_name}:
+
+{schema_str}
+
+Generate a valid JSON input for the tool."""
+    try:
+        response = llm.invoke(prompt).content
+        return json.loads(response)
+    except Exception as e:
+        print("Input extraction failed:", e)
+        return {}
+
+# === Main Node Logic ===
+def plan_and_execute(state: dict) -> dict:
+    tools = state.get("available_tools", [])
+    user_input = state.get("user_input", "")
+    all_results = []
+
+    # Step 1: Extract all projects from input
+    project_names = extract_entities(user_input, entity_type="projects")
+
+    for project in project_names:
+        context = {"project": project}
+
+        # Step 2: Choose tools using LLM
+        tool_selector = get_openai_client()
+        tool_list = "\n".join([f"{t['name']}: {t['description']}" for t in tools])
+        plan_prompt = f"""You're given this user query: "{user_input}" for project: "{project}"
+
+Available tools:
+{tool_list}
+
+Return a JSON list of tool names (like ["GetProjects", "GetProjectEmployees", ...])
+required to fulfill this request.
+Only return the list."""
+        try:
+            plan_response = tool_selector.invoke(plan_prompt).content
+            tool_names = json.loads(plan_response)
+        except Exception as e:
+            print("[Plan Failed]", e)
+            continue
+
+        # Step 3: For each tool, extract input and invoke
+        for tool_name in tool_names:
+            tool = next((t for t in tools if t["name"] == tool_name), None)
+            if not tool:
+                continue
+
+            tool_input = extract_input(user_input, tool_name, tool["inputSchema"], context)
+            result = sync_call_tool(tool_name, tool_input)
+
+            # Extract content and convert to JSON if possible
+            if hasattr(result, "content"):
+                for part in result.content:
+                    if hasattr(part, "text"):
+                        try:
+                            parsed = json.loads(part.text)
+                            if isinstance(parsed, list):
+                                all_results.extend(parsed)
+                            elif isinstance(parsed, dict):
+                                all_results.append(parsed)
+                            break
+                        except Exception:
+                            continue
+
+    # === Merge All Results ===
+    if all_results:
+        unique_fields = set()
+        for row in all_results:
+            unique_fields.update(row.keys())
+        merged_headers = list(unique_fields)
+        rows = [[row.get(col, "") for col in merged_headers] for row in all_results]
+        table = tabulate(rows, headers=merged_headers, tablefmt="grid")
+        return {"result": table}
+
+    return {"result": "[INFO] No data found for requested projects."}
+
+# === Fallback Node ===
+def fallback_node(state: dict) -> dict:
+    return {"result": "[ERROR] Something went wrong during execution."}
+
+# === Graph Builder ===
+def build_graph():
+    graph = StateGraph(dict)
+    graph.add_node("list_tools", list_tools_node)
+    graph.add_node("plan_and_execute", plan_and_execute)
+    graph.add_node("default", fallback_node)
+
+    graph.add_conditional_edges("list_tools", lambda s: s["__next__"], {
+        "plan_and_execute": "plan_and_execute"
+    })
+
+    graph.set_entry_point("list_tools")
+    return graph.compile()
+
+# === Initial Tool Fetch ===
 def list_tools_node(state: dict) -> dict:
     try:
         result = sync_fetch_tools()
@@ -56,116 +170,12 @@ def list_tools_node(state: dict) -> dict:
             "inputSchema": t.inputSchema
         } for t in getattr(result, "tools", [])]
         state["available_tools"] = tools
-        state["__next__"] = "plan_tools"
+        state["__next__"] = "plan_and_execute"
         return state
     except Exception as e:
         return {"result": f"[ERROR] Failed to fetch tools: {e}"}
 
-# === LLM Reasoning ===
-def plan_tool_calls(user_input: str, tools: list) -> list:
-    llm = get_openai_client()
-    tool_list = "\n".join([f"{t['name']}: {t['description']}" for t in tools])
-    prompt = f"""
-You are a planner agent. The user asked:
-
-"{user_input}"
-
-Here are available tools:
-
-{tool_list}
-
-Decide which tools should be used to fulfill the user's request. 
-Return a JSON list of tool call plan in the following format:
-
-[
-  {{
-    "tool_name": "ToolName",
-    "purpose": "Why this tool is needed"
-  }},
-  ...
-]
-"""
-    try:
-        response = llm.invoke(prompt).content
-        return json.loads(response)
-    except Exception as e:
-        print("[Plan Error]", e)
-        return []
-
-# === Extract Input for a Tool ===
-def extract_tool_input(user_input: str, tool_name: str, schema: dict) -> dict:
-    llm = get_openai_client()
-    schema_str = "\n".join(f"- {k}: {v}" for k, v in schema.get("properties", {}).items())
-    prompt = f"""Given this user input: "{user_input}" 
-and the following tool schema for {tool_name}:
-
-{schema_str}
-
-Extract the JSON input that matches the schema.
-Only return the JSON."""
-    try:
-        response = llm.invoke(prompt).content
-        return json.loads(response)
-    except Exception as e:
-        print("Input extract failed:", e)
-        return {}
-
-# === Execute Tool Calls One by One ===
-def execute_tool_plan(state: dict) -> dict:
-    tools = state.get("available_tools", [])
-    user_input = state.get("user_input", "")
-    plan = plan_tool_calls(user_input, tools)
-    
-    results = []
-
-    for step in plan:
-        tool_name = step["tool_name"]
-        tool = next((t for t in tools if t["name"] == tool_name), None)
-        if not tool:
-            results.append(f"[WARN] Tool '{tool_name}' not found.")
-            continue
-        input_data = extract_tool_input(user_input, tool_name, tool["inputSchema"])
-        output = sync_call_tool(tool_name, input_data)
-
-        # Format output (try parsing json if response is structured)
-        formatted = None
-        if hasattr(output, "content"):
-            for part in output.content:
-                if hasattr(part, "text"):
-                    try:
-                        parsed = json.loads(part.text)
-                        if isinstance(parsed, list) and all(isinstance(row, dict) for row in parsed):
-                            headers = parsed[0].keys()
-                            rows = [list(r.values()) for r in parsed]
-                            formatted = tabulate(rows, headers, tablefmt="grid")
-                        else:
-                            formatted = json.dumps(parsed, indent=2)
-                        break
-                    except Exception:
-                        continue
-        results.append(f"[{tool_name} Result]\n{formatted or str(output)}")
-
-    return {"result": "\n\n".join(results)}
-
-# === Fallback ===
-def fallback_node(state: dict) -> dict:
-    return {"result": "[INFO] Could not find a matching plan or tool."}
-
-# === LangGraph ===
-def build_graph():
-    graph = StateGraph(dict)
-    graph.add_node("list_tools", list_tools_node)
-    graph.add_node("plan_tools", execute_tool_plan)
-    graph.add_node("default", fallback_node)
-
-    graph.add_conditional_edges("list_tools", lambda s: s["__next__"], {
-        "plan_tools": "plan_tools"
-    })
-
-    graph.set_entry_point("list_tools")
-    return graph.compile()
-
-# === CLI Entry ===
+# === CLI Driver ===
 if __name__ == "__main__":
     initial_state = {}
     tool_state = list_tools_node(initial_state)
@@ -185,4 +195,3 @@ if __name__ == "__main__":
     result = runnable.invoke(tool_state)
 
     print("\nOutput:\n", result.get("result", "No result returned."))
-
