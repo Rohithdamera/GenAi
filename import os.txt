@@ -1,3 +1,4 @@
+
 import os
 import json
 import logging
@@ -5,6 +6,7 @@ from base64 import b64decode
 from Crypto.Cipher import AES
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage, SystemMessage
+
 logging.basicConfig(level=logging.INFO)
 
 def unpad(data):
@@ -50,7 +52,7 @@ def generate_script(client, file_content, agent_name):
             "Use inline XML (not file input), and use string concatenation to build the output XML.\n"
             "Ensure the code is well-formatted with proper indentation and blank lines for readability.\n"
             "The final output should look like a real Ruby script, line by line, just like a developer would write it in a .rb file.\n"
-            "It should have return statement and also the response should be a compatible workato Ruby snippet.\n"
+            "It should have return statement and also the response should be a compatible Workato Ruby snippet.\n"
         ),
         "xslt_to_Python": (
             "Convert the given XSLT into a Python script.\n"
@@ -59,13 +61,13 @@ def generate_script(client, file_content, agent_name):
             "Ensure the output is returned as a list of strings, where each string is a single line of code.\n"
             "Do not include any markdown formatting or language annotations like ```python.\n"
             "Each line should be syntactically correct and properly indented.\n"
-            "It should have return statement and also the response should be a compatible workato Python snippet.\n"
+            "It should have return statement and also the response should be a compatible Workato Python snippet.\n"
         ),
         "xslt_to_JavaScript": (
             "Convert the given XSLT into a JavaScript script.\n"
             "Ensure proper formatting, indentation, and line breaks for readability.\n"
             "Return the code line by line, avoiding any markdown annotations like ```javascript.\n"
-            "It should have return statement and also the response should be a compatible workato JavaScript snippet.\n"
+            "It should have return statement and also the response should be a compatible Workato JavaScript snippet.\n"
         ),
         "xml_to_groovy": (
             "Convert the given XML into a Groovy script.\n"
@@ -78,9 +80,10 @@ def generate_script(client, file_content, agent_name):
             "Ensure the structure includes:\n"
             "- A root <Map> element with attributes like fromProfile and toProfile (use placeholder UUIDs if not provided).\n"
             "- A <Mappings> section with one or more <Mapping> elements.\n"
-            "- Each <Mapping> must include attributes: fromKey, fromKeyPath, toKey, toKeyPath, toType.\n"
-            "- If applicable, include <Function> logic inside <Mapping> for conditional transformations.\n"
-            "- Also include <Functions optimizeExecutionOrder=\"true\"/>, <Defaults/>, and <DocumentCacheJoins/>.\n"
+            "- Each <Mapping> must include only attributes: fromKey, fromKeyPath, toKey, toKeyPath, toType.\n"
+            "- Do not include any child elements inside <Mapping>. It must be a self-closing tag with only attributes.\n"
+            "- The toType attribute should describe semantic targets like 'profile', not data types like 'string'.\n"
+            "- Also include <Functions optimizeExecutionOrder=\"true\"/>, <Defaults/>, and <DocumentCacheJoins/> as sibling sections in the <Map>.\n"
             "Avoid markdown formatting and return only the raw XML content.\n"
         ),
         "dwl_to_xslt": (
@@ -155,3 +158,4 @@ def lambda_handler(event, context):
             "statusCode": 400,
             "body": json.dumps({"error": str(e)})
         }
+
