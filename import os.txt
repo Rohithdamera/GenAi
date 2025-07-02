@@ -1,161 +1,223 @@
-
-import os
+import asyncio
 import json
-import logging
-from base64 import b64decode
-from Crypto.Cipher import AES
-from langchain_community.chat_models import AzureChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage
+import nest_asyncio
+from tabulate import tabulate
 
-logging.basicConfig(level=logging.INFO)
+from mcp import ClientSession
+from mcp.client.sse import sse_client
 
-def unpad(data):
-    padding_length = data[-1]
-    return data[:-padding_length]
+from langgraph.graph import StateGraph
+from langchain.chat_models import AzureChatOpenAI
 
-def decrypt(data, key):
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted_data = cipher.decrypt(b64decode(data))
-    return unpad(decrypted_data).decode()
+nest_asyncio.apply()
 
-def get_openai_client(model_instance_name):
-    try:
-        aes_key_base64 = os.environ['AES_KEY']
-        encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-        encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-        api_version = os.environ['AZURE_API_VERSION']
-
-        decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-        decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
-
-        if not decrypted_api_base.endswith('/'):
-            decrypted_api_base += '/'
-
-        return AzureChatOpenAI(
-            deployment_name=model_instance_name,
-            openai_api_base=decrypted_api_base,
-            openai_api_key=decrypted_api_key,
-            openai_api_version=api_version,
-            temperature=0.0,
-            max_tokens=4096,
-            model_kwargs={"top_p": 0.95, "frequency_penalty": 0, "presence_penalty": 0}
-        )
-    except Exception as e:
-        logging.error(f"Error initializing OpenAI client: {e}")
-        raise ValueError(f"Error initializing OpenAI client: {e}")
-
-def generate_script(client, file_content, agent_name):
-    conversion_prompt = {
-        "xslt_to_Ruby": (
-            "Convert the given XSLT into a Ruby script.\n"
-            "The output should be a single, continuous Ruby script — not an array, not JSON, and not wrapped in markdown.\n"
-            "Use inline XML (not file input), and use string concatenation to build the output XML.\n"
-            "Ensure the code is well-formatted with proper indentation and blank lines for readability.\n"
-            "The final output should look like a real Ruby script, line by line, just like a developer would write it in a .rb file.\n"
-            "It should have return statement and also the response should be a compatible Workato Ruby snippet.\n"
-        ),
-        "xslt_to_Python": (
-            "Convert the given XSLT into a Python script.\n"
-            "The script must include a `main(xml_string)` function that demonstrates usage with example XML input.\n"
-            "Use `xml.etree.ElementTree` for XML parsing.\n"
-            "Ensure the output is returned as a list of strings, where each string is a single line of code.\n"
-            "Do not include any markdown formatting or language annotations like ```python.\n"
-            "Each line should be syntactically correct and properly indented.\n"
-            "It should have return statement and also the response should be a compatible Workato Python snippet.\n"
-        ),
-        "xslt_to_JavaScript": (
-            "Convert the given XSLT into a JavaScript script.\n"
-            "Ensure proper formatting, indentation, and line breaks for readability.\n"
-            "Return the code line by line, avoiding any markdown annotations like ```javascript.\n"
-            "It should have return statement and also the response should be a compatible Workato JavaScript snippet.\n"
-        ),
-        "xml_to_groovy": (
-            "Convert the given XML into a Groovy script.\n"
-            "Ensure the output is a valid Workato Groovy snippet with proper formatting and a return statement.\n"
-        ),
-        "xml_to_mapxml": (
-            "Convert the given XML into a Workato-compatible MapXML format.\n"
-            "The output should be a raw XML string that follows the MapXML schema used in Workato's mapping tools.\n"
-            "Do not hardcode any values like profile IDs or keys — instead, use placeholders or dynamically infer them from the input XML.\n"
-            "Ensure the structure includes:\n"
-            "- A root <Map> element with attributes like fromProfile and toProfile (use placeholder UUIDs if not provided).\n"
-            "- A <Mappings> section with one or more <Mapping> elements.\n"
-            "- Each <Mapping> must include only attributes: fromKey, fromKeyPath, toKey, toKeyPath, toType.\n"
-            "- Do not include any child elements inside <Mapping>. It must be a self-closing tag with only attributes.\n"
-            "- The toType attribute should describe semantic targets like 'profile', not data types like 'string'.\n"
-            "- Also include <Functions optimizeExecutionOrder=\"true\"/>, <Defaults/>, and <DocumentCacheJoins/> as sibling sections in the <Map>.\n"
-            "Avoid markdown formatting and return only the raw XML content.\n"
-        ),
-        "dwl_to_xslt": (
-            "Convert the given DataWeave (DWL) script into an equivalent XSLT transformation.\n"
-            "Analyze the DWL logic thoroughly, including data mappings, conditionals, loops, and functions. \n"
-            "Use appropriate XSLT constructs such as <xsl:template>, <xsl:value-of>, <xsl:for-each>, <xsl:if>, and <xsl:choose> to replicate the logic.\n"
-            "Ensure the XSLT includes a valid <xsl:stylesheet> root element with correct version and namespace declarations. \n"
-            "Structure the XSLT with proper templates and match rules to handle the input XML structure. \n"
-            "Format the XSLT code cleanly with proper indentation and syntax.\n"
-            "Ensure compatibility with standard XSLT processors (e.g., Saxon, Xalan). \n"
-            "Return only the raw XSLT code—no markdown, comments, or explanations. \n"
-            "Do not use vendor-specific extensions unless absolutely necessary.\n"
-            "The output should be ready for use in real-world XML transformation tasks. \n"
-        ),
-        "dwl_to_xml": (
-            "Convert the given DataWeave (DWL) script into its equivalent XML output.\n"
-            "Assume the DWL script is transforming data into XML format.\n"
-            "Parse the DWL logic and generate the resulting XML structure as it would appear after execution.\n"
-            "Use placeholder values where necessary, and ensure the XML is well-formed and properly indented.\n"
-            "Return only the raw XML output — no markdown, no comments, and no explanations.\n"
-            "The output should be suitable for use in XML-based integrations or testing.\n"
-        )
-    }
-
-    prompt = conversion_prompt.get(agent_name,
-        "Convert the given input into a structured script.\n"
-        "Ensure proper indentation and line breaks.\n"
-        "Do not add any programming language annotations like ```python, ```ruby, or ```javascript.\n"
-        "It should have a return statement and also the response should be a compatible Workato JavaScript/Python/Ruby snippet.\n"
+# === Azure OpenAI Client ===
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_deployment="Fourth_Chatbot",
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        openai_api_version="2024-08-01-preview",
+        openai_api_key="",
+        temperature=0.7,
+        max_tokens=2000,
+        model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
     )
 
-    response = client.invoke([
-        SystemMessage(content=prompt),
-        HumanMessage(content=file_content)
-    ])
+# === SSE URL ===
+sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
 
-    return response.content.strip()
+# === Sync Wrapper for Async Tool Fetch ===
+def sync_fetch_tools():
+    async def fetch():
+        async with sse_client(url=sse_url) as streams:
+            async with ClientSession(*streams) as session:
+                await session.initialize()
+                return await session.list_tools()
+    return asyncio.get_event_loop().run_until_complete(fetch())
 
-def lambda_handler(event, context):
+# === LangGraph Node: List Available Tools ===
+def list_tools_node(state: dict) -> dict:
     try:
-        if 'body' not in event or not event['body']:
-            raise ValueError("Missing or empty request body.")
-
-        headers = event.get('headers', {})
-        model_instance_name = headers.get('model_instance_name', 'Default_Model')
-        query_params = event.get('queryStringParameters', {})
-
-        agent_name_param = query_params.get('Agent_name', '')
-
-        agent_names = [name.strip() for name in agent_name_param.split(',') if name.strip()]
-        if len(agent_names) != 1:
-            raise ValueError("Exactly one Agent_name must be provided in query parameters.")
-
-        agent_name = agent_names[0]
-
-        if event.get('isBase64Encoded', False):
-            file_content = b64decode(event['body']).decode('utf-8')
-        else:
-            file_content = event['body']
-
-        client = get_openai_client(model_instance_name)
-        processed_result = generate_script(client, file_content, agent_name)
-
-        return {
-            "statusCode": 200,
-            "headers": {"Content-Type": "text/plain"},
-            "body": processed_result
-        }
+        result = sync_fetch_tools()
+        tools = [{
+            "name": t.name,
+            "description": t.description,
+            "inputSchema": t.inputSchema
+        } for t in getattr(result, "tools", [])]
+        state["available_tools"] = tools
+        state["__next__"] = "router"
+        return state
     except Exception as e:
-        logging.error(f"An error occurred: {e}")
-        return {
-            "statusCode": 400,
-            "body": json.dumps({"error": str(e)})
-        }
+        return {"result": f"[ERROR] Failed to fetch tools: {e}"}
 
+# === LLM Helpers ===
+def classify_tool(user_input: str, tools: list) -> str:
+    llm = get_openai_client()
+    tool_list = "\n".join(f"- {t['name']}: {t['description']}" for t in tools)
+    prompt = f"""You are a tool router. Choose the best tool for the input.
+Available tools:
+
+{tool_list}
+User input: "{user_input}"
+Return only the tool name."""
+    return llm.invoke(prompt).content.strip()
+
+def extract_tool_input(user_input: str, schema: dict) -> dict:
+    llm = get_openai_client()
+    schema_desc = "\n".join(f"- {k}: {v}" for k, v in schema.get("properties", schema).items())
+    prompt = f"""Extract input values for the tool based on schema.
+Schema:
+
+{schema_desc}
+User input: "{user_input}"
+Return JSON."""
+    try:
+        return json.loads(llm.invoke(prompt).content)
+    except Exception as e:
+        print("Input extraction failed:", e)
+        return {}
+
+def normalize_input(tool_input: dict, schema: dict) -> dict:
+    keys = schema.get("properties", schema).keys()
+    return {k: tool_input.get(k, "") for k in keys}
+
+# === Sync Wrapper for Tool Execution ===
+def sync_call_tool(tool_name: str, tool_input: dict):
+    async def call():
+        async with sse_client(url=sse_url) as streams:
+            async with ClientSession(*streams) as session:
+                await session.initialize()
+                return await session.call_tool(tool_name, tool_input)
+    try:
+        return asyncio.get_event_loop().run_until_complete(call())
+    except Exception as e:
+        return f"[ERROR] {e}"
+
+# === LangGraph Nodes ===
+def router_node(state: dict) -> dict:
+    tools = state.get("available_tools", [])
+    tool_name = classify_tool(state["user_input"], tools)
+    state["tool_name"] = tool_name
+    state["__next__"] = "extract_input" if tool_name in [t["name"] for t in tools] else "default"
+    return state
+
+def extract_input_node(state: dict) -> dict:
+    tools = state.get("available_tools", [])
+    tool = next(t for t in tools if t["name"] == state["tool_name"])
+    raw_input = extract_tool_input(state["user_input"], tool["inputSchema"])
+    normalized = normalize_input(raw_input, tool["inputSchema"])
+    state.update({
+        "tool_input": normalized,
+        "schema_display": json.dumps(tool["inputSchema"].get("properties", {}), indent=2),
+        "input_display": json.dumps(normalized, indent=2),
+        "__next__": "call_tool"
+    })
+    return state
+
+def call_tool_node(state: dict) -> dict:
+    result = sync_call_tool(state["tool_name"], state["tool_input"])
+
+    # Try to extract JSON from result content
+    json_data = None
+    if hasattr(result, "content") and result.content:
+        for item in result.content:
+            if hasattr(item, "text"):
+                try:
+                    json_data = json.loads(item.text)
+                    break
+                except Exception:
+                    continue
+
+    # If it's GetProjectEmployees, fetch full employee details
+    if state["tool_name"] == "GetProjectEmployees" and isinstance(json_data, list):
+        project_ggids = [str(row.get("GGID")) for row in json_data if "GGID" in row]
+        project_code = json_data[0].get("ProjectCode", "")
+        project_name = json_data[0].get("ProjectName", "")
+
+        if project_ggids:
+            employee_input = {"ggid": ",".join(project_ggids)}
+            employee_result = sync_call_tool("GetEmployee", employee_input)
+
+            employee_data = None
+            if hasattr(employee_result, "content") and employee_result.content:
+                for item in employee_result.content:
+                    if hasattr(item, "text"):
+                        try:
+                            employee_data = json.loads(item.text)
+                            break
+                        except Exception:
+                            continue
+
+            # Filter employee data to only those in project_ggids
+            filtered_employees = [
+                emp for emp in employee_data
+                if str(emp.get("GGID")) in project_ggids
+            ]
+
+            # Add project info to each row
+            for emp in filtered_employees:
+                emp["ProjectCode"] = project_code
+                emp["ProjectName"] = project_name
+
+            if filtered_employees:
+                headers = filtered_employees[0].keys()
+                rows = [list(row.values()) for row in filtered_employees]
+                table = tabulate(rows, headers=headers, tablefmt="grid")
+                return {"result": table}
+
+            return {"result": "[INFO] No matching employees found."}
+
+    # Default tabular output
+    if isinstance(json_data, list) and all(isinstance(row, dict) for row in json_data):
+        headers = json_data[0].keys()
+        rows = [list(row.values()) for row in json_data]
+        table = tabulate(rows, headers=headers, tablefmt="grid")
+        return {"result": table}
+
+    return {"result": f"[SUCCESS] {result}"}
+
+def default_node(state: dict) -> dict:
+    return {"result": "No matching tool found."}
+
+# === Build LangGraph ===
+def build_graph():
+    graph = StateGraph(dict)
+    graph.add_node("list_tools", list_tools_node)
+    graph.add_node("router", router_node)
+    graph.add_node("extract_input", extract_input_node)
+    graph.add_node("call_tool", call_tool_node)
+    graph.add_node("default", default_node)
+
+    graph.add_conditional_edges("list_tools", lambda s: s["__next__"], {
+        "router": "router"
+    })
+    graph.add_conditional_edges("router", lambda s: s["__next__"], {
+        "extract_input": "extract_input", "default": "default"
+    })
+    graph.add_conditional_edges("extract_input", lambda s: s["__next__"], {
+        "call_tool": "call_tool"
+    })
+
+    graph.set_entry_point("list_tools")
+    return graph.compile()
+
+# === Main Execution ===
+if __name__ == "__main__":
+    initial_state = {}
+    tool_state = list_tools_node(initial_state)
+
+    if "available_tools" not in tool_state:
+        print(tool_state.get("result", "[ERROR] Could not load tools."))
+        exit()
+
+    print("\nAvailable Tools:")
+    for t in tool_state["available_tools"]:
+        print(f"- {t['name']}: {t['description']}")
+
+    user_input = input("\nDescribe the tool you want to use: ")
+    tool_state["user_input"] = user_input
+
+    runnable = build_graph()
+    result = runnable.invoke(tool_state)
+
+    print("\nTool Output:\n", result.get("result", "No result returned."))
