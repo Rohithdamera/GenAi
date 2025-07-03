@@ -88,9 +88,15 @@ User query:
     try:
         response = llm.invoke(agent_prompt).content.strip()
         state["result"] = response
+        state["__next__"] = "final_response"
         return state
     except Exception as e:
         return {"result": f"[ERROR] Agent failed to process: {e}"}
+
+# === Final Response Node ===
+def final_response_node(state: dict) -> dict:
+    print("\nResponse:\n", state.get("result", "[No response]"))
+    return state
 
 # === Default Fallback Node ===
 def default_node(state: dict) -> dict:
@@ -101,10 +107,14 @@ def build_graph():
     graph = StateGraph(dict)
     graph.add_node("list_tools", list_tools_node)
     graph.add_node("llm_agent", llm_agent_node)
+    graph.add_node("final_response", final_response_node)
     graph.add_node("default", default_node)
 
     graph.add_conditional_edges("list_tools", lambda s: s["__next__"], {
         "llm_agent": "llm_agent"
+    })
+    graph.add_conditional_edges("llm_agent", lambda s: s["__next__"], {
+        "final_response": "final_response"
     })
 
     graph.set_entry_point("list_tools")
@@ -133,4 +143,3 @@ if __name__ == "__main__":
         })
 
         result = runnable.invoke(tools_state)
-        print("\nResponse:\n", result.get("result", "[No response]"))
