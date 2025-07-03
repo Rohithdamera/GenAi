@@ -1,12 +1,12 @@
 import asyncio
 import json
 import nest_asyncio
-from aiohttp import ClientSession
 from tabulate import tabulate
 
 from langgraph.graph import StateGraph
 from langchain.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage
+import aiohttp
 
 nest_asyncio.apply()
 
@@ -22,45 +22,31 @@ def get_openai_client():
         model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
     )
 
-# === MCP Server URL ===
-SSE_URL = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
+# === SSE URL ===
+sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
 
-# === Async helpers ===
-async def list_tools():
-    async with ClientSession() as session:
-        async with session.get(SSE_URL) as resp:
-            raw = await resp.text()
-            try:
-                data = json.loads(raw)
-                return data.get("tools", [])
-            except Exception:
-                return []
-
-async def call_tool(tool_name: str, arguments: dict):
+# === Tool Call Function ===
+async def call_tool(tool_name, tool_input):
     payload = {
         "method": "tools/call",
         "params": {
             "name": tool_name,
-            "arguments": arguments
+            "arguments": tool_input
         }
     }
-    async with ClientSession() as session:
-        async with session.post(SSE_URL, json=payload) as resp:
-            try:
-                return await resp.json()
-            except Exception:
-                return {"error": f"Invalid response from tool {tool_name}"}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(sse_url, json=payload) as resp:
+            return await resp.json()
 
-# === Sync wrappers ===
-def sync_list_tools():
-    return asyncio.get_event_loop().run_until_complete(list_tools())
-
-def sync_call_tool(tool_name: str, arguments: dict):
-    return asyncio.get_event_loop().run_until_complete(call_tool(tool_name, arguments))
+# === List Tools Function ===
+async def list_tools():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(sse_url) as resp:
+            return await resp.json()
 
 # === LangGraph Nodes ===
 def list_tools_node(state: dict) -> dict:
-    tools = sync_list_tools()
+    tools = asyncio.run(list_tools()).get("tools", [])
     state["available_tools"] = tools
     state["__next__"] = "user_query"
     return state
@@ -70,65 +56,67 @@ def user_query_node(state: dict) -> dict:
     if user_input.lower().strip() == "exit":
         return {"exit": True}
     state["user_input"] = user_input
-    state["__next__"] = "decide_action"
+    state["__next__"] = "decide"
     return state
 
-def decide_action_node(state: dict) -> dict:
+def decide_node(state: dict) -> dict:
     tools = state["available_tools"]
-    tools_str = "\n".join(f"- {t['name']}: {t['description']}" for t in tools)
+    tool_list = "\n".join(f"- {t['name']}: {t['description']}" for t in tools)
     prompt = f"""
-You are a smart agent. Based on the user's question and the available tools, decide which tools to use and what input to provide.
-User query: "{state['user_input']}"
+Given the tools:
+{tool_list}
 
-Available tools:
-{tools_str}
+Decide which tools to call and with what input based on:
+"{state['user_input']}"
 
-For each tool, generate a JSON like:
-{{ "tool": "ToolName", "input": {{...}} }}
-
-Return a JSON list of such tool calls.
-If nothing is relevant, reply: [NO DATA FOUND]
+Respond with a JSON list like:
+[
+  {{"tool": "ToolName", "input": {{...}}}},
+  ...
+]
+If no relevant data, reply with [NO DATA FOUND]
 """
-    response = get_openai_client().invoke(HumanMessage(content=prompt)).content
-    if "[NO DATA FOUND]" in response:
-        return {"result": "[INFO] No relevant data found.", "__next__": "user_query"}
     try:
+        llm = get_openai_client()
+        response = llm.invoke(HumanMessage(content=prompt)).content.strip()
+        if "[NO DATA FOUND]" in response:
+            return {"result": "No relevant data found.", "__next__": "user_query"}
         state["tool_calls"] = json.loads(response)
-        state["__next__"] = "call_tools"
+        state["__next__"] = "execute"
         return state
     except Exception as e:
-        return {"result": f"[ERROR] Could not parse tool call response: {e}\nRaw: {response}", "__next__": "user_query"}
+        return {"result": f"[ERROR parsing LLM decision]: {e}", "__next__": "user_query"}
 
-def call_tools_node(state: dict) -> dict:
-    tool_calls = state.get("tool_calls", [])
-    collected = []
-    for call in tool_calls:
-        tool_name = call.get("tool")
+def execute_node(state: dict) -> dict:
+    results = []
+    for call in state.get("tool_calls", []):
+        tool = call.get("tool")
         args = call.get("input", {})
-        result = sync_call_tool(tool_name, args)
-        collected.append({"tool": tool_name, "result": result})
-    state["tool_results"] = collected
-    state["__next__"] = "generate_response"
+        try:
+            output = asyncio.run(call_tool(tool, args))
+            results.append({"tool": tool, "result": output})
+        except Exception as e:
+            results.append({"tool": tool, "error": str(e)})
+    state["results"] = results
+    state["__next__"] = "respond"
     return state
 
-def generate_response_node(state: dict) -> dict:
+def respond_node(state: dict) -> dict:
     prompt = f"""
-You are a helpful assistant. Here is the user query and tool results. Give a clear and useful answer.
+User asked: {state['user_input']}
+Tool results:
+{json.dumps(state['results'], indent=2)}
 
-User query: {state['user_input']}
-
-Tool Results:
-{json.dumps(state['tool_results'], indent=2)}
-
-Answer:
+Give a clear and helpful response to the user.
 """
-    reply = get_openai_client().invoke(HumanMessage(content=prompt)).content
-    state["result"] = reply
+    llm = get_openai_client()
+    answer = llm.invoke(HumanMessage(content=prompt)).content
+    print("\nResponse:\n", answer)
     state["__next__"] = "user_query"
     return state
 
 def exit_node(state: dict) -> dict:
-    print("\n[INFO] Exiting the assistant. Goodbye!")
+    print("\n[INFO] Exiting. Goodbye!")
     return state
 
 # === Build LangGraph ===
@@ -136,31 +124,27 @@ def build_graph():
     graph = StateGraph(dict)
     graph.add_node("list_tools", list_tools_node)
     graph.add_node("user_query", user_query_node)
-    graph.add_node("decide_action", decide_action_node)
-    graph.add_node("call_tools", call_tools_node)
-    graph.add_node("generate_response", generate_response_node)
+    graph.add_node("decide", decide_node)
+    graph.add_node("execute", execute_node)
+    graph.add_node("respond", respond_node)
     graph.add_node("exit", exit_node)
 
     graph.add_conditional_edges("list_tools", lambda s: s["__next__"], {"user_query": "user_query"})
     graph.add_conditional_edges("user_query", lambda s: "exit" if s.get("exit") else s["__next__"], {
-        "decide_action": "decide_action", "exit": "exit"
+        "decide": "decide", "exit": "exit"
     })
-    graph.add_conditional_edges("decide_action", lambda s: s["__next__"], {
-        "call_tools": "call_tools", "user_query": "user_query"
-    })
-    graph.add_conditional_edges("call_tools", lambda s: s["__next__"], {"generate_response": "generate_response"})
-    graph.add_conditional_edges("generate_response", lambda s: s["__next__"], {"user_query": "user_query"})
+    graph.add_conditional_edges("decide", lambda s: s["__next__"], {"execute": "execute", "user_query": "user_query"})
+    graph.add_conditional_edges("execute", lambda s: s["__next__"], {"respond": "respond"})
+    graph.add_conditional_edges("respond", lambda s: s["__next__"], {"user_query": "user_query"})
 
     graph.set_entry_point("list_tools")
     return graph.compile()
 
-# === Main Loop ===
+# === Main ===
 if __name__ == "__main__":
-    graph = build_graph()
     state = {}
+    graph = build_graph()
     while True:
         state = graph.invoke(state)
-        if "result" in state:
-            print("\n" + state["result"])
         if state.get("exit"):
             break
