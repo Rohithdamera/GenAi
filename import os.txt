@@ -76,12 +76,12 @@ Based on the user query, choose the best tool or combination of tools. You must:
 - Infer the required inputs from the user query
 - Simulate the tool calls by outputting a JSON list like:
   [
-    {"tool": "ToolName", "input": {"field": "value"}},
+    {{"tool": "ToolName", "input": {{"field": "value"}}}},
     ...
   ]
 Return only valid JSON with no explanation or natural language.
 
-User query: "{state['user_input']}"
+User query: {json.dumps(state['user_input'])}
 """
 
     try:
