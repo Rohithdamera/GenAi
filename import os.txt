@@ -63,58 +63,83 @@ def list_tools_node(state: dict) -> dict:
 def llm_agent_node(state: dict) -> dict:
     llm = get_openai_client()
     tools = state.get("available_tools", [])
-    tool_list = "\n".join(f"- {t['name']}: {t['description']}" for t in tools)
+    tool_list = "\n".join([f"- {t['name']}: {t['description']}" for t in tools])
 
     agent_prompt = f"""
-You are a smart assistant that knows how to select, combine, and call the right tools to answer a user query.
-Here is the list of tools:
+You are an intelligent assistant. Your job is to fulfill the user's query by selecting and calling the appropriate tools.
+Below is a list of tools available to you:
 
 {tool_list}
 
-Your task is to:
-- Decide which tool(s) to use
-- Extract correct inputs from the user query
-- Call each tool using appropriate inputs
-- Process and merge data from tool responses if needed
-- Return a final answer to the user in natural language
+Based on the user query, choose the best tool or combination of tools. You must:
+- Identify the relevant tool names
+- Infer the required inputs from the user query
+- Simulate the tool calls by outputting a JSON list like:
+  [
+    {"tool": "ToolName", "input": {"field": "value"}},
+    ...
+  ]
+Return only valid JSON with no explanation or natural language.
 
-If no data found or query doesn't match any tool, respond with a friendly message.
-Return your final answer.
-
-User query:
-"{state['user_input']}"
+User query: "{state['user_input']}"
 """
 
     try:
-        response = llm.invoke(agent_prompt).content.strip()
-        state["result"] = response
-        state["__next__"] = "final_response"
-        return state
-    except Exception as e:
-        return {"result": f"[ERROR] Agent failed to process: {e}"}
+        plan_response = llm.invoke(agent_prompt).content.strip()
+        calls = json.loads(plan_response)
+        all_outputs = []
 
-# === Final Response Node ===
-def final_response_node(state: dict) -> dict:
-    print("\nResponse:\n", state.get("result", "[No response]"))
+        for call in calls:
+            tool = call.get("tool")
+            tool_input = call.get("input", {})
+            output = sync_call_tool(tool, tool_input)
+            all_outputs.append({"tool": tool, "input": tool_input, "output": output})
+
+        state["final_results"] = all_outputs
+        state["__next__"] = "format_output"
+        return state
+
+    except Exception as e:
+        return {"result": f"[ERROR] LLM tool plan or execution failed: {str(e)}"}
+
+# === Output Formatter ===
+def format_output_node(state: dict) -> dict:
+    results = state.get("final_results", [])
+    combined = []
+
+    for item in results:
+        output = item.get("output")
+        if hasattr(output, "content") and output.content:
+            for part in output.content:
+                if hasattr(part, "text"):
+                    try:
+                        parsed = json.loads(part.text)
+                        combined.append(parsed)
+                    except:
+                        combined.append(part.text)
+        else:
+            combined.append(output)
+
+    state["result"] = json.dumps(combined, indent=2) if combined else "[INFO] No structured data returned."
     return state
 
-# === Default Fallback Node ===
+# === Fallback Node ===
 def default_node(state: dict) -> dict:
-    return {"result": "Sorry, I couldn't understand your request or no matching tool found."}
+    return {"result": "Sorry, I couldn't understand your request or no tool could be identified."}
 
 # === Build LangGraph ===
 def build_graph():
     graph = StateGraph(dict)
     graph.add_node("list_tools", list_tools_node)
     graph.add_node("llm_agent", llm_agent_node)
-    graph.add_node("final_response", final_response_node)
+    graph.add_node("format_output", format_output_node)
     graph.add_node("default", default_node)
 
     graph.add_conditional_edges("list_tools", lambda s: s["__next__"], {
         "llm_agent": "llm_agent"
     })
     graph.add_conditional_edges("llm_agent", lambda s: s["__next__"], {
-        "final_response": "final_response"
+        "format_output": "format_output"
     })
 
     graph.set_entry_point("list_tools")
@@ -143,3 +168,4 @@ if __name__ == "__main__":
         })
 
         result = runnable.invoke(tools_state)
+        print("\nResponse:\n", result.get("result", "[No result returned.]"))
