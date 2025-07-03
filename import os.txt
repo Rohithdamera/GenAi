@@ -1,12 +1,166 @@
-vailable Tools:
-- GetProjects: To fetch list of projects in the organization
-- GetEmployee: To fetch employees based on role, experience, skillset, location, assignmentStatus, phone in the organization
-- CreateProjects: To create a project in the organization
-- AssignProjectToEmployee: To assign a project to the employee or to onboard an employee to the project
-- UpdateEmployee: To Update employee details in the organization
-- GetProjectEmployees: To fetch employees part of a project
-- DeleteEmployee: To delete or deactivate an employee in the organization
-- CreateEmployee: To Create an employee in the organization
+import asyncio
+import json
+import nest_asyncio
+from aiohttp import ClientSession
+from tabulate import tabulate
 
-Describe the tool you want to use:  give me all employees data whose name starts with Ch 
+from langgraph.graph import StateGraph
+from langchain.chat_models import AzureChatOpenAI
+from langchain.schema import HumanMessage
 
+nest_asyncio.apply()
+
+# === Azure OpenAI Client ===
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_deployment="Fourth_Chatbot",
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        openai_api_version="2024-08-01-preview",
+        openai_api_key="",  # Fill in your key
+        temperature=0.7,
+        max_tokens=2000,
+        model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
+    )
+
+# === MCP Server URL ===
+SSE_URL = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
+
+# === Async helpers ===
+async def list_tools():
+    async with ClientSession() as session:
+        async with session.get(SSE_URL) as resp:
+            raw = await resp.text()
+            try:
+                data = json.loads(raw)
+                return data.get("tools", [])
+            except Exception:
+                return []
+
+async def call_tool(tool_name: str, arguments: dict):
+    payload = {
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": arguments
+        }
+    }
+    async with ClientSession() as session:
+        async with session.post(SSE_URL, json=payload) as resp:
+            try:
+                return await resp.json()
+            except Exception:
+                return {"error": f"Invalid response from tool {tool_name}"}
+
+# === Sync wrappers ===
+def sync_list_tools():
+    return asyncio.get_event_loop().run_until_complete(list_tools())
+
+def sync_call_tool(tool_name: str, arguments: dict):
+    return asyncio.get_event_loop().run_until_complete(call_tool(tool_name, arguments))
+
+# === LangGraph Nodes ===
+def list_tools_node(state: dict) -> dict:
+    tools = sync_list_tools()
+    state["available_tools"] = tools
+    state["__next__"] = "user_query"
+    return state
+
+def user_query_node(state: dict) -> dict:
+    user_input = input("\nAsk your question (or type 'exit' to quit): ")
+    if user_input.lower().strip() == "exit":
+        return {"exit": True}
+    state["user_input"] = user_input
+    state["__next__"] = "decide_action"
+    return state
+
+def decide_action_node(state: dict) -> dict:
+    tools = state["available_tools"]
+    tools_str = "\n".join(f"- {t['name']}: {t['description']}" for t in tools)
+    prompt = f"""
+You are a smart agent. Based on the user's question and the available tools, decide which tools to use and what input to provide.
+User query: "{state['user_input']}"
+
+Available tools:
+{tools_str}
+
+For each tool, generate a JSON like:
+{{ "tool": "ToolName", "input": {{...}} }}
+
+Return a JSON list of such tool calls.
+If nothing is relevant, reply: [NO DATA FOUND]
+"""
+    response = get_openai_client().invoke(HumanMessage(content=prompt)).content
+    if "[NO DATA FOUND]" in response:
+        return {"result": "[INFO] No relevant data found.", "__next__": "user_query"}
+    try:
+        state["tool_calls"] = json.loads(response)
+        state["__next__"] = "call_tools"
+        return state
+    except Exception as e:
+        return {"result": f"[ERROR] Could not parse tool call response: {e}\nRaw: {response}", "__next__": "user_query"}
+
+def call_tools_node(state: dict) -> dict:
+    tool_calls = state.get("tool_calls", [])
+    collected = []
+    for call in tool_calls:
+        tool_name = call.get("tool")
+        args = call.get("input", {})
+        result = sync_call_tool(tool_name, args)
+        collected.append({"tool": tool_name, "result": result})
+    state["tool_results"] = collected
+    state["__next__"] = "generate_response"
+    return state
+
+def generate_response_node(state: dict) -> dict:
+    prompt = f"""
+You are a helpful assistant. Here is the user query and tool results. Give a clear and useful answer.
+
+User query: {state['user_input']}
+
+Tool Results:
+{json.dumps(state['tool_results'], indent=2)}
+
+Answer:
+"""
+    reply = get_openai_client().invoke(HumanMessage(content=prompt)).content
+    state["result"] = reply
+    state["__next__"] = "user_query"
+    return state
+
+def exit_node(state: dict) -> dict:
+    print("\n[INFO] Exiting the assistant. Goodbye!")
+    return state
+
+# === Build LangGraph ===
+def build_graph():
+    graph = StateGraph(dict)
+    graph.add_node("list_tools", list_tools_node)
+    graph.add_node("user_query", user_query_node)
+    graph.add_node("decide_action", decide_action_node)
+    graph.add_node("call_tools", call_tools_node)
+    graph.add_node("generate_response", generate_response_node)
+    graph.add_node("exit", exit_node)
+
+    graph.add_conditional_edges("list_tools", lambda s: s["__next__"], {"user_query": "user_query"})
+    graph.add_conditional_edges("user_query", lambda s: "exit" if s.get("exit") else s["__next__"], {
+        "decide_action": "decide_action", "exit": "exit"
+    })
+    graph.add_conditional_edges("decide_action", lambda s: s["__next__"], {
+        "call_tools": "call_tools", "user_query": "user_query"
+    })
+    graph.add_conditional_edges("call_tools", lambda s: s["__next__"], {"generate_response": "generate_response"})
+    graph.add_conditional_edges("generate_response", lambda s: s["__next__"], {"user_query": "user_query"})
+
+    graph.set_entry_point("list_tools")
+    return graph.compile()
+
+# === Main Loop ===
+if __name__ == "__main__":
+    graph = build_graph()
+    state = {}
+    while True:
+        state = graph.invoke(state)
+        if "result" in state:
+            print("\n" + state["result"])
+        if state.get("exit"):
+            break
