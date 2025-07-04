@@ -1,13 +1,13 @@
 import os
+import json
 import asyncio
 from typing import List, Dict, Any
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
-from langchain.agents import initialize_agent, AgentType
-from langchain.agents.agent_toolkits import Tool
 from langchain.chat_models import AzureChatOpenAI
-from langchain.agents.agent import AgentExecutor
+from langchain.agents import initialize_agent, AgentType
+from langchain.tools import Tool
 
 # -------------------------
 # 1. Azure OpenAI Client
@@ -28,7 +28,7 @@ def get_openai_client():
     )
 
 # -------------------------
-# 2. MCP Tool Wrappers
+# 2. MCP Tool Wrapper
 # -------------------------
 class MCPToolWrapper:
     def __init__(self, session: ClientSession):
@@ -40,34 +40,36 @@ class MCPToolWrapper:
     async def call_tool(self, tool_name: str, params: Dict[str, Any]) -> Any:
         return await self.session.call_tool(tool_name, params)
 
-
 # -------------------------
-# 3. AsyncTool Adapter
+# 3. Convert MCP Tools to LangChain Tools
 # -------------------------
-def create_langchain_tools(tools: List[str], wrapper: MCPToolWrapper):
-    from langchain.tools import tool
+def create_langchain_tools(tool_names: List[str], wrapper: MCPToolWrapper) -> List[Tool]:
+    tools = []
 
-    lc_tools = []
-
-    for tool_name in tools:
-        @tool(name=tool_name, description=f"Call the {tool_name} tool")
-        async def _call_tool(tool_input: str, tool_name=tool_name):
-            import json
+    for tool_name in tool_names:
+        async def _tool_fn(tool_input: str, tool_name=tool_name):
             try:
                 params = json.loads(tool_input)
-            except:
-                return f"Input must be a JSON string. Got: {tool_input}"
+            except json.JSONDecodeError:
+                return f"❌ Invalid input. Please provide valid JSON for `{tool_name}`."
+            try:
+                result = await wrapper.call_tool(tool_name, params)
+                return str(result)
+            except Exception as e:
+                return f"❌ Error calling `{tool_name}`: {e}"
 
-            result = await wrapper.call_tool(tool_name, params)
-            return str(result)
+        tool = Tool.from_function(
+            name=tool_name,
+            func=_tool_fn,
+            coroutine=_tool_fn,
+            description=f"Call the MCP tool: {tool_name}"
+        )
+        tools.append(tool)
 
-        lc_tools.append(_call_tool)
-
-    return lc_tools
-
+    return tools
 
 # -------------------------
-# 4. Main REACT Agent Runner
+# 4. ReAct Agent Runner
 # -------------------------
 async def run_agent():
     url = "https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/sse"
@@ -77,13 +79,11 @@ async def run_agent():
             await session.initialize()
 
             wrapper = MCPToolWrapper(session)
-            available_tools = await wrapper.get_available_tools()
-            print("🔧 MCP Tools Available:", available_tools)
+            tool_names = await wrapper.get_available_tools()
+            print("🛠️ Available MCP Tools:", tool_names)
 
-            # Wrap tools for LangChain agent
-            langchain_tools = create_langchain_tools(available_tools, wrapper)
+            langchain_tools = create_langchain_tools(tool_names, wrapper)
 
-            # Initialize agent with OpenAI + tools
             agent = initialize_agent(
                 tools=langchain_tools,
                 llm=get_openai_client(),
@@ -92,7 +92,7 @@ async def run_agent():
                 handle_parsing_errors=True
             )
 
-            print("\n🤖 Ask your question (e.g. 'Who works on Pepsico?')")
+            print("\n🤖 Ask your questions (type 'exit' to quit):")
             while True:
                 user_query = input("\nUser: ")
                 if user_query.lower() in ["exit", "quit"]:
@@ -101,10 +101,10 @@ async def run_agent():
                     result = await agent.arun(user_query)
                     print(f"Agent: {result}")
                 except Exception as e:
-                    print(f"❌ Agent Error: {e}")
+                    print(f"❌ Agent error: {e}")
 
 # -------------------------
-# 5. Run main
+# 5. Entry Point
 # -------------------------
 if __name__ == "__main__":
     asyncio.run(run_agent())
