@@ -1,130 +1,23 @@
-# === Jupyter Fix ===
-import nest_asyncio
-nest_asyncio.apply()
-
-# === Imports ===
-import asyncio
-import json
-import os
-import logging
-from typing import List, Dict, Any
-
-from langchain_experimental.plan_and_execute.agent_executor import PlanAndExecute
-from langchain_experimental.plan_and_execute.planners.chat_planner import load_chat_planner
-from langchain_experimental.plan_and_execute.executors.agent_executor import load_agent_executor
-
-from langchain_core.tools import Tool
-from langchain.chat_models import AzureChatOpenAI
-
 from mcp import ClientSession
 from mcp.client.sse import sse_client
+ 
+async def main() -> None:
+    # URL for the SSE stream
+    url = "https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/sse"
+ 
+    # Prompt user for the tool name
+    tool_name = input("Enter the tool name to call (e.g., get-vendors): ")
+ 
+    async with sse_client(url=url) as streams:
+        async with ClientSession(streams[0], streams[1]) as session:
+            await session.initialize()
+ 
+            tools = await session.list_tools()
+            print("Available tools:", tools)
+            # Call the tool using the user-defined tool name
+            result = await session.call_tool(tool_name, {
+                                            "location": "Bangalore"
+            })
 
-# === Logging ===
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# === Azure OpenAI Client with Custom Behavior ===
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_deployment="Fourth_Chatbot",
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        openai_api_version="2024-08-01-preview",
-        openai_api_key=os.getenv("AZURE_OPENAI_KEY", ""),  # Set your key securely
-        temperature=0.7,
-        max_tokens=2000,
-        model_kwargs={
-            "top_p": 0.9,
-            "frequency_penalty": 0.2,
-            "presence_penalty": 0.1,
-            "system_message": (
-                "You are an intelligent execution agent for the MCP server. "
-                "Do not ask the user follow-up questions. "
-                "Always use available tools to find answers, even if the input is vague. "
-                "If you are unsure about input filters, use default or broad filters. "
-                "If no tool can answer, say: 'Not found in MCP'."
-            )
-        }
-    )
-
-# === SSE MCP URL ===
-sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
-
-# === Sync wrapper to fetch tools from SSE ===
-def sync_fetch_tools():
-    async def fetch():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                return await session.list_tools()
-    return asyncio.get_event_loop().run_until_complete(fetch())
-
-# === Tool Wrapper ===
-def create_tool(name: str, description: str, input_schema: dict):
-    def _tool_func(**kwargs):
-        async def call():
-            async with sse_client(url=sse_url) as streams:
-                async with ClientSession(*streams) as session:
-                    await session.initialize()
-
-                    # Use default fallback if no inputs are provided
-                    if not kwargs:
-                        kwargs = {"assignmentStatus": "active"}
-
-                    return await session.call_tool(name, kwargs)
-        try:
-            return asyncio.get_event_loop().run_until_complete(call())
-        except Exception as e:
-            return f"[ERROR] Failed to call {name}: {e}"
-
-    return Tool(
-        name=name,
-        description=description or f"Tool to call {name}",
-        func=_tool_func,
-        args_schema=None  # Optional: use schema if needed
-    )
-
-# === Build Plan-and-Execute Agent ===
-def build_plan_and_execute_agent():
-    llm = get_openai_client()
-    tool_response = sync_fetch_tools()
-
-    tools = []
-    for t in getattr(tool_response, "tools", []):
-        tools.append(create_tool(
-            name=t.name,
-            description=t.description,
-            input_schema=t.inputSchema
-        ))
-
-    planner = load_chat_planner(llm)
-    executor = load_agent_executor(llm=llm, tools=tools, verbose=True)
-    agent = PlanAndExecute(planner=planner, executor=executor, verbose=True)
-    return agent
-
-# === Run Agent on User Input ===
-def run_agent(user_input: str):
-    try:
-        agent = build_plan_and_execute_agent()
-        result = agent.invoke({"input": user_input})
-        return result.get("output", "No result returned.")
-    except Exception as e:
-        return f"[ERROR] Agent execution failed: {e}"
-
-# === MAIN for Jupyter ===
-print("🔄 Fetching tools from MCP...")
-try:
-    tool_response = sync_fetch_tools()
-    tools = getattr(tool_response, "tools", [])
-    print("✅ Available Tools:")
-    for t in tools:
-        print(f"- {t.name}: {t.description}")
-except Exception as e:
-    print(f"[ERROR] Could not load tools: {e}")
-    raise
-
-# === Ask a question ===
-user_input = "Give me employee details"
-output = run_agent(user_input)
-
-print("\n=== AGENT RESPONSE ===\n")
-print(output)
+        print("Tool result:", result)
+await main()
