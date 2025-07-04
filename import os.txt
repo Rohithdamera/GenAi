@@ -1,13 +1,19 @@
-import asyncio
+import os
 import json
-import nest_asyncio
-from tabulate import tabulate
-from mcp import ClientSession
-from mcp.client.sse import sse_client
-from langchain.chat_models import AzureChatOpenAI
-from langgraph.graph import StateGraph
+import asyncio
+import logging
+from typing import List, Dict, Any
 
-nest_asyncio.apply()
+from langchain.agents import PlanAndExecute, load_agent_executor, load_chat_planner
+from langchain.tools import Tool
+from langchain_core.tools import tool
+from langchain_community.chat_models import AzureChatOpenAI
+from aiohttp import ClientSession
+from contextlib import asynccontextmanager
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # === Azure OpenAI Client ===
 def get_openai_client():
@@ -15,157 +21,91 @@ def get_openai_client():
         azure_deployment="Fourth_Chatbot",
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         openai_api_version="2024-08-01-preview",
-        openai_api_key="",
+        openai_api_key=os.getenv("AZURE_OPENAI_KEY", ""),  # Store your key securely
         temperature=0.7,
         max_tokens=2000,
-        model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
+        model_kwargs={
+            "top_p": 0.9,
+            "frequency_penalty": 0.2,
+            "presence_penalty": 0.1
+        }
     )
 
+# === SSE MCP TOOL DISCOVERY CLIENT ===
 sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
 
-# === Fetch Available Tools ===
-def sync_fetch_tools():
+@asynccontextmanager
+async def sse_client(url):
+    async with ClientSession() as session:
+        yield session
+
+# === SYNC WRAPPER FOR TOOL FETCHING ===
+def sync_fetch_tools() -> List[Dict[str, Any]]:
     async def fetch():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                return await session.list_tools()
+        async with sse_client(url=sse_url) as session:
+            async with session.get(f"{sse_url}/tools") as response:
+                if response.status != 200:
+                    raise Exception(f"SSE fetch failed with status {response.status}")
+                return await response.json()
     return asyncio.get_event_loop().run_until_complete(fetch())
 
-# === Call Tool ===
-def sync_call_tool(tool_name: str, tool_input: dict):
-    async def call():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                return await session.call_tool(tool_name, tool_input)
-    try:
-        return asyncio.get_event_loop().run_until_complete(call())
-    except Exception as e:
-        return f"[ERROR] {e}"
+# === DYNAMIC TOOL CREATION FROM MCP ===
+def generate_tools_from_mcp() -> List[Tool]:
+    raw_tools = sync_fetch_tools()
+    tools = []
 
-# === LangGraph Nodes ===
-def list_tools_node(state: dict) -> dict:
-    try:
-        result = sync_fetch_tools()
-        tools = [{
-            "name": t.name,
-            "description": t.description,
-            "inputSchema": t.inputSchema
-        } for t in getattr(result, "tools", [])]
-        state["available_tools"] = tools
-        state["__next__"] = "llm_agent"
-        return state
-    except Exception as e:
-        return {"result": f"[ERROR] Failed to fetch tools: {e}"}
+    for tool_data in raw_tools.get("tools", []):
+        name = tool_data.get("name")
+        description = tool_data.get("description", "")
+        input_schema = tool_data.get("inputSchema", {})
 
-# === Agent Node ===
-def llm_agent_node(state: dict) -> dict:
+        @tool(name=name, description=description)
+        def dynamic_tool(**kwargs):
+            try:
+                payload = json.dumps(kwargs)
+                response = asyncio.get_event_loop().run_until_complete(call_mcp_api(name, payload))
+                return response
+            except Exception as e:
+                return f"[ERROR] Failed to call tool {name}: {e}"
+
+        tools.append(dynamic_tool)
+
+    return tools
+
+# === API CALLER FOR TOOLS ===
+async def call_mcp_api(tool_name: str, payload: str):
+    url = f"{sse_url}/tools/{tool_name}/run"
+    headers = {
+        "Content-Type": "application/json"
+    }
+    async with ClientSession() as session:
+        async with session.post(url, data=payload, headers=headers) as resp:
+            if resp.status == 200:
+                return await resp.text()
+            else:
+                return f"[ERROR] MCP call failed for {tool_name}, status: {resp.status}"
+
+# === BUILD PLAN-AND-EXECUTE AGENT ===
+def build_plan_and_execute_agent():
     llm = get_openai_client()
-    tools = state.get("available_tools", [])
-    tool_list = "\n".join([f"- {t['name']}: {t['description']}" for t in tools])
+    tools = generate_tools_from_mcp()
+    planner = load_chat_planner(llm)
+    executor = load_agent_executor(llm=llm, tools=tools, verbose=True)
+    agent = PlanAndExecute(planner=planner, executor=executor, verbose=True)
+    return agent
 
-    agent_prompt = f"""
-You are an intelligent assistant. Your job is to fulfill the user's query by selecting and calling the appropriate tools.
-Below is a list of tools available to you:
-
-{tool_list}
-
-Based on the user query, choose the best tool or combination of tools. You must:
-- Identify the relevant tool names
-- Infer the required inputs from the user query
-- Simulate the tool calls by outputting a JSON list like:
-  [
-    {{"tool": "ToolName", "input": {{"field": "value"}}}},
-    ...
-  ]
-Return only valid JSON with no explanation or natural language.
-
-User query: {json.dumps(state['user_input'])}
-"""
-
+# === MAIN ENTRY POINT ===
+def run_agent_on_query(user_query: str) -> str:
     try:
-        plan_response = llm.invoke(agent_prompt).content.strip()
-        calls = json.loads(plan_response)
-        all_outputs = []
-
-        for call in calls:
-            tool = call.get("tool")
-            tool_input = call.get("input", {})
-            output = sync_call_tool(tool, tool_input)
-            all_outputs.append({"tool": tool, "input": tool_input, "output": output})
-
-        state["final_results"] = all_outputs
-        state["__next__"] = "format_output"
-        return state
-
+        agent = build_plan_and_execute_agent()
+        result = agent.invoke({"input": user_query})
+        return result.get("output", "No result returned.")
     except Exception as e:
-        return {"result": f"[ERROR] LLM tool plan or execution failed: {str(e)}"}
+        return f"[ERROR] Agent execution failed: {e}"
 
-# === Output Formatter ===
-def format_output_node(state: dict) -> dict:
-    results = state.get("final_results", [])
-    combined = []
-
-    for item in results:
-        output = item.get("output")
-        if hasattr(output, "content") and output.content:
-            for part in output.content:
-                if hasattr(part, "text"):
-                    try:
-                        parsed = json.loads(part.text)
-                        combined.append(parsed)
-                    except:
-                        combined.append(part.text)
-        else:
-            combined.append(output)
-
-    state["result"] = json.dumps(combined, indent=2) if combined else "[INFO] No structured data returned."
-    return state
-
-# === Fallback Node ===
-def default_node(state: dict) -> dict:
-    return {"result": "Sorry, I couldn't understand your request or no tool could be identified."}
-
-# === Build LangGraph ===
-def build_graph():
-    graph = StateGraph(dict)
-    graph.add_node("list_tools", list_tools_node)
-    graph.add_node("llm_agent", llm_agent_node)
-    graph.add_node("format_output", format_output_node)
-    graph.add_node("default", default_node)
-
-    graph.add_conditional_edges("list_tools", lambda s: s["__next__"], {
-        "llm_agent": "llm_agent"
-    })
-    graph.add_conditional_edges("llm_agent", lambda s: s["__next__"], {
-        "format_output": "format_output"
-    })
-
-    graph.set_entry_point("list_tools")
-    return graph.compile()
-
-# === Main Loop ===
+# === TEST ===
 if __name__ == "__main__":
-    print("\n=== MCP Tool Assistant ===\nType 'exit' to quit.")
-    tools_state = list_tools_node({})
-
-    if "available_tools" not in tools_state:
-        print(tools_state.get("result", "[ERROR] Could not load tools."))
-        exit()
-
-    runnable = build_graph()
-
-    while True:
-        user_input = input("\nAsk your question: ").strip()
-        if user_input.lower() in ("exit", "quit"):
-            print("Goodbye!")
-            break
-
-        tools_state.update({
-            "user_input": user_input,
-            "__next__": "llm_agent"
-        })
-
-        result = runnable.invoke(tools_state)
-        print("\nResponse:\n", result.get("result", "[No result returned.]"))
+    test_query = "Give me the names of employees working in the Pepsico project with less than 10 years of experience"
+    output = run_agent_on_query(test_query)
+    print("\n=== AGENT RESPONSE ===\n")
+    print(output)
