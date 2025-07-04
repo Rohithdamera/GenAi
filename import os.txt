@@ -1,110 +1,37 @@
-import os
-import json
-import asyncio
-from typing import List, Dict, Any
-from mcp import ClientSession
-from mcp.client.sse import sse_client
-
-from langchain.chat_models import AzureChatOpenAI
-from langchain.agents import initialize_agent, AgentType
-from langchain.tools import Tool
-
-# -------------------------
-# 1. Azure OpenAI Client
-# -------------------------
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_deployment="Fourth_Chatbot",
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        openai_api_version="2024-08-01-preview",
-        openai_api_key=os.getenv("AZURE_OPENAI_KEY", ""),
-        temperature=0.7,
-        max_tokens=2000,
-        model_kwargs={
-            "top_p": 0.9,
-            "frequency_penalty": 0.2,
-            "presence_penalty": 0.1
-        }
-    )
-
-# -------------------------
-# 2. MCP Tool Wrapper
-# -------------------------
-class MCPToolWrapper:
-    def __init__(self, session: ClientSession):
-        self.session = session
-
-    async def get_available_tools(self) -> List[str]:
-        return await self.session.list_tools()
-
-    async def call_tool(self, tool_name: str, params: Dict[str, Any]) -> Any:
-        return await self.session.call_tool(tool_name, params)
-
-# -------------------------
-# 3. Convert MCP Tools to LangChain Tools
-# -------------------------
-def create_langchain_tools(tool_names: List[str], wrapper: MCPToolWrapper) -> List[Tool]:
-    tools = []
-
-    for tool_name in tool_names:
-        async def _tool_fn(tool_input: str, tool_name=tool_name):
-            try:
-                params = json.loads(tool_input)
-            except json.JSONDecodeError:
-                return f"❌ Invalid input. Please provide valid JSON for `{tool_name}`."
-            try:
-                result = await wrapper.call_tool(tool_name, params)
-                return str(result)
-            except Exception as e:
-                return f"❌ Error calling `{tool_name}`: {e}"
-
-        tool = Tool.from_function(
-            name=tool_name,
-            func=_tool_fn,
-            coroutine=_tool_fn,
-            description=f"Call the MCP tool: {tool_name}"
-        )
-        tools.append(tool)
-
-    return tools
-
-# -------------------------
-# 4. ReAct Agent Runner
-# -------------------------
-async def run_agent():
-    url = "https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/sse"
-
-    async with sse_client(url=url) as streams:
-        async with ClientSession(streams[0], streams[1]) as session:
-            await session.initialize()
-
-            wrapper = MCPToolWrapper(session)
-            tool_names = await wrapper.get_available_tools()
-            print("🛠️ Available MCP Tools:", tool_names)
-
-            langchain_tools = create_langchain_tools(tool_names, wrapper)
-
-            agent = initialize_agent(
-                tools=langchain_tools,
-                llm=get_openai_client(),
-                agent=AgentType.OPENAI_FUNCTIONS,
-                verbose=True,
-                handle_parsing_errors=True
-            )
-
-            print("\n🤖 Ask your questions (type 'exit' to quit):")
-            while True:
-                user_query = input("\nUser: ")
-                if user_query.lower() in ["exit", "quit"]:
-                    break
-                try:
-                    result = await agent.arun(user_query)
-                    print(f"Agent: {result}")
-                except Exception as e:
-                    print(f"❌ Agent error: {e}")
-
-# -------------------------
-# 5. Entry Point
-# -------------------------
-if __name__ == "__main__":
-    asyncio.run(run_agent())
+INFO:httpx:HTTP Request: GET https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/sse "HTTP/1.1 404 NOT FOUND"
+  + Exception Group Traceback (most recent call last):
+  |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\IPython\core\interactiveshell.py", line 3672, in run_code
+  |     exec(code_obj, self.user_global_ns, self.user_ns)
+  |   File "C:\Users\rdamera\AppData\Local\Temp\ipykernel_38988\2043773441.py", line 110, in <module>
+  |     asyncio.run(run_agent())
+  |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\nest_asyncio.py", line 30, in run
+  |     return loop.run_until_complete(task)
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\nest_asyncio.py", line 98, in run_until_complete
+  |     return f.result()
+  |            ^^^^^^^^^^
+  |   File "C:\Program Files\Python311\Lib\asyncio\futures.py", line 203, in result
+  |     raise self._exception.with_traceback(self._exception_tb)
+  |   File "C:\Program Files\Python311\Lib\asyncio\tasks.py", line 277, in __step
+  |     result = coro.send(None)
+  |              ^^^^^^^^^^^^^^^
+  |   File "C:\Users\rdamera\AppData\Local\Temp\ipykernel_38988\2043773441.py", line 77, in run_agent
+  |     async with sse_client(url=url) as streams:
+  |   File "C:\Program Files\Python311\Lib\contextlib.py", line 210, in __aenter__
+  |     return await anext(self.gen)
+  |            ^^^^^^^^^^^^^^^^^^^^^
+  |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\mcp\client\sse.py", line 54, in sse_client
+  |     async with anyio.create_task_group() as tg:
+  |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\anyio\_backends\_asyncio.py", line 772, in __aexit__
+  |     raise BaseExceptionGroup(
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Traceback (most recent call last):
+    |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\mcp\client\sse.py", line 64, in sse_client
+    |     event_source.response.raise_for_status()
+    |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\httpx\_models.py", line 829, in raise_for_status
+    |     raise HTTPStatusError(message, request=request, response=self)
+    | httpx.HTTPStatusError: Client error '404 NOT FOUND' for url 'https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/sse'
+    | For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
+    +------------------------------------
+1
