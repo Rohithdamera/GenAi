@@ -1,3 +1,8 @@
+# === Setup for Jupyter ===
+import nest_asyncio
+nest_asyncio.apply()
+
+# === Imports ===
 import os
 import json
 import asyncio
@@ -11,7 +16,7 @@ from langchain_community.chat_models import AzureChatOpenAI
 from aiohttp import ClientSession
 from contextlib import asynccontextmanager
 
-# Set up logging
+# === Logging ===
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -21,17 +26,13 @@ def get_openai_client():
         azure_deployment="Fourth_Chatbot",
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         openai_api_version="2024-08-01-preview",
-        openai_api_key=os.getenv("AZURE_OPENAI_KEY", ""),  # Store your key securely
+        openai_api_key=os.getenv("AZURE_OPENAI_KEY", ""),  # Set your key here or as env variable
         temperature=0.7,
         max_tokens=2000,
-        model_kwargs={
-            "top_p": 0.9,
-            "frequency_penalty": 0.2,
-            "presence_penalty": 0.1
-        }
+        model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
     )
 
-# === SSE MCP TOOL DISCOVERY CLIENT ===
+# === SSE MCP TOOL DISCOVERY ===
 sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
 
 @asynccontextmanager
@@ -39,45 +40,18 @@ async def sse_client(url):
     async with ClientSession() as session:
         yield session
 
-# === SYNC WRAPPER FOR TOOL FETCHING ===
-def sync_fetch_tools() -> List[Dict[str, Any]]:
-    async def fetch():
-        async with sse_client(url=sse_url) as session:
-            async with session.get(f"{sse_url}/tools") as response:
-                if response.status != 200:
-                    raise Exception(f"SSE fetch failed with status {response.status}")
-                return await response.json()
-    return asyncio.get_event_loop().run_until_complete(fetch())
+# === Async tool fetch ===
+async def fetch_tools() -> List[Dict[str, Any]]:
+    async with sse_client(url=sse_url) as session:
+        async with session.get(f"{sse_url}/tools") as response:
+            if response.status != 200:
+                raise Exception(f"SSE fetch failed with status {response.status}")
+            return await response.json()
 
-# === DYNAMIC TOOL CREATION FROM MCP ===
-def generate_tools_from_mcp() -> List[Tool]:
-    raw_tools = sync_fetch_tools()
-    tools = []
-
-    for tool_data in raw_tools.get("tools", []):
-        name = tool_data.get("name")
-        description = tool_data.get("description", "")
-        input_schema = tool_data.get("inputSchema", {})
-
-        @tool(name=name, description=description)
-        def dynamic_tool(**kwargs):
-            try:
-                payload = json.dumps(kwargs)
-                response = asyncio.get_event_loop().run_until_complete(call_mcp_api(name, payload))
-                return response
-            except Exception as e:
-                return f"[ERROR] Failed to call tool {name}: {e}"
-
-        tools.append(dynamic_tool)
-
-    return tools
-
-# === API CALLER FOR TOOLS ===
+# === Call MCP tool endpoint ===
 async def call_mcp_api(tool_name: str, payload: str):
     url = f"{sse_url}/tools/{tool_name}/run"
-    headers = {
-        "Content-Type": "application/json"
-    }
+    headers = {"Content-Type": "application/json"}
     async with ClientSession() as session:
         async with session.post(url, data=payload, headers=headers) as resp:
             if resp.status == 200:
@@ -85,16 +59,34 @@ async def call_mcp_api(tool_name: str, payload: str):
             else:
                 return f"[ERROR] MCP call failed for {tool_name}, status: {resp.status}"
 
-# === BUILD PLAN-AND-EXECUTE AGENT ===
+# === Tool wrapper ===
+def create_tool(name: str, description: str):
+    @tool(name=name, description=description)
+    def _tool(**kwargs):
+        try:
+            payload = json.dumps(kwargs)
+            return asyncio.get_event_loop().run_until_complete(call_mcp_api(name, payload))
+        except Exception as e:
+            return f"[ERROR] Failed to call {name}: {e}"
+    return _tool
+
+# === Build Plan-and-Execute agent ===
 def build_plan_and_execute_agent():
     llm = get_openai_client()
-    tools = generate_tools_from_mcp()
+    raw_tools = asyncio.get_event_loop().run_until_complete(fetch_tools())
+    tools = []
+
+    for tool_data in raw_tools.get("tools", []):
+        name = tool_data.get("name")
+        description = tool_data.get("description", f"Tool for {name}")
+        tools.append(create_tool(name=name, description=description))
+
     planner = load_chat_planner(llm)
     executor = load_agent_executor(llm=llm, tools=tools, verbose=True)
     agent = PlanAndExecute(planner=planner, executor=executor, verbose=True)
     return agent
 
-# === MAIN ENTRY POINT ===
+# === Run query ===
 def run_agent_on_query(user_query: str) -> str:
     try:
         agent = build_plan_and_execute_agent()
@@ -104,8 +96,10 @@ def run_agent_on_query(user_query: str) -> str:
         return f"[ERROR] Agent execution failed: {e}"
 
 # === TEST ===
-if __name__ == "__main__":
-    test_query = "Give me the names of employees working in the Pepsico project with less than 10 years of experience"
-    output = run_agent_on_query(test_query)
-    print("\n=== AGENT RESPONSE ===\n")
-    print(output)
+# Example: ask your custom MCP server
+test_query = "Give me the names of employees working in the Pepsico project with less than 10 years of experience"
+
+response = run_agent_on_query(test_query)
+
+print("\n=== AGENT RESPONSE ===\n")
+print(response)
