@@ -1,24 +1,17 @@
-# === Setup for Jupyter ===
-import nest_asyncio
-nest_asyncio.apply()
-
-# === Imports ===
-import os
-import json
 import asyncio
-import logging
-from typing import List, Dict, Any
+import json
+import nest_asyncio
+from mcp import ClientSession
+from mcp.client.sse import sse_client
 
-from langchain.agents import PlanAndExecute, load_agent_executor, load_chat_planner
-from langchain.tools import Tool
-from langchain_core.tools import tool
-from langchain_community.chat_models import AzureChatOpenAI
-from aiohttp import ClientSession
-from contextlib import asynccontextmanager
+from langchain_experimental.plan_and_execute.agent_executor import PlanAndExecute
+from langchain_experimental.plan_and_execute.planners.chat_planner import load_chat_planner
+from langchain_experimental.plan_and_execute.executors.agent_executor import load_agent_executor
 
-# === Logging ===
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from langchain_core.tools import Tool
+from langchain.chat_models import AzureChatOpenAI
+
+nest_asyncio.apply()
 
 # === Azure OpenAI Client ===
 def get_openai_client():
@@ -26,80 +19,161 @@ def get_openai_client():
         azure_deployment="Fourth_Chatbot",
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         openai_api_version="2024-08-01-preview",
-        openai_api_key=os.getenv("AZURE_OPENAI_KEY", ""),  # Set your key here or as env variable
+        openai_api_key="",  # Replace with your actual key
         temperature=0.7,
         max_tokens=2000,
         model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
     )
 
-# === SSE MCP TOOL DISCOVERY ===
+# === SSE URL ===
 sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
 
-@asynccontextmanager
-async def sse_client(url):
-    async with ClientSession() as session:
-        yield session
+# === Sync Wrapper for Async Tool Fetch ===
+def sync_fetch_tools():
+    async def fetch():
+        async with sse_client(url=sse_url) as streams:
+            async with ClientSession(*streams) as session:
+                await session.initialize()
+                return await session.list_tools()
+    return asyncio.get_event_loop().run_until_complete(fetch())
 
-# === Async tool fetch ===
-async def fetch_tools() -> List[Dict[str, Any]]:
-    async with sse_client(url=sse_url) as session:
-        async with session.get(f"{sse_url}/tools") as response:
-            if response.status != 200:
-                raise Exception(f"SSE fetch failed with status {response.status}")
-            return await response.json()
-
-# === Call MCP tool endpoint ===
-async def call_mcp_api(tool_name: str, payload: str):
-    url = f"{sse_url}/tools/{tool_name}/run"
-    headers = {"Content-Type": "application/json"}
-    async with ClientSession() as session:
-        async with session.post(url, data=payload, headers=headers) as resp:
-            if resp.status == 200:
-                return await resp.text()
-            else:
-                return f"[ERROR] MCP call failed for {tool_name}, status: {resp.status}"
-
-# === Tool wrapper ===
-def create_tool(name: str, description: str):
-    @tool(name=name, description=description)
-    def _tool(**kwargs):
+# === Tool Wrapper ===
+def create_tool(name: str, description: str, input_schema: dict):
+    def _tool_func(**kwargs):
+        async def call():
+            async with sse_client(url=sse_url) as streams:
+                async with ClientSession(*streams) as session:
+                    await session.initialize()
+                    return await session.call_tool(name, kwargs)
         try:
-            payload = json.dumps(kwargs)
-            return asyncio.get_event_loop().run_until_complete(call_mcp_api(name, payload))
+            return asyncio.get_event_loop().run_until_complete(call())
         except Exception as e:
             return f"[ERROR] Failed to call {name}: {e}"
-    return _tool
 
-# === Build Plan-and-Execute agent ===
+    # Wrap the function in a Tool object
+    return Tool(
+        name=name,
+        description=description,
+        func=_tool_func,
+        args_schema=None  # Optional: define a Pydantic schema if needed
+    )
+
+# === Build Plan-and-Execute Agent ===
 def build_plan_and_execute_agent():
     llm = get_openai_client()
-    raw_tools = asyncio.get_event_loop().run_until_complete(fetch_tools())
-    tools = []
+    tool_response = sync_fetch_tools()
 
-    for tool_data in raw_tools.get("tools", []):
-        name = tool_data.get("name")
-        description = tool_data.get("description", f"Tool for {name}")
-        tools.append(create_tool(name=name, description=description))
+    tools = []
+    for t in getattr(tool_response, "tools", []):
+        tools.append(create_tool(
+            name=t.name,
+            description=t.description,
+            input_schema=t.inputSchema
+        ))
 
     planner = load_chat_planner(llm)
     executor = load_agent_executor(llm=llm, tools=tools, verbose=True)
     agent = PlanAndExecute(planner=planner, executor=executor, verbose=True)
     return agent
 
-# === Run query ===
-def run_agent_on_query(user_query: str) -> str:
+# === Run Agent ===
+def run_agent(user_input: str):
     try:
         agent = build_plan_and_execute_agent()
-        result = agent.invoke({"input": user_query})
+        result = agent.invoke({"input": user_input})
         return result.get("output", "No result returned.")
     except Exception as e:
         return f"[ERROR] Agent execution failed: {e}"
 
-# === TEST ===
-# Example: ask your custom MCP server
-test_query = "Give me the names of employees working in the Pepsico project with less than 10 years of experience"
+# === Main Execution ===
+if __name__ == "__main__":
+    print("Fetching available tools...")
+    try:
+        tool_response = sync_fetch_tools()
+        tools = getattr(tool_response, "tools", [])
+        print("\nAvailable Tools:")
+        for t in tools:
+            print(f"- {t.name}: {t.description}")
+    except Exception as e:
+        print(f"[ERROR] Could not load tools: {e}")
+        exit()
 
-response = run_agent_on_query(test_query)
+    user_input = input("\nDescribe what you want to do: ")
+    output = run_agent(user_input)
 
-print("\n=== AGENT RESPONSE ===\n")
-print(response)
+    print("\n=== AGENT RESPONSE ===\n")
+    print(output)
+
+
+
+
+Fetching available tools...
+INFO:httpx:HTTP Request: GET https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/sse "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/message?sessionId=98e1d8fb-1acc-4bcf-89e9-593d7ba854e5 "HTTP/1.1 202 "
+INFO:httpx:HTTP Request: POST https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/message?sessionId=98e1d8fb-1acc-4bcf-89e9-593d7ba854e5 "HTTP/1.1 202 "
+INFO:httpx:HTTP Request: POST https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/message?sessionId=98e1d8fb-1acc-4bcf-89e9-593d7ba854e5 "HTTP/1.1 202 "
+
+Available Tools:
+- GetProjects: To fetch list of projects in the organization
+- GetEmployee: To fetch employees based on role, experience, skillset, location, assignmentStatus, phone in the organization
+- CreateProjects: To create a project in the organization
+- AssignProjectToEmployee: To assign a project to the employee or to onboard an employee to the project
+- UpdateEmployee: To Update employee details in the organization
+- GetProjectEmployees: To fetch employees part of a project
+- DeleteEmployee: To delete or deactivate an employee in the organization
+- CreateEmployee: To Create an employee in the organization
+
+Describe what you want to do:  give me employee details 
+INFO:httpx:HTTP Request: GET https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/sse "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/message?sessionId=4cac00df-67dd-411f-975d-af561340e17f "HTTP/1.1 202 "
+INFO:httpx:HTTP Request: POST https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/message?sessionId=4cac00df-67dd-411f-975d-af561340e17f "HTTP/1.1 202 "
+
+
+> Entering new PlanAndExecute chain...
+INFO:httpx:HTTP Request: POST https://testopenaiassets.openai.azure.com/openai/deployments/Fourth_Chatbot/chat/completions?api-version=2024-08-01-preview "HTTP/1.1 200 OK"
+steps=[Step(value='Request more specific information from the user about which employee details are needed (e.g., name, department, job title, contact information).'), Step(value='Once the necessary details are provided, access the relevant database or records to retrieve the employee details.'), Step(value='Present the requested employee details to the user.\n')]
+
+> Entering new AgentExecutor chain...
+INFO:httpx:HTTP Request: POST https://testopenaiassets.openai.azure.com/openai/deployments/Fourth_Chatbot/chat/completions?api-version=2024-08-01-preview "HTTP/1.1 200 OK"
+{
+  "action": "Final Answer",
+  "action_input": "Could you please specify which employee details you need? For example, are you looking for information related to their name, department, job title, or contact information?"
+}
+
+> Finished chain.
+*****
+
+Step: Request more specific information from the user about which employee details are needed (e.g., name, department, job title, contact information).
+
+Response: {
+  "action": "Final Answer",
+  "action_input": "Could you please specify which employee details you need? For example, are you looking for information related to their name, department, job title, or contact information?"
+}
+
+> Entering new AgentExecutor chain...
+INFO:httpx:HTTP Request: POST https://testopenaiassets.openai.azure.com/openai/deployments/Fourth_Chatbot/chat/completions?api-version=2024-08-01-preview "HTTP/1.1 200 OK"
+Could you please specify which employee details you need? For example, are you looking for information related to their name, department, job title, or contact information?
+
+> Finished chain.
+*****
+
+Step: Once the necessary details are provided, access the relevant database or records to retrieve the employee details.
+
+Response: Could you please specify which employee details you need? For example, are you looking for information related to their name, department, job title, or contact information?
+
+> Entering new AgentExecutor chain...
+INFO:httpx:HTTP Request: POST https://testopenaiassets.openai.azure.com/openai/deployments/Fourth_Chatbot/chat/completions?api-version=2024-08-01-preview "HTTP/1.1 200 OK"
+Could you please specify which employee details you need? For example, are you looking for information related to their name, department, job title, or contact information?
+
+> Finished chain.
+*****
+
+Step: Present the requested employee details to the user.
+
+
+Response: Could you please specify which employee details you need? For example, are you looking for information related to their name, department, job title, or contact information?
+> Finished chain.
+
+=== AGENT RESPONSE ===
+
+Could you please specify which employee details you need? For example, are you looking for information related to their name, department, job title, or contact information?
