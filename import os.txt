@@ -1,6 +1,7 @@
 import asyncio
 import json
 import nest_asyncio
+import pandas as pd
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 from langchain.chat_models import AzureChatOpenAI
@@ -9,104 +10,129 @@ from langchain.agents.agent_types import AgentType
 
 nest_asyncio.apply()
 
-# === OpenAI Client ===
+# === Azure OpenAI Setup ===
 def get_openai_client():
     return AzureChatOpenAI(
         azure_deployment="Fourth_Chatbot",
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         openai_api_version="2024-08-01-preview",
-        openai_api_key="",  # <-- YOUR KEY HERE
+        openai_api_key="",  # Put your Azure key here
         temperature=0.3,
         max_tokens=2000,
     )
 
-# === SSE Tool Call Helpers ===
+# === Tool Calling Logic ===
 sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
 
-def sync_call_tool(name: str, params: dict):
-    async def _call():
+def sync_call_tool(tool_name: str, params: dict):
+    async def call():
         async with sse_client(url=sse_url) as streams:
             async with ClientSession(*streams) as session:
                 await session.initialize()
-                return await session.call_tool(name, params)
-    return asyncio.get_event_loop().run_until_complete(_call())
+                return await session.call_tool(tool_name, params)
+    return asyncio.get_event_loop().run_until_complete(call())
 
-def fetch_tools_metadata():
-    async def _fetch():
+def fetch_all_tools():
+    async def fetch():
         async with sse_client(url=sse_url) as streams:
             async with ClientSession(*streams) as session:
                 await session.initialize()
                 return await session.list_tools()
-    return asyncio.get_event_loop().run_until_complete(_fetch())
+    return asyncio.get_event_loop().run_until_complete(fetch())
 
-# === Create LangChain Tools ===
+# === Tool Conversion ===
 def get_tools():
-    meta = fetch_tools_metadata()
+    raw = fetch_all_tools()
     tools = []
-    for t in getattr(meta, "tools", []):
-        name = t.name
-        req = t.inputSchema.get("required", []) if t.inputSchema else []
-        desc = t.description or ""
-        desc += f" Required fields: {req}"
 
-        def make_fn(name=name, req=req):
+    for t in getattr(raw, "tools", []):
+        name = t.name
+        required_fields = t.inputSchema.get("required", []) if t.inputSchema else []
+
+        def make_func(tool_name=name, req=required_fields):
             def fn(input_str: str) -> str:
                 try:
-                    params = json.loads(input_str) if input_str.strip() else {}
-                except json.JSONDecodeError:
-                    params = {}
-                for k in req:
-                    params.setdefault(k, "")
+                    parsed = json.loads(input_str) if input_str else {}
+                except:
+                    parsed = {}
+                for key in req:
+                    parsed.setdefault(key, "")
                 try:
-                    res = sync_call_tool(name, params)
-                    return json.dumps(res, indent=2, default=str)
+                    result = sync_call_tool(tool_name, parsed)
+                    return json.dumps(result, indent=2, default=str)
                 except Exception as e:
-                    return f"[ERROR] calling {name}: {e}"
+                    return f"[ERROR] {tool_name}: {str(e)}"
             return fn
 
-        tools.append(Tool(name=name, func=make_fn(), description=desc, return_direct=False))
+        tools.append(
+            Tool(
+                name=name,
+                func=make_func(),
+                description=f"{t.description or ''} Required fields: {required_fields}",
+                return_direct=False,
+            )
+        )
+
     return tools
 
-# === Custom ReAct Prompt to Enable Multi-hop, Fuzzy, Negative Logic ===
-PREFIX = """
-You are a powerful assistant with tools that can search through employees, projects, and assignments.
-When a query might be fuzzy, indirect or negative (e.g. “not from X”, “no one in project Y”, misspellings), you should:
+# === Table Renderer ===
+def render_output_as_table(output_text: str):
+    try:
+        data = json.loads(output_text)
+        if isinstance(data, list):
+            df = pd.DataFrame(data)
+        elif isinstance(data, dict):
+            df = pd.DataFrame([data])
+        else:
+            return output_text
+        return df.to_string(index=False)
+    except Exception:
+        return output_text
 
-- Interpret typos or abbreviations (e.g. “banagalore” → “Bangalore”, “HYD” → “Hyderabad”).
-- If the first tool returns no result, automatically chain to another tool (for example lookup employee by name, then lookup project assignments).
-- Extract intermediate IDs and call detail tools as needed.
-- If your final finding is “no results” you may still phrase it like: “There are currently no employees assigned to project X” (when applicable).
+# === Custom Agent Prompt (ENHANCED) ===
+CUSTOM_PREFIX = """
+You are a reasoning agent that helps users query employee and project information using external tools.
 
-Finally, always return your answer in a **table format** showing key columns like GGID, Name, Role, Location, Project (if relevant), Experience, etc.
+Your responsibilities:
+- If an employee or project is not found in one tool, try other tools that might hold relevant data.
+- When names like "Shyam Prasad." or "fedex" appear, try fuzzy name matching. Drop trailing punctuation.
+- Never give up if a tool says "not found" — try other tools until all are exhausted.
+- If location names are partial or wrong ("benguluru" instead of "Bangalore"), reason and correct them.
+- Final answers must be formatted as a **clean table**, not JSON or plain text.
+- Do not use emojis or markdown formatting.
+- Think like a persistent, helpful human assistant.
 
-Explain reasoning concisely but focus on the final table. Do not mention JSON or internal schemas. Do not use emojis.
-Begin now.
+Begin reasoning step-by-step and figure out the best way to find the answer.
 """
 
-# === Build and Run Agent ===
+# === Build the Agent ===
 def build_agent():
     tools = get_tools()
     llm = get_openai_client()
+
     return initialize_agent(
         tools=tools,
         llm=llm,
         agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
         verbose=True,
-        max_iterations=12,
+        max_iterations=10,
         handle_parsing_errors=True,
-        agent_kwargs={"prefix": PREFIX}
+        agent_kwargs={"prefix": CUSTOM_PREFIX}
     )
 
+# === CLI Interface ===
 if __name__ == "__main__":
-    print("=== MCP Multi-hop, Fuzzy, Negative, Table Agent ===")
+    print("=== MCP ReAct Agent (Resilient, Table Output, Multi-Tool) ===")
     agent = build_agent()
+
     while True:
-        q = input("\nYour question: ").strip()
-        if q.lower() in ("exit", "quit"):
+        query = input("\nYour question: ").strip()
+        if query.lower() in ("exit", "quit"):
             break
         try:
-            resp = agent.invoke({"input": q})
-            print("\nResult:\n")
-            print(resp["output"])
+            result = agent.invoke({"input": query})
+            final = result["output"]
+            print("\nAnswer:\n")
+            print(render_output_as_table(final))
         except Exception as e:
-            print("Error:", e)
+            print("❌ Error:", str(e))
