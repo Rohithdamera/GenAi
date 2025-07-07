@@ -1,93 +1,94 @@
-INFO:httpx:HTTP Request: GET https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/sse "HTTP/1.1 200 OK"
-INFO:httpx:HTTP Request: POST https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/message?sessionId=bacfa389-9abc-439d-b0cc-1211fc2f6829 "HTTP/1.1 202 "
----------------------------------------------------------------------------
-ClosedResourceError                       Traceback (most recent call last)
-Cell In[31], line 93
-     91 # --- 6. Run ---
-     92 if __name__ == "__main__":
----> 93     asyncio.run(main())
+import asyncio
+import json
+import nest_asyncio
+from typing import List
+from langchain.agents import initialize_agent, AgentType
+from langchain.chat_models import AzureChatOpenAI
+from langchain.tools import Tool
+from mcp import ClientSession
+from mcp.client.sse import sse_client
 
-File ~\AppData\Roaming\Python\Python311\site-packages\nest_asyncio.py:30, in _patch_asyncio.<locals>.run(main, debug)
-     28 task = asyncio.ensure_future(main)
-     29 try:
----> 30     return loop.run_until_complete(task)
-     31 finally:
-     32     if not task.done():
+nest_asyncio.apply()
 
-File ~\AppData\Roaming\Python\Python311\site-packages\nest_asyncio.py:98, in _patch_loop.<locals>.run_until_complete(self, future)
-     95 if not f.done():
-     96     raise RuntimeError(
-     97         'Event loop stopped before Future completed.')
----> 98 return f.result()
+# === Azure OpenAI Client ===
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_deployment="Fourth_Chatbot",
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        openai_api_version="2024-08-01-preview",
+        openai_api_key="YOUR_API_KEY_HERE",
+        temperature=0.3,
+        max_tokens=1500,
+    )
 
-File C:\Program Files\Python311\Lib\asyncio\futures.py:203, in Future.result(self)
-    201 self.__log_traceback = False
-    202 if self._exception is not None:
---> 203     raise self._exception.with_traceback(self._exception_tb)
-    204 return self._result
+# === SSE URL ===
+sse_url = "https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/sse"
 
-File C:\Program Files\Python311\Lib\asyncio\tasks.py:277, in Task.__step(***failed resolving arguments***)
-    273 try:
-    274     if exc is None:
-    275         # We use the `send` method directly, because coroutines
-    276         # don't have `__iter__` and `__next__` methods.
---> 277         result = coro.send(None)
-    278     else:
-    279         result = coro.throw(exc)
+# === Fetch Tool Names ===
+async def fetch_tool_names(session: ClientSession) -> List[str]:
+    info = await session.list_tools()
+    return [t.name for t in getattr(info, "tools", [])]
 
-Cell In[31], line 68, in main()
-     66 # Initialize MCP session
-     67 session = await init_mcp_session(sse_url)
----> 68 tool_names = await fetch_tool_names(session)
-     69 print(f"⚙️ Available MCP tools: {tool_names}")
-     71 tools = make_tools(session, tool_names)
+# === Tool Wrappers ===
+def make_tools(session: ClientSession, tool_names: List[str]) -> List[Tool]:
+    tools = []
 
-Cell In[31], line 33, in fetch_tool_names(session)
-     32 async def fetch_tool_names(session: ClientSession) -> List[str]:
----> 33     info = await session.list_tools()
-     34     return [t.name for t in getattr(info, "tools", [])]
+    for name in tool_names:
+        async def _tool_func(query: str, tool_name=name):
+            try:
+                input_data = json.loads(query) if query else {}
+                result = await session.call_tool(tool_name, input_data)
+                return str(result)
+            except Exception as e:
+                return f"[ERROR] Tool {tool_name} failed: {e}"
 
-File ~\AppData\Roaming\Python\Python311\site-packages\mcp\client\session.py:324, in ClientSession.list_tools(self, cursor)
-    322 async def list_tools(self, cursor: str | None = None) -> types.ListToolsResult:
-    323     """Send a tools/list request."""
---> 324     return await self.send_request(
-    325         types.ClientRequest(
-    326             types.ListToolsRequest(
-    327                 method="tools/list",
-    328                 params=types.PaginatedRequestParams(cursor=cursor) if cursor is not None else None,
-    329             )
-    330         ),
-    331         types.ListToolsResult,
-    332     )
+        tools.append(
+            Tool(
+                name=name,
+                func=lambda query, tool_name=name: asyncio.run(_tool_func(query, tool_name)),
+                description=f"MCP Tool: {name}. Accepts JSON input."
+            )
+        )
 
-File ~\AppData\Roaming\Python\Python311\site-packages\mcp\shared\session.py:261, in BaseSession.send_request(self, request, result_type, request_read_timeout_seconds, metadata, progress_callback)
-    254 try:
-    255     jsonrpc_request = JSONRPCRequest(
-    256         jsonrpc="2.0",
-    257         id=request_id,
-    258         **request_data,
-    259     )
---> 261     await self._write_stream.send(SessionMessage(message=JSONRPCMessage(jsonrpc_request), metadata=metadata))
-    263     # request read timeout takes precedence over session read timeout
-    264     timeout = None
+    return tools
 
-File ~\AppData\Roaming\Python\Python311\site-packages\anyio\streams\memory.py:242, in MemoryObjectSendStream.send(self, item)
-    240 await checkpoint()
-    241 try:
---> 242     self.send_nowait(item)
-    243 except WouldBlock:
-    244     # Wait until there's someone on the receiving end
-    245     send_event = Event()
+# === Main Async Logic ===
+async def main():
+    print("\n🚀 MCP Reactive Agent Interface (Azure OpenAI + MCP Tools)")
 
-File ~\AppData\Roaming\Python\Python311\site-packages\anyio\streams\memory.py:211, in MemoryObjectSendStream.send_nowait(self, item)
-    199 """
-    200 Send an item immediately if it can be done without waiting.
-    201 
-   (...)    208 
-    209 """
-    210 if self._closed:
---> 211     raise ClosedResourceError
-    212 if not self._state.open_receive_channels:
-    213     raise BrokenResourceError
+    async with sse_client(url=sse_url) as streams:
+        async with ClientSession(*streams) as session:
+            await session.initialize()
 
-ClosedResourceError: 
+            # Fetch tools
+            tool_names = await fetch_tool_names(session)
+            print(f"⚙️ Available MCP tools: {tool_names}")
+
+            # Build LangChain-compatible tool list
+            tools = make_tools(session, tool_names)
+
+            # Initialize agent with tools
+            agent = initialize_agent(
+                tools=tools,
+                llm=get_openai_client(),
+                agent=AgentType.OPENAI_FUNCTIONS,
+                verbose=True,
+                handle_parsing_errors=True
+            )
+
+            # REPL Loop
+            while True:
+                user_input = input("\n🧠 Ask your question: ").strip()
+                if user_input.lower() in ("exit", "quit"):
+                    print("👋 Goodbye!")
+                    break
+
+                try:
+                    response = agent.run(user_input)
+                    print(f"\n📤 Answer:\n{response}")
+                except Exception as e:
+                    print(f"❌ Error: {e}")
+
+# === Execute ===
+if __name__ == "__main__":
+    asyncio.run(main())
