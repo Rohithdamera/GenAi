@@ -1,16 +1,116 @@
-=== MCP ReAct Agent ===
-Type 'exit' to quit.
+import asyncio
+import json
+import nest_asyncio
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+from langchain.chat_models import AzureChatOpenAI
+from langchain.agents import Tool, AgentExecutor, initialize_agent
+from langchain.agents.agent_types import AgentType
+from typing import Callable, Any
 
-Your question:  give me emplyee details 
+nest_asyncio.apply()
 
+# === Azure OpenAI Client ===
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_deployment="Fourth_Chatbot",
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        openai_api_version="2024-08-01-preview",
+        openai_api_key="",  # <== Replace with your Azure OpenAI key
+        temperature=0.7,
+        max_tokens=2000,
+        model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
+    )
 
-> Entering new AgentExecutor chain...
-[ERROR] Agent failed: Missing some input keys: {'"type"'}
+sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
 
-Your question:  employee details 
+# === Tool Runner ===
+def sync_call_tool(tool_name: str, tool_input: dict):
+    async def call():
+        async with sse_client(url=sse_url) as streams:
+            async with ClientSession(*streams) as session:
+                await session.initialize()
+                return await session.call_tool(tool_name, tool_input)
+    try:
+        return asyncio.get_event_loop().run_until_complete(call())
+    except Exception as e:
+        return {"error": str(e)}
 
+# === Tool Builder from MCP Tools ===
+def get_all_tools() -> list[Tool]:
+    async def fetch():
+        async with sse_client(url=sse_url) as streams:
+            async with ClientSession(*streams) as session:
+                await session.initialize()
+                return await session.list_tools()
 
-> Entering new AgentExecutor chain...
-[ERROR] Agent failed: Missing some input keys: {'"type"'}
+    try:
+        tools_response = asyncio.get_event_loop().run_until_complete(fetch())
+        tools = []
 
-Your question: 
+        for tool_def in getattr(tools_response, "tools", []):
+            tool_name = tool_def.name
+            tool_description = tool_def.description or f"Use tool {tool_name}"
+            input_schema = tool_def.inputSchema or {}
+
+            # Wrap tool handler in its own function context
+            def make_tool(name: str, description: str, schema: dict) -> Tool:
+                def _tool_func(input_str: str) -> str:
+                    try:
+                        parsed_input = json.loads(input_str)
+                        response = sync_call_tool(name, parsed_input)
+                        return json.dumps(response, indent=2)
+                    except json.JSONDecodeError:
+                        return f"[ERROR] Invalid JSON input. Expected: {json.dumps(schema)}"
+                    except Exception as e:
+                        return f"[ERROR] Tool call failed: {str(e)}"
+
+                return Tool(
+                    name=name,
+                    description=f"{description}\nExpected JSON input: {json.dumps(schema)}",
+                    func=_tool_func,
+                    return_direct=False
+                )
+
+            tools.append(make_tool(tool_name, tool_description, input_schema))
+
+        return tools
+
+    except Exception as e:
+        print(f"[ERROR] Could not fetch tools: {e}")
+        return []
+
+# === Build Agent ===
+def build_agent() -> AgentExecutor:
+    tools = get_all_tools()
+    llm = get_openai_client()
+
+    agent = initialize_agent(
+        tools=tools,
+        llm=llm,
+        agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+        verbose=True,
+        handle_parsing_errors=True,
+        max_iterations=10,
+        return_intermediate_steps=True
+    )
+
+    return agent
+
+# === Main Loop ===
+if __name__ == "__main__":
+    print("\n=== MCP ReAct Agent ===\nType 'exit' to quit.")
+    agent = build_agent()
+
+    while True:
+        user_input = input("\nYour question: ").strip()
+        if user_input.lower() in ("exit", "quit"):
+            print("Goodbye!")
+            break
+
+        try:
+            result = agent.invoke({"input": user_input})
+            final_output = result.get("output") or "[INFO] No result from agent."
+            print("\n🧠 Final Answer:\n", final_output)
+        except Exception as e:
+            print(f"\n[ERROR] Agent failed: {str(e)}")
