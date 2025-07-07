@@ -1,120 +1,26 @@
-import asyncio
-import json
-import nest_asyncio
-from mcp import ClientSession
-from mcp.client.sse import sse_client
-from langchain.chat_models import AzureChatOpenAI
-from langchain.agents import Tool, initialize_agent, AgentExecutor
-from langchain.agents.agent_types import AgentType
 
-nest_asyncio.apply()
+Your question:  give me employees who are not from banagalore
 
-# === Azure OpenAI Setup ===
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_deployment="Fourth_Chatbot",
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        openai_api_version="2024-08-01-preview",
-        openai_api_key="",  # 🔐 <-- PUT YOUR KEY HERE
-        temperature=0.3,
-        max_tokens=2000,
-    )
 
-# === SSE and Tool Calls ===
-sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
+> Entering new AgentExecutor chain...
+To find employees who are not from Bangalore, I need to filter employees based on their location.
 
-def sync_call_tool(tool_name: str, params: dict):
-    async def call():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                return await session.call_tool(tool_name, params)
-    return asyncio.get_event_loop().run_until_complete(call())
+Action: GetEmployee
+Action Input: {"location": "not Bangalore"}
+Observation: "meta=None content=[TextContent(type='text', text='[\\n  \\n]', annotations=None, audience=[])] isError=False"
+Thought:The action did not return any specific employee details who are not from Bangalore. It seems like the filtering based on "not Bangalore" did not work as expected.
 
-def fetch_all_tools():
-    async def fetch():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                return await session.list_tools()
-    return asyncio.get_event_loop().run_until_complete(fetch())
+Final Answer: I am unable to retrieve the details of employees who are not from Bangalore directly. You might need to specify other locations or check the system for a list of all employees and manually filter out those from Bangalore.
 
-# === Tool Conversion ===
-def get_tools():
-    raw = fetch_all_tools()
-    tools = []
+> Finished chain.
 
-    for t in getattr(raw, "tools", []):
-        name = t.name
-        required_fields = t.inputSchema.get("required", []) if t.inputSchema else []
+▶️ Final Answer:
+ I am unable to retrieve the details of employees who are not from Bangalore directly. You might need to specify other locations or check the system for a list of all employees and manually filter out those from Bangalore.
 
-        def make_func(tool_name=name, req=required_fields):
-            def fn(input_str: str) -> str:
-                try:
-                    parsed = json.loads(input_str) if input_str else {}
-                except:
-                    parsed = {}
-                for key in req:
-                    parsed.setdefault(key, "")
-                try:
-                    result = sync_call_tool(tool_name, parsed)
-                    return json.dumps(result, indent=2, default=str)
-                except Exception as e:
-                    return f"[ERROR] {tool_name}: {str(e)}"
-            return fn
 
-        tools.append(
-            Tool(
-                name=name,
-                func=make_func(),
-                description=f"{t.description or ''} Required fields: {required_fields}",
-                return_direct=False,
-            )
-        )
+> Finished chain.
 
-    return tools
+▶️ Final Answer:
+ I am unable to retrieve any information about Shyam Prasad. Please check if the name is correct or provide additional details.
 
-# === Custom ReAct Prompt Prefix ===
-CUSTOM_PREFIX = """You are a smart assistant agent that can use multiple tools to answer complex questions. 
-If a question cannot be answered directly, think step-by-step, break it into sub-questions, and call relevant tools as needed.
-Always return the final human-readable answer. Use multiple tool calls when necessary.
-
-You can call tools like GetProjects, GetProjectEmployees, GetEmployee, etc. 
-You MUST chain tool calls when one tool gives partial data (like GGID) and another is needed to fetch full details.
-
-For example:
-- If asked "Give me employee details in Cocacola", first use GetProjectEmployees with ProjectName, extract GGID(s), then use GetEmployee for full details.
-
-Begin!
-
-"""
-
-# === Build the Agent ===
-def build_agent():
-    tools = get_tools()
-    llm = get_openai_client()
-
-    return initialize_agent(
-        tools=tools,
-        llm=llm,
-        agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-        verbose=True,
-        max_iterations=8,
-        handle_parsing_errors=True,
-        agent_kwargs={"prefix": CUSTOM_PREFIX}
-    )
-
-# === CLI Interface ===
-if __name__ == "__main__":
-    print("=== MCP ReAct Multi-Hop Agent ===")
-    agent = build_agent()
-
-    while True:
-        q = input("\nYour question: ").strip()
-        if q.lower() in ("exit", "quit"):
-            break
-        try:
-            result = agent.invoke({"input": q})
-            print("\n▶️ Final Answer:\n", result["output"])
-        except Exception as e:
-            print("❌ Agent failed:", str(e))
+Your question:  exit
