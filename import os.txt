@@ -1,85 +1,104 @@
-import os, json, asyncio, nest_asyncio
-from typing import List, Dict, Any
-from mcp.client.sse import sse_client
+import asyncio
+import json
+import nest_asyncio
+from tabulate import tabulate
 from mcp import ClientSession
+from mcp.client.sse import sse_client
 from langchain.chat_models import AzureChatOpenAI
-from langchain.agents import initialize_agent, AgentType
-from langchain.tools import Tool
+from langchain.agents import tool, Tool, AgentExecutor, create_openai_functions_agent
+from langchain.agents.openai_functions_agent.agent_token_buffer_memory import AgentTokenBufferMemory
+from langgraph.graph import StateGraph
+from langgraph.prebuilt import create_agent_executor
+from langgraph.prebuilt.tool_executor import ToolExecutor
 
 nest_asyncio.apply()
 
-# === 1. Initialize Azure OpenAI ===
+# === Azure OpenAI Client ===
 def get_openai_client():
     return AzureChatOpenAI(
         azure_deployment="Fourth_Chatbot",
         azure_endpoint="https://testopenaiassets.openai.azure.com",
-        azure_api_version="2024-08-01-preview",
-        azure_api_key=os.getenv("AZURE_OPENAI_KEY"),
-        temperature=0.0,
-        max_tokens=1500
+        openai_api_version="2024-08-01-preview",
+        openai_api_key="",  # <-- Use your actual key or env var
+        temperature=0.7,
+        max_tokens=2000,
+        model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
     )
 
-# === 2. Start MCP Session via SSE ===
-async def start_mcp_session(sse_url: str) -> ClientSession:
-    async with sse_client(url=sse_url) as streams:
-        async with ClientSession(streams[0], streams[1]) as session:
-            await session.initialize()
-            return session
+# === SSE Stream URL ===
+sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
 
-# === 3. Fetch Available Tools ===
-async def fetch_tool_names(session: ClientSession) -> List[str]:
-    info = await session.list_tools()
-    return [t.name for t in getattr(info, "tools", [])]
+# === Dynamic Tool Loader from MCP Server ===
+def sync_fetch_tools():
+    async def fetch():
+        async with sse_client(url=sse_url) as streams:
+            async with ClientSession(*streams) as session:
+                await session.initialize()
+                tools_data = await session.list_tools()
+                tools = []
 
-# === 4. Wrap Tools for Agent ===
-def build_tools(session: ClientSession, names: List[str]) -> List[Tool]:
-    tools = []
-    for n in names:
-        async def fn(inp: str, name=n):
-            try:
-                params = json.loads(inp) if inp else {}
-                res = await session.call_tool(name, params)
-                return json.dumps(res, default=str)
-            except Exception as e:
-                return f"[ERROR] {name}: {e}"
+                for t in getattr(tools_data, "tools", []):
+                    @tool(name=t.name, description=t.description)
+                    def _tool(input_data: dict, tool_name=t.name):
+                        return sync_call_tool(tool_name, input_data)
+                    tools.append(_tool)
+                return tools
+    return asyncio.get_event_loop().run_until_complete(fetch())
 
-        tools.append(Tool.from_function(
-            name=n,
-            func=fn,
-            coroutine=fn,
-            description=f"Call MCP tool `{n}`"
-        ))
-    return tools
+# === Tool Call Execution ===
+def sync_call_tool(tool_name: str, tool_input: dict):
+    async def call():
+        async with sse_client(url=sse_url) as streams:
+            async with ClientSession(*streams) as session:
+                await session.initialize()
+                return await session.call_tool(tool_name, tool_input)
+    try:
+        return asyncio.get_event_loop().run_until_complete(call())
+    except Exception as e:
+        return f"[ERROR] {e}"
 
-# === 5. Main Agent Logic ===
-async def main():
-    sse_url = "https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/sse"
+# === Build LangGraph Plan & Execute Agent ===
+def build_plan_and_execute_graph():
+    llm = get_openai_client()
+    tools = sync_fetch_tools()
 
-    async with sse_client(url=sse_url) as streams:
-        async with ClientSession(streams[0], streams[1]) as session:
-            await session.initialize()
+    if not tools:
+        raise RuntimeError("No tools available from MCP Server.")
 
-            tools = build_tools(session, await fetch_tool_names(session))
-            print("🛠️ Tools:", [t.name for t in tools])
+    tool_executor = ToolExecutor(tools)
+    agent = create_openai_functions_agent(llm, tools)
 
-            agent = initialize_agent(
-                tools=tools,
-                llm=get_openai_client(),
-                agent=AgentType.OPENAI_FUNCTIONS,
-                verbose=True,
-                handle_parsing_errors=True
-            )
+    memory = AgentTokenBufferMemory(memory_key="chat_history", llm=llm)
 
-            print("\n🤖 Ask anything (type 'exit'):")
-            while True:
-                q = input("You: ").strip()
-                if q.lower() in ("exit", "quit"):
-                    break
-                try:
-                    resp = await agent.arun(q)
-                    print("Bot:", resp, "\n")
-                except Exception as ex:
-                    print("Error:", ex)
+    agent_executor = AgentExecutor.from_agent_and_tools(
+        agent=agent,
+        tools=tools,
+        memory=memory,
+        verbose=True,
+        handle_parsing_errors=True,
+        return_intermediate_steps=True
+    )
 
+    return create_agent_executor(agent_executor, name="plan-and-execute")
+
+# === Main Interactive CLI ===
 if __name__ == "__main__":
-    asyncio.run(main())
+    print("\n=== MCP Tool Assistant (Plan & Execute Agent) ===\nType 'exit' to quit.\n")
+
+    try:
+        runnable = build_plan_and_execute_graph()
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize agent: {e}")
+        exit(1)
+
+    while True:
+        user_input = input("Ask your question: ").strip()
+        if user_input.lower() in ("exit", "quit"):
+            print("Goodbye!")
+            break
+
+        try:
+            result = runnable.invoke({"input": user_input})
+            print("\nResponse:\n", result.get("output", "[No result returned.]"))
+        except Exception as e:
+            print(f"[ERROR] Failed to process query: {e}")
