@@ -1,11 +1,14 @@
 import asyncio
 import json
 import nest_asyncio
+from tabulate import tabulate
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 from langchain.chat_models import AzureChatOpenAI
-from langchain.agents import tool
-from langgraph.prebuilt import create_plan_and_execute_agent
+from langchain.agents import Tool, AgentExecutor, initialize_agent
+from langchain.agents.agent_types import AgentType
+from langchain.tools.base import BaseTool
+from typing import Any, Optional
 
 nest_asyncio.apply()
 
@@ -15,20 +18,15 @@ def get_openai_client():
         azure_deployment="Fourth_Chatbot",
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         openai_api_version="2024-08-01-preview",
-        openai_api_key="",  # <-- Add your actual API key or load from env
+        openai_api_key="",  # <-- Add your key here
         temperature=0.7,
         max_tokens=2000,
-        model_kwargs={
-            "top_p": 0.9,
-            "frequency_penalty": 0.2,
-            "presence_penalty": 0.1
-        }
+        model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
     )
 
-# === SSE Stream URL ===
 sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
 
-# === Tool Call Execution ===
+# === Async Wrapper for Tool Calls ===
 def sync_call_tool(tool_name: str, tool_input: dict):
     async def call():
         async with sse_client(url=sse_url) as streams:
@@ -38,65 +36,75 @@ def sync_call_tool(tool_name: str, tool_input: dict):
     try:
         return asyncio.get_event_loop().run_until_complete(call())
     except Exception as e:
-        return f"[ERROR] {e}"
+        return {"error": str(e)}
 
-# === Dynamic Tool Loader from MCP Server ===
-def sync_fetch_tools():
+# === Dynamic Tool Fetcher ===
+def get_all_tools() -> list[Tool]:
     async def fetch():
         async with sse_client(url=sse_url) as streams:
             async with ClientSession(*streams) as session:
                 await session.initialize()
-                tools_data = await session.list_tools()
-                tools = []
+                return await session.list_tools()
+    try:
+        tools_response = asyncio.get_event_loop().run_until_complete(fetch())
+        mcp_tools = []
 
-                for t in getattr(tools_data, "tools", []):
-                    tool_name = t.name
-                    tool_description = t.description
+        for t in getattr(tools_response, "tools", []):
+            tool_name = t.name
+            description = t.description or f"Tool to call {tool_name}"
+            schema = t.inputSchema or {}
 
-                    # Define a tool dynamically using langchain.agent.tool
-                    @tool(name=tool_name, description=tool_description)
-                    def _tool(input_data: dict, tool_name=tool_name):
-                        return sync_call_tool(tool_name, input_data)
+            # Dynamically create a LangChain Tool
+            def make_tool(name=tool_name):
+                def tool_func(tool_input: str) -> str:
+                    try:
+                        parsed_input = json.loads(tool_input)
+                    except Exception:
+                        return "[ERROR] Input must be JSON formatted"
+                    result = sync_call_tool(name, parsed_input)
+                    return json.dumps(result, indent=2)
 
-                    tools.append(_tool)
-                return tools
-    return asyncio.get_event_loop().run_until_complete(fetch())
+                return Tool(
+                    name=name,
+                    description=f"{description} - Input JSON Schema: {json.dumps(schema)}",
+                    func=tool_func,
+                    return_direct=False,
+                )
+            mcp_tools.append(make_tool())
+        return mcp_tools
+    except Exception as e:
+        print(f"[ERROR] Could not load tools: {e}")
+        return []
 
-# === Build Plan & Execute Agent ===
-def build_plan_and_execute_graph():
+# === Build ReAct Agent ===
+def build_agent():
+    tools = get_all_tools()
     llm = get_openai_client()
-    tools = sync_fetch_tools()
 
-    if not tools:
-        raise RuntimeError("No tools available from MCP Server.")
-
-    # Build a plan-and-execute agent from LangGraph
-    agent_executor = create_plan_and_execute_agent(
-        llm=llm,
+    agent_executor = initialize_agent(
         tools=tools,
-        verbose=True
+        llm=llm,
+        agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+        verbose=True,
+        handle_parsing_errors=True,
+        max_iterations=10,
+        return_intermediate_steps=True,
     )
-
     return agent_executor
 
-# === Main Interactive CLI ===
+# === Main Loop ===
 if __name__ == "__main__":
-    print("\n=== MCP Tool Assistant (Plan & Execute Agent) ===\nType 'exit' to quit.\n")
-
-    try:
-        runnable = build_plan_and_execute_graph()
-    except Exception as e:
-        print(f"[ERROR] Failed to initialize agent: {e}")
-        exit(1)
+    print("\n=== MCP ReAct Agent ===\nType 'exit' to quit.")
+    agent = build_agent()
 
     while True:
-        user_input = input("Ask your question: ").strip()
-        if user_input.lower() in ("exit", "quit"):
+        user_query = input("\nYour question: ").strip()
+        if user_query.lower() in ("exit", "quit"):
             print("Goodbye!")
             break
 
         try:
-            result = runnable.invoke({"input": user_input})
-            print("\nResponse:\n", result.get("output", "[No result returned.]"))
+            result = agent.invoke({"input": user_query})
+            print("\n🧠 Response:\n", result.get("output", "[No response]"))
         except Exception as e:
-            print(f"[ERROR] Failed to process query: {e}")
+            print(f"[ERROR] Agent failed: {e}")
