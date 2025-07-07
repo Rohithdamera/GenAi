@@ -1,135 +1,35 @@
-import asyncio
-import json
-import nest_asyncio
-import pandas as pd
-from mcp import ClientSession
-from mcp.client.sse import sse_client
-from langchain.chat_models import AzureChatOpenAI
-from langchain.agents import Tool, initialize_agent
-from langchain.agents.agent_types import AgentType
+> Finished chain.
 
-nest_asyncio.apply()
+Answer:
 
-# === Azure OpenAI Setup ===
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_deployment="Fourth_Chatbot",
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        openai_api_version="2024-08-01-preview",
-        openai_api_key="",  # PUT your key here
-        temperature=0.3,
-        max_tokens=2000,
-    )
+There is no employee named "Shyam Prasad" in the organization. Please check the name and try again.
 
-# === Tool Calling Logic ===
-sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
+Your question: 
+↑↓ for history. Search history with c-↑/c-↓
 
-def sync_call_tool(tool_name: str, params: dict):
-    async def call():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                return await session.call_tool(tool_name, params)
-    return asyncio.get_event_loop().run_until_complete(call())
 
-def fetch_all_tools():
-    async def fetch():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                return await session.list_tools()
-    return asyncio.get_event_loop().run_until_complete(fetch())
+There is no employee named "Sharath Reddy" listed in the system. Please check the name and try again.
 
-# === Tool Conversion ===
-def get_tools():
-    raw = fetch_all_tools()
-    tools = []
+Your question:  Shyam Prasad designation
 
-    for t in getattr(raw, "tools", []):
-        name = t.name
-        required_fields = t.inputSchema.get("required", []) if t.inputSchema else []
 
-        def make_func(tool_name=name, req=required_fields):
-            def fn(input_str: str) -> str:
-                try:
-                    parsed = json.loads(input_str) if input_str else {}
-                except:
-                    parsed = {}
-                for key in req:
-                    parsed.setdefault(key, "")
-                try:
-                    result = sync_call_tool(tool_name, parsed)
-                    return json.dumps(result, indent=2, default=str)
-                except Exception as e:
-                    return f"[ERROR] {tool_name}: {str(e)}"
-            return fn
+> Entering new AgentExecutor chain...
+I need to find the designation (role) of an employee named Shyam Prasad.
 
-        tools.append(
-            Tool(
-                name=name,
-                func=make_func(),
-                description=f"{t.description or ''} Required fields: {required_fields}",
-                return_direct=False,
-            )
-        )
+> Finished chain.
 
-    return tools
+Answer:
 
-# === Table Renderer ===
-def render_output_as_table(output_text: str):
-    try:
-        # Extract JSON from string
-        data = json.loads(output_text)
-        if isinstance(data, list):
-            df = pd.DataFrame(data)
-        elif isinstance(data, dict):
-            df = pd.DataFrame([data])
-        else:
-            return output_text
-        return df.to_string(index=False)
-    except Exception:
-        return output_text
+There is no employee named "Sharath Reddy" in the organization.
 
-# === Custom Agent Prompt ===
-CUSTOM_PREFIX = """You are a reasoning agent that can answer user queries using external tools.
-Use step-by-step thinking and call tools multiple times when necessary.
-If user input contains fuzzy names (e.g., "banagalore" or "benguluru"), try to resolve to the closest known value (e.g., "Bangalore").
-If user asks for employees not from a place, or negative logic, you need to:
-- Fetch all employee data first
-- Then filter those not matching the condition
-Return all final answers in clean table format using key fields like GGID, Name, Location, Role, etc.
+Your question:  currently Sharath Reddy working on which project.?
 
-DO NOT return JSON or raw output. Use human-readable TABLE format only.
-Begin solving."""
 
-# === Build the Agent ===
-def build_agent():
-    tools = get_tools()
-    llm = get_openai_client()
 
-    return initialize_agent(
-        tools=tools,
-        llm=llm,
-        agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-        verbose=True,
-        max_iterations=10,
-        handle_parsing_errors=True,
-        agent_kwargs={"prefix": CUSTOM_PREFIX}
-    )
+Final Answer: There are no employees currently working on the project "fedex."
 
-# === CLI Interface ===
-if __name__ == "__main__":
-    print("=== MCP ReAct Agent (Multi-hop + Fuzzy + Table Output) ===")
-    agent = build_agent()
+> Finished chain.
 
-    while True:
-        query = input("\nYour question: ").strip()
-        if query.lower() in ("exit", "quit"):
-            break
-        try:
-            result = agent.invoke({"input": query})
-            final = result["output"]
-            print("\nAnswer:\n")
-            print(render_output_as_table(final))
-        except Exception as e:
-            print("❌ Error:", str(e))
+Answer:
+
+There are no employees currently working on the project "fedex."
