@@ -1,110 +1,16 @@
-import asyncio
-import json
-import nest_asyncio
-from tabulate import tabulate
-from mcp import ClientSession
-from mcp.client.sse import sse_client
-from langchain.chat_models import AzureChatOpenAI
-from langchain.agents import Tool, AgentExecutor, initialize_agent
-from langchain.agents.agent_types import AgentType
-from langchain.tools.base import BaseTool
-from typing import Any, Optional
+=== MCP ReAct Agent ===
+Type 'exit' to quit.
 
-nest_asyncio.apply()
+Your question:  give me emplyee details 
 
-# === Azure OpenAI Client ===
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_deployment="Fourth_Chatbot",
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        openai_api_version="2024-08-01-preview",
-        openai_api_key="",  # <-- Add your key here
-        temperature=0.7,
-        max_tokens=2000,
-        model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
-    )
 
-sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
+> Entering new AgentExecutor chain...
+[ERROR] Agent failed: Missing some input keys: {'"type"'}
 
-# === Async Wrapper for Tool Calls ===
-def sync_call_tool(tool_name: str, tool_input: dict):
-    async def call():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                return await session.call_tool(tool_name, tool_input)
-    try:
-        return asyncio.get_event_loop().run_until_complete(call())
-    except Exception as e:
-        return {"error": str(e)}
+Your question:  employee details 
 
-# === Dynamic Tool Fetcher ===
-def get_all_tools() -> list[Tool]:
-    async def fetch():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                return await session.list_tools()
-    try:
-        tools_response = asyncio.get_event_loop().run_until_complete(fetch())
-        mcp_tools = []
 
-        for t in getattr(tools_response, "tools", []):
-            tool_name = t.name
-            description = t.description or f"Tool to call {tool_name}"
-            schema = t.inputSchema or {}
+> Entering new AgentExecutor chain...
+[ERROR] Agent failed: Missing some input keys: {'"type"'}
 
-            # Dynamically create a LangChain Tool
-            def make_tool(name=tool_name):
-                def tool_func(tool_input: str) -> str:
-                    try:
-                        parsed_input = json.loads(tool_input)
-                    except Exception:
-                        return "[ERROR] Input must be JSON formatted"
-                    result = sync_call_tool(name, parsed_input)
-                    return json.dumps(result, indent=2)
-
-                return Tool(
-                    name=name,
-                    description=f"{description} - Input JSON Schema: {json.dumps(schema)}",
-                    func=tool_func,
-                    return_direct=False,
-                )
-            mcp_tools.append(make_tool())
-        return mcp_tools
-    except Exception as e:
-        print(f"[ERROR] Could not load tools: {e}")
-        return []
-
-# === Build ReAct Agent ===
-def build_agent():
-    tools = get_all_tools()
-    llm = get_openai_client()
-
-    agent_executor = initialize_agent(
-        tools=tools,
-        llm=llm,
-        agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-        verbose=True,
-        handle_parsing_errors=True,
-        max_iterations=10,
-        return_intermediate_steps=True,
-    )
-    return agent_executor
-
-# === Main Loop ===
-if __name__ == "__main__":
-    print("\n=== MCP ReAct Agent ===\nType 'exit' to quit.")
-    agent = build_agent()
-
-    while True:
-        user_query = input("\nYour question: ").strip()
-        if user_query.lower() in ("exit", "quit"):
-            print("Goodbye!")
-            break
-
-        try:
-            result = agent.invoke({"input": user_query})
-            print("\n🧠 Response:\n", result.get("output", "[No response]"))
-        except Exception as e:
-            print(f"[ERROR] Agent failed: {e}")
+Your question: 
