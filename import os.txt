@@ -1,108 +1,15 @@
-import asyncio
-import json
-import nest_asyncio
-from mcp import ClientSession
-from mcp.client.sse import sse_client
-from langchain.chat_models import AzureChatOpenAI
-from langchain.agents import Tool, AgentExecutor, initialize_agent
-from langchain.agents.agent_types import AgentType
+Your question:   give me employee details who are working in cocacola project
 
-nest_asyncio.apply()
 
-# === Azure OpenAI Client ===
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_deployment="Fourth_Chatbot",
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        openai_api_version="2024-08-01-preview",
-        openai_api_key="",  # ✅ your real key here
-        temperature=0.3,
-        max_tokens=2000,
-    )
+> Entering new AgentExecutor chain...
+I need to get the list of employees working on the "cocacola" project.
+Action: GetProjectEmployees
+Action Input: {"ProjectName":"cocacola"}
+Observation: "meta=None content=[TextContent(type='text', text='[\\n  {\\n    \"ProjectCode\": \"1003\",\\n    \"ProjectName\": \"Cocacola\",\\n    \"GGID\": \"1003\",\\n    \"Skillset\": \"Mulesoft\",\\n    \"AssignmentStartDate\": \"2025-01-01\",\\n    \"AssignmentEndDate\": \"2026-01-01\"\\n  }\\n]', annotations=None, audience=[])] isError=False"
+Thought:I have received the details of an employee working on the "cocacola" project. The details include GGID, Skillset, and Assignment dates.
+Final Answer: The employee working on the "cocacola" project has the following details: GGID: 1003, Skillset: Mulesoft, Assignment Start Date: 2025-01-01, Assignment End Date: 2026-01-01.
 
-# === SSE URL ===
-sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
+> Finished chain.
 
-# === Fetch Tools via list_tools() Properly ===
-def fetch_all_tools():
-    async def fetch():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                return await session.list_tools()
-    return asyncio.get_event_loop().run_until_complete(fetch())
-
-# === Generic Call Tool Wrapper ===
-def sync_call_tool(tool_name: str, params: dict):
-    async def call():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                return await session.call_tool(tool_name, params)
-    return asyncio.get_event_loop().run_until_complete(call())
-
-# === Build Tool List for LangChain ===
-def get_tools():
-    raw = fetch_all_tools()
-    tools = []
-
-    for t in getattr(raw, "tools", []):
-        name = t.name
-        schema = t.inputSchema or {}
-        required_fields = schema.get("required", [])
-
-        # Define dynamic wrapper function
-        def make_func(tool_name=name, req=required_fields):
-            def fn(input_str: str) -> str:
-                try:
-                    parsed = json.loads(input_str) if input_str else {}
-                except:
-                    parsed = {}
-
-                for key in req:
-                    parsed.setdefault(key, "")
-                try:
-                    result = sync_call_tool(tool_name, parsed)
-                    return json.dumps(result, indent=2, default=str)
-                except Exception as e:
-                    return f"[ERROR] calling {tool_name}: {e}"
-            return fn
-
-        tool = Tool(
-            name=name,
-            func=make_func(),
-            description=f"{t.description or ''} Required fields: {required_fields}",
-            return_direct=False
-        )
-        tools.append(tool)
-
-    return tools
-
-# === Agent Builder ===
-def build_agent():
-    tools = get_tools()
-    llm = get_openai_client()
-
-    return initialize_agent(
-        tools=tools,
-        llm=llm,
-        agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-        verbose=True,
-        max_iterations=8,
-        return_intermediate_steps=False,
-        handle_parsing_errors=True,
-    )
-
-# === CLI Loop ===
-if __name__ == "__main__":
-    print("=== MCP ReAct Agent (fixed input schema enforcement) ===")
-    agent = build_agent()
-    while True:
-        q = input("\nYour question: ").strip()
-        if q.lower() in ("exit", "quit"):
-            break
-        try:
-            result = agent.invoke({"input": q})
-            print("\n▶️ Answer:\n", result["output"])
-        except Exception as e:
-            print("❌ Agent failed:", str(e))
+▶️ Answer:
+ The employee working on the "cocacola" project has the following details: GGID: 1003, Skillset: Mulesoft, Assignment Start Date: 2025-01-01, Assignment End Date: 2026-01-01.
