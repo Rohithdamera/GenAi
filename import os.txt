@@ -1,37 +1,171 @@
-INFO:httpx:HTTP Request: GET https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/sse "HTTP/1.1 404 NOT FOUND"
-  + Exception Group Traceback (most recent call last):
-  |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\IPython\core\interactiveshell.py", line 3672, in run_code
-  |     exec(code_obj, self.user_global_ns, self.user_ns)
-  |   File "C:\Users\rdamera\AppData\Local\Temp\ipykernel_38988\2043773441.py", line 110, in <module>
-  |     asyncio.run(run_agent())
-  |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\nest_asyncio.py", line 30, in run
-  |     return loop.run_until_complete(task)
-  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\nest_asyncio.py", line 98, in run_until_complete
-  |     return f.result()
-  |            ^^^^^^^^^^
-  |   File "C:\Program Files\Python311\Lib\asyncio\futures.py", line 203, in result
-  |     raise self._exception.with_traceback(self._exception_tb)
-  |   File "C:\Program Files\Python311\Lib\asyncio\tasks.py", line 277, in __step
-  |     result = coro.send(None)
-  |              ^^^^^^^^^^^^^^^
-  |   File "C:\Users\rdamera\AppData\Local\Temp\ipykernel_38988\2043773441.py", line 77, in run_agent
-  |     async with sse_client(url=url) as streams:
-  |   File "C:\Program Files\Python311\Lib\contextlib.py", line 210, in __aenter__
-  |     return await anext(self.gen)
-  |            ^^^^^^^^^^^^^^^^^^^^^
-  |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\mcp\client\sse.py", line 54, in sse_client
-  |     async with anyio.create_task_group() as tg:
-  |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\anyio\_backends\_asyncio.py", line 772, in __aexit__
-  |     raise BaseExceptionGroup(
-  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
-  +-+---------------- 1 ----------------
-    | Traceback (most recent call last):
-    |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\mcp\client\sse.py", line 64, in sse_client
-    |     event_source.response.raise_for_status()
-    |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\httpx\_models.py", line 829, in raise_for_status
-    |     raise HTTPStatusError(message, request=request, response=self)
-    | httpx.HTTPStatusError: Client error '404 NOT FOUND' for url 'https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/sse'
-    | For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404
-    +------------------------------------
-1
+import asyncio
+import json
+import nest_asyncio
+from tabulate import tabulate
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+from langchain.chat_models import AzureChatOpenAI
+from langgraph.graph import StateGraph
+
+nest_asyncio.apply()
+
+# === Azure OpenAI Client ===
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_deployment="Fourth_Chatbot",
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        openai_api_version="2024-08-01-preview",
+        openai_api_key="",
+        temperature=0.7,
+        max_tokens=2000,
+        model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
+    )
+
+sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
+
+# === Fetch Available Tools ===
+def sync_fetch_tools():
+    async def fetch():
+        async with sse_client(url=sse_url) as streams:
+            async with ClientSession(*streams) as session:
+                await session.initialize()
+                return await session.list_tools()
+    return asyncio.get_event_loop().run_until_complete(fetch())
+
+# === Call Tool ===
+def sync_call_tool(tool_name: str, tool_input: dict):
+    async def call():
+        async with sse_client(url=sse_url) as streams:
+            async with ClientSession(*streams) as session:
+                await session.initialize()
+                return await session.call_tool(tool_name, tool_input)
+    try:
+        return asyncio.get_event_loop().run_until_complete(call())
+    except Exception as e:
+        return f"[ERROR] {e}"
+
+# === LangGraph Nodes ===
+def list_tools_node(state: dict) -> dict:
+    try:
+        result = sync_fetch_tools()
+        tools = [{
+            "name": t.name,
+            "description": t.description,
+            "inputSchema": t.inputSchema
+        } for t in getattr(result, "tools", [])]
+        state["available_tools"] = tools
+        state["__next__"] = "llm_agent"
+        return state
+    except Exception as e:
+        return {"result": f"[ERROR] Failed to fetch tools: {e}"}
+
+# === Agent Node ===
+def llm_agent_node(state: dict) -> dict:
+    llm = get_openai_client()
+    tools = state.get("available_tools", [])
+    tool_list = "\n".join([f"- {t['name']}: {t['description']}" for t in tools])
+
+    agent_prompt = f"""
+You are an intelligent assistant. Your job is to fulfill the user's query by selecting and calling the appropriate tools.
+Below is a list of tools available to you:
+
+{tool_list}
+
+Based on the user query, choose the best tool or combination of tools. You must:
+- Identify the relevant tool names
+- Infer the required inputs from the user query
+- Simulate the tool calls by outputting a JSON list like:
+  [
+    {{"tool": "ToolName", "input": {{"field": "value"}}}},
+    ...
+  ]
+Return only valid JSON with no explanation or natural language.
+
+User query: {json.dumps(state['user_input'])}
+"""
+
+    try:
+        plan_response = llm.invoke(agent_prompt).content.strip()
+        calls = json.loads(plan_response)
+        all_outputs = []
+
+        for call in calls:
+            tool = call.get("tool")
+            tool_input = call.get("input", {})
+            output = sync_call_tool(tool, tool_input)
+            all_outputs.append({"tool": tool, "input": tool_input, "output": output})
+
+        state["final_results"] = all_outputs
+        state["__next__"] = "format_output"
+        return state
+
+    except Exception as e:
+        return {"result": f"[ERROR] LLM tool plan or execution failed: {str(e)}"}
+
+# === Output Formatter ===
+def format_output_node(state: dict) -> dict:
+    results = state.get("final_results", [])
+    combined = []
+
+    for item in results:
+        output = item.get("output")
+        if hasattr(output, "content") and output.content:
+            for part in output.content:
+                if hasattr(part, "text"):
+                    try:
+                        parsed = json.loads(part.text)
+                        combined.append(parsed)
+                    except:
+                        combined.append(part.text)
+        else:
+            combined.append(output)
+
+    state["result"] = json.dumps(combined, indent=2) if combined else "[INFO] No structured data returned."
+    return state
+
+# === Fallback Node ===
+def default_node(state: dict) -> dict:
+    return {"result": "Sorry, I couldn't understand your request or no tool could be identified."}
+
+# === Build LangGraph ===
+def build_graph():
+    graph = StateGraph(dict)
+    graph.add_node("list_tools", list_tools_node)
+    graph.add_node("llm_agent", llm_agent_node)
+    graph.add_node("format_output", format_output_node)
+    graph.add_node("default", default_node)
+
+    graph.add_conditional_edges("list_tools", lambda s: s["__next__"], {
+        "llm_agent": "llm_agent"
+    })
+    graph.add_conditional_edges("llm_agent", lambda s: s["__next__"], {
+        "format_output": "format_output"
+    })
+
+    graph.set_entry_point("list_tools")
+    return graph.compile()
+
+# === Main Loop ===
+if __name__ == "__main__":
+    print("\n=== MCP Tool Assistant ===\nType 'exit' to quit.")
+    tools_state = list_tools_node({})
+
+    if "available_tools" not in tools_state:
+        print(tools_state.get("result", "[ERROR] Could not load tools."))
+        exit()
+
+    runnable = build_graph()
+
+    while True:
+        user_input = input("\nAsk your question: ").strip()
+        if user_input.lower() in ("exit", "quit"):
+            print("Goodbye!")
+            break
+
+        tools_state.update({
+            "user_input": user_input,
+            "__next__": "llm_agent"
+        })
+
+        result = runnable.invoke(tools_state)
+        print("\nResponse:\n", result.get("result", "[No result returned.]"))
