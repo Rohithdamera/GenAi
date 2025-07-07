@@ -1,15 +1,11 @@
 import asyncio
 import json
 import nest_asyncio
-from tabulate import tabulate
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 from langchain.chat_models import AzureChatOpenAI
-from langchain.agents import tool, Tool, AgentExecutor, create_openai_functions_agent
-from langchain.agents.openai_functions_agent.agent_token_buffer_memory import AgentTokenBufferMemory
-from langgraph.graph import StateGraph
-from langgraph.prebuilt import create_agent_executor
-from langgraph.prebuilt.tool_executor import ToolExecutor
+from langchain.agents import tool
+from langgraph.prebuilt import create_plan_and_execute_agent
 
 nest_asyncio.apply()
 
@@ -19,31 +15,18 @@ def get_openai_client():
         azure_deployment="Fourth_Chatbot",
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         openai_api_version="2024-08-01-preview",
-        openai_api_key="",  # <-- Use your actual key or env var
+        openai_api_key="",  # <-- Add your actual API key or load from env
         temperature=0.7,
         max_tokens=2000,
-        model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
+        model_kwargs={
+            "top_p": 0.9,
+            "frequency_penalty": 0.2,
+            "presence_penalty": 0.1
+        }
     )
 
 # === SSE Stream URL ===
 sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
-
-# === Dynamic Tool Loader from MCP Server ===
-def sync_fetch_tools():
-    async def fetch():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                tools_data = await session.list_tools()
-                tools = []
-
-                for t in getattr(tools_data, "tools", []):
-                    @tool(name=t.name, description=t.description)
-                    def _tool(input_data: dict, tool_name=t.name):
-                        return sync_call_tool(tool_name, input_data)
-                    tools.append(_tool)
-                return tools
-    return asyncio.get_event_loop().run_until_complete(fetch())
 
 # === Tool Call Execution ===
 def sync_call_tool(tool_name: str, tool_input: dict):
@@ -57,7 +40,29 @@ def sync_call_tool(tool_name: str, tool_input: dict):
     except Exception as e:
         return f"[ERROR] {e}"
 
-# === Build LangGraph Plan & Execute Agent ===
+# === Dynamic Tool Loader from MCP Server ===
+def sync_fetch_tools():
+    async def fetch():
+        async with sse_client(url=sse_url) as streams:
+            async with ClientSession(*streams) as session:
+                await session.initialize()
+                tools_data = await session.list_tools()
+                tools = []
+
+                for t in getattr(tools_data, "tools", []):
+                    tool_name = t.name
+                    tool_description = t.description
+
+                    # Define a tool dynamically using langchain.agent.tool
+                    @tool(name=tool_name, description=tool_description)
+                    def _tool(input_data: dict, tool_name=tool_name):
+                        return sync_call_tool(tool_name, input_data)
+
+                    tools.append(_tool)
+                return tools
+    return asyncio.get_event_loop().run_until_complete(fetch())
+
+# === Build Plan & Execute Agent ===
 def build_plan_and_execute_graph():
     llm = get_openai_client()
     tools = sync_fetch_tools()
@@ -65,21 +70,14 @@ def build_plan_and_execute_graph():
     if not tools:
         raise RuntimeError("No tools available from MCP Server.")
 
-    tool_executor = ToolExecutor(tools)
-    agent = create_openai_functions_agent(llm, tools)
-
-    memory = AgentTokenBufferMemory(memory_key="chat_history", llm=llm)
-
-    agent_executor = AgentExecutor.from_agent_and_tools(
-        agent=agent,
+    # Build a plan-and-execute agent from LangGraph
+    agent_executor = create_plan_and_execute_agent(
+        llm=llm,
         tools=tools,
-        memory=memory,
-        verbose=True,
-        handle_parsing_errors=True,
-        return_intermediate_steps=True
+        verbose=True
     )
 
-    return create_agent_executor(agent_executor, name="plan-and-execute")
+    return agent_executor
 
 # === Main Interactive CLI ===
 if __name__ == "__main__":
