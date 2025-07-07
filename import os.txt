@@ -1,94 +1,64 @@
-import asyncio
-import json
-import nest_asyncio
-from typing import List
-from langchain.agents import initialize_agent, AgentType
-from langchain.chat_models import AzureChatOpenAI
-from langchain.tools import Tool
-from mcp import ClientSession
-from mcp.client.sse import sse_client
+> Finished chain.
 
-nest_asyncio.apply()
+📤 Answer:
+It seems there was an error retrieving the employee details for the "cocacola" project. Could you please confirm the project name or provide any additional details that might help in fetching the correct information?
 
-# === Azure OpenAI Client ===
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_deployment="Fourth_Chatbot",
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        openai_api_version="2024-08-01-preview",
-        openai_api_key="YOUR_API_KEY_HERE",
-        temperature=0.3,
-        max_tokens=1500,
-    )
+🧠 Ask your question:  give me employee details who are working in cocacola project
 
-# === SSE URL ===
-sse_url = "https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/sse"
 
-# === Fetch Tool Names ===
-async def fetch_tool_names(session: ClientSession) -> List[str]:
-    info = await session.list_tools()
-    return [t.name for t in getattr(info, "tools", [])]
+> Entering new AgentExecutor chain...
 
-# === Tool Wrappers ===
-def make_tools(session: ClientSession, tool_names: List[str]) -> List[Tool]:
-    tools = []
+Invoking: `GetProjects` with `cocacola`
 
-    for name in tool_names:
-        async def _tool_func(query: str, tool_name=name):
-            try:
-                input_data = json.loads(query) if query else {}
-                result = await session.call_tool(tool_name, input_data)
-                return str(result)
-            except Exception as e:
-                return f"[ERROR] Tool {tool_name} failed: {e}"
 
-        tools.append(
-            Tool(
-                name=name,
-                func=lambda query, tool_name=name: asyncio.run(_tool_func(query, tool_name)),
-                description=f"MCP Tool: {name}. Accepts JSON input."
-            )
-        )
+[ERROR] Tool GetProjects failed: Expecting value: line 1 column 1 (char 0)
+Invoking: `GetProjectEmployees` with `cocacola`
+responded: It seems there was an error retrieving the project details for "cocacola". Let me try another approach to get the information you need.
 
-    return tools
+[ERROR] Tool GetProjectEmployees failed: Expecting value: line 1 column 1 (char 0)I'm currently experiencing difficulties retrieving the employee details for the "cocacola" project. It appears there might be an issue with the data retrieval tools. Please try again later or contact technical support for further assistance.
 
-# === Main Async Logic ===
-async def main():
-    print("\n🚀 MCP Reactive Agent Interface (Azure OpenAI + MCP Tools)")
+> Finished chain.
 
-    async with sse_client(url=sse_url) as streams:
-        async with ClientSession(*streams) as session:
-            await session.initialize()
+📤 Answer:
+I'm currently experiencing difficulties retrieving the employee details for the "cocacola" project. It appears there might be an issue with the data retrieval tools. Please try again later or contact technical support for further assistance.
 
-            # Fetch tools
-            tool_names = await fetch_tool_names(session)
-            print(f"⚙️ Available MCP tools: {tool_names}")
+🧠 Ask your question:  give me employee details
 
-            # Build LangChain-compatible tool list
-            tools = make_tools(session, tool_names)
 
-            # Initialize agent with tools
-            agent = initialize_agent(
-                tools=tools,
-                llm=get_openai_client(),
-                agent=AgentType.OPENAI_FUNCTIONS,
-                verbose=True,
-                handle_parsing_errors=True
-            )
+> Entering new AgentExecutor chain...
+Please provide the employee ID or name so that I can fetch the details for you.
 
-            # REPL Loop
-            while True:
-                user_input = input("\n🧠 Ask your question: ").strip()
-                if user_input.lower() in ("exit", "quit"):
-                    print("👋 Goodbye!")
-                    break
+> Finished chain.
 
-                try:
-                    response = agent.run(user_input)
-                    print(f"\n📤 Answer:\n{response}")
-                except Exception as e:
-                    print(f"❌ Error: {e}")
+📤 Answer:
+Please provide the employee ID or name so that I can fetch the details for you.
 
-# === Execute ===
-if __name__ == "__main__":
-    asyncio.run(main())
+🧠 Ask your question:  give me all employee details
+
+
+> Entering new AgentExecutor chain...
+Could you please specify the company or department for which you need the employee details? This will help me fetch the accurate information for you.
+
+> Finished chain.
+
+📤 Answer:
+Could you please specify the company or department for which you need the employee details? This will help me fetch the accurate information for you.
+
+🧠 Ask your question:  give me employee details who are working in cocacola project
+
+
+> Entering new AgentExecutor chain...
+
+Invoking: `GetProjects` with `cocacola`
+
+
+[ERROR] Tool GetProjects failed: Expecting value: line 1 column 1 (char 0)
+Invoking: `GetProjects` with `cocacola`
+responded: It seems there was an error retrieving the project details. Let's try again. Please hold on for a moment.
+
+[ERROR] Tool GetProjects failed: Expecting value: line 1 column 1 (char 0)It appears that there is a persistent issue with retrieving the project details. I recommend checking the system status or contacting technical support for assistance. If there's anything else you'd like me to help with, please let me know!
+
+> Finished chain.
+
+📤 Answer:
+It appears that there is a persistent issue with retrieving the project details. I recommend checking the system status or contacting technical support for assistance. If there's anything else you'd like me to help with, please let me know!
