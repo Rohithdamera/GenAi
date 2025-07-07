@@ -1,171 +1,93 @@
-import asyncio
+import os
 import json
-import nest_asyncio
-from tabulate import tabulate
-from mcp import ClientSession
+import asyncio
+from typing import List, Dict, Any
+
 from mcp.client.sse import sse_client
+from mcp import ClientSession
 from langchain.chat_models import AzureChatOpenAI
-from langgraph.graph import StateGraph
+from langchain.agents import initialize_agent, AgentType
+from langchain.tools import Tool
 
-nest_asyncio.apply()
-
-# === Azure OpenAI Client ===
+# --- 1. Azure OpenAI Client ---
 def get_openai_client():
     return AzureChatOpenAI(
         azure_deployment="Fourth_Chatbot",
         azure_endpoint="https://testopenaiassets.openai.azure.com",
-        openai_api_version="2024-08-01-preview",
-        openai_api_key="",
-        temperature=0.7,
-        max_tokens=2000,
-        model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
+        azure_api_version="2024-08-01-preview",
+        openai_api_key=os.getenv("AZURE_OPENAI_KEY", ""),
+        temperature=0.0,  # deterministic reasoning
+        max_tokens=1500,
+        model_kwargs={"top_p": 0.9, "frequency_penalty": 0.0, "presence_penalty": 0.0},
     )
 
-sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
+# --- 2. MCP Client Initializer ---
+async def init_mcp_session(url: str):
+    async with sse_client(url=url) as streams:
+        async with ClientSession(streams[0], streams[1]) as session:
+            await session.initialize()
+            return session
 
-# === Fetch Available Tools ===
-def sync_fetch_tools():
-    async def fetch():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                return await session.list_tools()
-    return asyncio.get_event_loop().run_until_complete(fetch())
+# --- 3. Fetch Tools Dynamically ---
+async def fetch_tool_names(session: ClientSession) -> List[str]:
+    info = await session.list_tools()
+    return [t.name for t in getattr(info, "tools", [])]
 
-# === Call Tool ===
-def sync_call_tool(tool_name: str, tool_input: dict):
-    async def call():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                return await session.call_tool(tool_name, tool_input)
-    try:
-        return asyncio.get_event_loop().run_until_complete(call())
-    except Exception as e:
-        return f"[ERROR] {e}"
+# --- 4. Wrap Each MCP Tool for Agent ---
+def make_tools(session: ClientSession, tool_names: List[str]) -> List[Tool]:
+    tools = []
 
-# === LangGraph Nodes ===
-def list_tools_node(state: dict) -> dict:
-    try:
-        result = sync_fetch_tools()
-        tools = [{
-            "name": t.name,
-            "description": t.description,
-            "inputSchema": t.inputSchema
-        } for t in getattr(result, "tools", [])]
-        state["available_tools"] = tools
-        state["__next__"] = "llm_agent"
-        return state
-    except Exception as e:
-        return {"result": f"[ERROR] Failed to fetch tools: {e}"}
+    for name in tool_names:
+        async def _fn(inp: str, tool_name=name):
+            try:
+                params = json.loads(inp) if inp else {}
+            except:
+                return f"❌ Invalid JSON input for `{tool_name}`"
 
-# === Agent Node ===
-def llm_agent_node(state: dict) -> dict:
-    llm = get_openai_client()
-    tools = state.get("available_tools", [])
-    tool_list = "\n".join([f"- {t['name']}: {t['description']}" for t in tools])
+            try:
+                res = await session.call_tool(tool_name, params)
+                return json.dumps(res, default=str)
+            except Exception as e:
+                return f"❌ Error in `{tool_name}`: {e}"
 
-    agent_prompt = f"""
-You are an intelligent assistant. Your job is to fulfill the user's query by selecting and calling the appropriate tools.
-Below is a list of tools available to you:
+        tools.append(Tool.from_function(
+            name=name,
+            func=_fn,
+            coroutine=_fn,
+            description=f"Call MCP endpoint `{name}` with JSON input",
+        ))
 
-{tool_list}
+    return tools
 
-Based on the user query, choose the best tool or combination of tools. You must:
-- Identify the relevant tool names
-- Infer the required inputs from the user query
-- Simulate the tool calls by outputting a JSON list like:
-  [
-    {{"tool": "ToolName", "input": {{"field": "value"}}}},
-    ...
-  ]
-Return only valid JSON with no explanation or natural language.
+# --- 5. Main Agent Runner ---
+async def main():
+    sse_url = "https://employee-mcp-v1-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io/sse"
 
-User query: {json.dumps(state['user_input'])}
-"""
+    # Initialize MCP session
+    session = await init_mcp_session(sse_url)
+    tool_names = await fetch_tool_names(session)
+    print(f"⚙️ Available MCP tools: {tool_names}")
 
-    try:
-        plan_response = llm.invoke(agent_prompt).content.strip()
-        calls = json.loads(plan_response)
-        all_outputs = []
+    tools = make_tools(session, tool_names)
+    agent = initialize_agent(
+        tools=tools,
+        llm=get_openai_client(),
+        agent=AgentType.OPENAI_FUNCTIONS,
+        verbose=True,
+        handle_parsing_errors=True,
+    )
 
-        for call in calls:
-            tool = call.get("tool")
-            tool_input = call.get("input", {})
-            output = sync_call_tool(tool, tool_input)
-            all_outputs.append({"tool": tool, "input": tool_input, "output": output})
-
-        state["final_results"] = all_outputs
-        state["__next__"] = "format_output"
-        return state
-
-    except Exception as e:
-        return {"result": f"[ERROR] LLM tool plan or execution failed: {str(e)}"}
-
-# === Output Formatter ===
-def format_output_node(state: dict) -> dict:
-    results = state.get("final_results", [])
-    combined = []
-
-    for item in results:
-        output = item.get("output")
-        if hasattr(output, "content") and output.content:
-            for part in output.content:
-                if hasattr(part, "text"):
-                    try:
-                        parsed = json.loads(part.text)
-                        combined.append(parsed)
-                    except:
-                        combined.append(part.text)
-        else:
-            combined.append(output)
-
-    state["result"] = json.dumps(combined, indent=2) if combined else "[INFO] No structured data returned."
-    return state
-
-# === Fallback Node ===
-def default_node(state: dict) -> dict:
-    return {"result": "Sorry, I couldn't understand your request or no tool could be identified."}
-
-# === Build LangGraph ===
-def build_graph():
-    graph = StateGraph(dict)
-    graph.add_node("list_tools", list_tools_node)
-    graph.add_node("llm_agent", llm_agent_node)
-    graph.add_node("format_output", format_output_node)
-    graph.add_node("default", default_node)
-
-    graph.add_conditional_edges("list_tools", lambda s: s["__next__"], {
-        "llm_agent": "llm_agent"
-    })
-    graph.add_conditional_edges("llm_agent", lambda s: s["__next__"], {
-        "format_output": "format_output"
-    })
-
-    graph.set_entry_point("list_tools")
-    return graph.compile()
-
-# === Main Loop ===
-if __name__ == "__main__":
-    print("\n=== MCP Tool Assistant ===\nType 'exit' to quit.")
-    tools_state = list_tools_node({})
-
-    if "available_tools" not in tools_state:
-        print(tools_state.get("result", "[ERROR] Could not load tools."))
-        exit()
-
-    runnable = build_graph()
-
+    print("\n🤖 Ask questions (e.g., 'Employees working on Pepsico', 'Names starting with Ch, experience < 10'): Type 'exit' to quit.\n")
     while True:
-        user_input = input("\nAsk your question: ").strip()
-        if user_input.lower() in ("exit", "quit"):
-            print("Goodbye!")
+        q = input("User: ").strip()
+        if q.lower() in ("exit","quit"):
             break
+        try:
+            resp = await agent.arun(q)
+            print("\nAgent:", resp, "\n")
+        except Exception as e:
+            print("❌ Error:", e)
 
-        tools_state.update({
-            "user_input": user_input,
-            "__next__": "llm_agent"
-        })
-
-        result = runnable.invoke(tools_state)
-        print("\nResponse:\n", result.get("result", "[No result returned.]"))
+# --- 6. Run ---
+if __name__ == "__main__":
+    asyncio.run(main())
