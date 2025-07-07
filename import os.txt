@@ -16,7 +16,7 @@ def get_openai_client():
         azure_deployment="Fourth_Chatbot",
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         openai_api_version="2024-08-01-preview",
-        openai_api_key="",  # Put your Azure key here
+        openai_api_key="",  # Add your key
         temperature=0.3,
         max_tokens=2000,
     )
@@ -89,20 +89,19 @@ def render_output_as_table(output_text: str):
     except Exception:
         return output_text
 
-# === Custom Agent Prompt (ENHANCED) ===
+# === Custom Prompt ===
 CUSTOM_PREFIX = """
-You are a reasoning agent that helps users query employee and project information using external tools.
+You are an intelligent support agent with access to multiple tools containing employee, project, and organizational data.
 
 Your responsibilities:
-- If an employee or project is not found in one tool, try other tools that might hold relevant data.
-- When names like "Shyam Prasad." or "fedex" appear, try fuzzy name matching. Drop trailing punctuation.
-- Never give up if a tool says "not found" — try other tools until all are exhausted.
-- If location names are partial or wrong ("benguluru" instead of "Bangalore"), reason and correct them.
-- Final answers must be formatted as a **clean table**, not JSON or plain text.
-- Do not use emojis or markdown formatting.
-- Think like a persistent, helpful human assistant.
+- Always check all tools for relevant data before concluding that something is not found.
+- If a tool returns partial information (like employee ID), use that to search in other tools.
+- If names are misspelled or abbreviated (e.g., HYD for Hyderabad, benguluru for Bangalore), still attempt to resolve them using available data across all tools.
+- Present the final answer in a **tabular format** without any emojis or markdown.
+- Always attempt a multi-hop reasoning process until an accurate and complete answer is found.
+- Never stop after a single failed attempt unless all tools are tried.
 
-Begin reasoning step-by-step and figure out the best way to find the answer.
+You must produce clear, structured, complete answers.
 """
 
 # === Build the Agent ===
@@ -122,7 +121,7 @@ def build_agent():
 
 # === CLI Interface ===
 if __name__ == "__main__":
-    print("=== MCP ReAct Agent (Resilient, Table Output, Multi-Tool) ===")
+    print("=== MCP ReAct Agent (Deep Tool Search, Cross-linked) ===")
     agent = build_agent()
 
     while True:
