@@ -1,92 +1,54 @@
-import asyncio
-import json
-import nest_asyncio
-from mcp import ClientSession
-from mcp.client.sse import sse_client
-from langchain.chat_models import AzureChatOpenAI
-from langchain.agents import Tool, AgentExecutor, initialize_agent
-from langchain.agents.agent_types import AgentType
-
-nest_asyncio.apply()
-
-# === OpenAI Client ===
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_deployment="Fourth_Chatbot",
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        openai_api_version="2024-08-01-preview",
-        openai_api_key="",  # your key here
-        temperature=0.2,
-        max_tokens=2000,
-    )
-
-sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
-
-# === Sync Tool Caller ===
-def sync_call_tool(name: str, params: dict) -> dict:
-    async def call():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                return await session.call_tool(name, params)
-    return asyncio.get_event_loop().run_until_complete(call())
-
-# === Build Tools With Auto-defaults ===
-def get_tools():
-    info = sync_call_tool("list_tools", {})
-    tools = []
-    for td in getattr(info, "tools", []):
-        name = td["name"]
-        schema = td.get("inputSchema", {})
-        req = schema.get("required", [])
-
-        description = td.get("description", "")
-        if req:
-            description += f" (requires {req})"
-        
-        def make_func(tool_name=name, r=req):
-            def fn(s: str) -> str:
-                data = json.loads(s) if s else {}
-                # Auto-default missing params to empty or wildcard
-                for k in r:
-                    data.setdefault(k, "")
-                res = sync_call_tool(tool_name, data)
-                return json.dumps(res)
-            return fn
-
-        tools.append(Tool(
-            name=name,
-            description=description,
-            func=make_func(),
-            return_direct=False
-        ))
-
-    return tools
-
-# === Build Agent ===
-def build_agent():
-    tools = get_tools()
-    llm = get_openai_client()
-    agent = initialize_agent(
-        tools=tools,
-        llm=llm,
-        agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-        verbose=True,
-        max_iterations=6,
-        return_intermediate_steps=False
-    )
-    return agent
-
-# === Main Loop ===
-if __name__ == "__main__":
-    print("=== MCP Auto-fetch Agent ===")
-    agent = build_agent()
-    while True:
-        q = input("\nYour question: ").strip()
-        if q.lower() in ("exit", "quit"):
-            break
-        try:
-            resp = agent.invoke({"input": q})
-            print("\n🧠 Answer:\n", resp["output"])
-        except Exception as e:
-            print("❌ Error:", e)
+=== MCP Auto-fetch Agent ===
+  + Exception Group Traceback (most recent call last):
+  |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\IPython\core\interactiveshell.py", line 3672, in run_code
+  |     exec(code_obj, self.user_global_ns, self.user_ns)
+  |   File "C:\Users\rdamera\AppData\Local\Temp\ipykernel_13612\1727145661.py", line 83, in <module>
+  |     agent = build_agent()
+  |             ^^^^^^^^^^^^^
+  |   File "C:\Users\rdamera\AppData\Local\Temp\ipykernel_13612\1727145661.py", line 68, in build_agent
+  |     tools = get_tools()
+  |             ^^^^^^^^^^^
+  |   File "C:\Users\rdamera\AppData\Local\Temp\ipykernel_13612\1727145661.py", line 36, in get_tools
+  |     info = sync_call_tool("list_tools", {})
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |   File "C:\Users\rdamera\AppData\Local\Temp\ipykernel_13612\1727145661.py", line 32, in sync_call_tool
+  |     return asyncio.get_event_loop().run_until_complete(call())
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\nest_asyncio.py", line 98, in run_until_complete
+  |     return f.result()
+  |            ^^^^^^^^^^
+  |   File "C:\Program Files\Python311\Lib\asyncio\futures.py", line 203, in result
+  |     raise self._exception.with_traceback(self._exception_tb)
+  |   File "C:\Program Files\Python311\Lib\asyncio\tasks.py", line 279, in __step
+  |     result = coro.throw(exc)
+  |              ^^^^^^^^^^^^^^^
+  |   File "C:\Users\rdamera\AppData\Local\Temp\ipykernel_13612\1727145661.py", line 28, in call
+  |     async with sse_client(url=sse_url) as streams:
+  |   File "C:\Program Files\Python311\Lib\contextlib.py", line 231, in __aexit__
+  |     await self.gen.athrow(typ, value, traceback)
+  |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\mcp\client\sse.py", line 54, in sse_client
+  |     async with anyio.create_task_group() as tg:
+  |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\anyio\_backends\_asyncio.py", line 772, in __aexit__
+  |     raise BaseExceptionGroup(
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Exception Group Traceback (most recent call last):
+    |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\mcp\client\sse.py", line 138, in sse_client
+    |     yield read_stream, write_stream
+    |   File "C:\Users\rdamera\AppData\Local\Temp\ipykernel_13612\1727145661.py", line 29, in call
+    |     async with ClientSession(*streams) as session:
+    |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\anyio\_backends\_asyncio.py", line 772, in __aexit__
+    |     raise BaseExceptionGroup(
+    | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+    +-+---------------- 1 ----------------
+      | Traceback (most recent call last):
+      |   File "C:\Users\rdamera\AppData\Local\Temp\ipykernel_13612\1727145661.py", line 31, in call
+      |     return await session.call_tool(name, params)
+      |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\mcp\client\session.py", line 264, in call_tool
+      |     return await self.send_request(
+      |            ^^^^^^^^^^^^^^^^^^^^^^^^
+      |   File "C:\Users\rdamera\AppData\Roaming\Python\Python311\site-packages\mcp\shared\session.py", line 286, in send_request
+      |     raise McpError(response_or_error.error)
+      | mcp.shared.exceptions.McpError: Tool not found: list_tools
+      +------------------------------------
