@@ -1,98 +1,31 @@
-import asyncio
-import json
-import nest_asyncio
-from mcp import ClientSession
-from mcp.client.sse import sse_client
-from langchain.chat_models import AzureChatOpenAI
-from langchain.agents import Tool, AgentExecutor, initialize_agent
-from langchain.agents.agent_types import AgentType
-from typing import List
+=== MCP ReAct Agent (fixed input schema enforcement) ===
 
-nest_asyncio.apply()
+Your question:  give me employee details
 
-# === Azure OpenAI Client ===
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_deployment="Fourth_Chatbot",
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        openai_api_version="2024-08-01-preview",
-        openai_api_key="",  # <-- add your key
-        temperature=0.3,
-        max_tokens=2000,
-        model_kwargs={"top_p": 0.9, "frequency_penalty": 0.0, "presence_penalty": 0.0},
-    )
 
-sse_url = "https://employee-mcp-v1-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
+> Entering new AgentExecutor chain...
+I need more specific details to fetch the right employee information, such as role, experience, skillset, location, assignment status, or phone number.
+Final Answer: Please provide more specific details such as role, experience, skillset, location, assignment status, or phone number to fetch the appropriate employee details.
 
-# === Tool Caller ===
-def sync_call_tool(tool_name: str, tool_input: dict):
-    async def call():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                return await session.call_tool(tool_name, tool_input)
-    return asyncio.get_event_loop().run_until_complete(call())
+> Finished chain.
 
-# === Build Tools with Input Validation ===
-def get_mcp_tools() -> List[Tool]:
-    async def fetch():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as session:
-                await session.initialize()
-                return await session.list_tools()
+▶️ Answer:
+ Please provide more specific details such as role, experience, skillset, location, assignment status, or phone number to fetch the appropriate employee details.
 
-    tools = []
-    info = asyncio.get_event_loop().run_until_complete(fetch())
-    for td in getattr(info, "tools", []):
-        name = td.name
-        schema: dict = td.inputSchema or {}
-        required_keys = list(schema.get("required", []))
+Your question:  i need all details of employees 
 
-        description = td.description or ""
-        if schema:
-            description += "\nRequired JSON keys: " + ", ".join(required_keys)
 
-        def build_tool(tool_name=name, req=required_keys):
-            def inner(input_str: str) -> str:
-                try:
-                    data = json.loads(input_str)
-                except Exception:
-                    return f"[ERROR] Input must be valid JSON."
+> Entering new AgentExecutor chain...
+To get all details of employees, I need to know what specific criteria or filters to use, as the GetEmployee function requires specific keys to fetch data.
+Action: GetEmployee
+Action Input: {}
+❌ Agent failed: Object of type CallToolResult is not JSON serializable
 
-                missing = [k for k in req if k not in data]
-                if missing:
-                    return f"[ERROR] Missing required keys: {missing}"
+Your question:  give me projects details 
 
-                result = sync_call_tool(tool_name, data)
-                return json.dumps(result, indent=2)
-            return Tool(name=name, description=description, func=inner, return_direct=False)
 
-        tools.append(build_tool())
-    return tools
-
-# === Build ReAct Agent ===
-def build_agent() -> AgentExecutor:
-    tools = get_mcp_tools()
-    llm = get_openai_client()
-    return initialize_agent(
-        tools=tools,
-        llm=llm,
-        agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-        verbose=True,
-        max_iterations=10,
-        handle_parsing_errors=True
-    )
-
-# === CLI Loop ===
-if __name__ == "__main__":
-    print("=== MCP ReAct Agent (fixed input schema enforcement) ===")
-    agent = build_agent()
-    while True:
-        q = input("\nYour question: ").strip()
-        if q.lower() in ("exit", "quit"):
-            break
-        try:
-            resp = agent.invoke({"input": q})
-            print("\n▶️ Answer:\n", resp.get("output", "[No output]"))
-        except Exception as e:
-            print("\n❌ Agent failed:", e)
+> Entering new AgentExecutor chain...
+To provide details on projects, I need to fetch the list of projects in the organization.
+Action: GetProjects
+Action Input: {}
+❌ Agent failed: Object of type CallToolResult is not JSON serializable
