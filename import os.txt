@@ -1,56 +1,175 @@
-[Session ID: 21ba5719-36ba-435e-b017-e2643031797b]
->  Create a employee with Firstname as Hari Prasad and lastname as Kona is currently employed as a Java Tester based in Mumbai. His employment status is active, although his assignment status is currently inactive. He has a total of 7 years of professional experience, with 3 years of expertise in Java as his primary skill and another 3 years in Mulesoft as his secondary skill. His registered mobile number is 12345.
+import time
+import uuid
+import json
+import nest_asyncio
+import pandas as pd
+from langchain.chat_models import AzureChatOpenAI
+from langchain.agents import Tool, initialize_agent
+from langchain.agents.agent_types import AgentType
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+import asyncio
 
+nest_asyncio.apply()
 
-> Entering new AgentExecutor chain...
-To create an employee named Hari Prasad Kona with the specified details, I need to format the input correctly to match the required fields and data types for the CreateEmployee action.
+# ==== Session Management ====
+chat_sessions = {}
+SESSION_TTL = 30 * 60  # 30 minutes
 
-Action: CreateEmployee
-Action Input: {"Firstname": "Hari Prasad", "Lastname": "Kona", "Role": "Java Tester", "Location": "Mumbai", "EmploymentStatus": "active", "AssignmentStatus": "inactive", "Experience": 7, "PrimarySkill": "Java", "SecondarySkill": "Mulesoft", "Phone": "12345"}
-Observation: [
-  "HTTP POST on resource 'https://cg-employees-papi-sandbox-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io:443/api/employees' failed: bad request (400)."
-]
-Thought:The creation of the employee failed due to a bad request error. I need to check if all required fields are correctly formatted and if any additional fields are required.
+def create_session():
+    cid = str(uuid.uuid4())
+    chat_sessions[cid] = {"created_at": time.time(), "messages": []}
+    return cid
 
-Action: CreateEmployee
-Action Input: {"Firstname": "Hari Prasad", "Lastname": "Kona", "Role": "Java Tester", "Location": "Mumbai", "EmploymentStatus": "active", "AssignmentStatus": "inactive", "Experience": 7, "PrimarySkill": "Java", "SecondarySkill": "Mulesoft", "Phone": "12345"}
-Observation: [
-  "HTTP POST on resource 'https://cg-employees-papi-sandbox-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io:443/api/employees' failed: bad request (400)."
-]
-Thought:The repeated bad request error suggests a potential issue with the format or completeness of the data provided. I will verify the required fields and ensure that all are included and correctly formatted.
+def add_message(cid, role, content):
+    if cid in chat_sessions:
+        chat_sessions[cid]["messages"].append({"role": role, "content": content})
 
-Action: CreateEmployee
-Action Input: {"Firstname": "Hari Prasad", "Lastname": "Kona", "Role": "Java Tester", "Location": "Mumbai", "EmploymentStatus": "active", "AssignmentStatus": "inactive", "Experience": 7, "PrimarySkill": "Java", "SecondarySkill": "Mulesoft", "Phone": "12345"}
-Observation: [
-  "HTTP POST on resource 'https://cg-employees-papi-sandbox-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io:443/api/employees' failed: bad request (400)."
-]
-Thought:The repeated failure to create the employee suggests that there might be an issue with the input fields or the server itself. I need to ensure all required fields are present and correctly formatted. I will attempt to identify any missing or incorrectly formatted fields and correct them.
+def get_history(cid):
+    return chat_sessions.get(cid, {}).get("messages", [])
 
-Action: CreateEmployee
-Action Input: {"Firstname": "Hari Prasad", "Lastname": "Kona", "Role": "Java Tester", "Location": "Mumbai", "EmploymentStatus": "active", "AssignmentStatus": "inactive", "Experience": 7, "PrimarySkill": "Java", "SecondarySkill": "Mulesoft", "Phone": "12345"}
-Observation: [
-  "HTTP POST on resource 'https://cg-employees-papi-sandbox-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io:443/api/employees' failed: bad request (400)."
-]
-Thought:The repeated failure to create the employee suggests a persistent issue with the input format or the server's ability to process the request. I will review the required fields and their data types once more to ensure compliance with the system's requirements.
+def cleanup_expired_sessions():
+    now = time.time()
+    expired = [cid for cid, s in chat_sessions.items() if now - s["created_at"] > SESSION_TTL]
+    for cid in expired:
+        del chat_sessions[cid]
 
-Action: CreateEmployee
-Action Input: {"Firstname": "Hari Prasad", "Lastname": "Kona", "Role": "Java Tester", "Location": "Mumbai", "EmploymentStatus": "active", "AssignmentStatus": "inactive", "Experience": 7, "PrimarySkill": "Java", "SecondarySkill": "Mulesoft", "Phone": "12345"}
-Observation: [
-  "HTTP POST on resource 'https://cg-employees-papi-sandbox-6b0n96.dw4w1g-2.gbr-e1.cloudhub.io:443/api/employees' failed: bad request (400)."
-]
-Thought:
+# ==== Azure OpenAI Setup ====
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_deployment="Fourth_Chatbot",
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        openai_api_version="2024-08-01-preview",
+        openai_api_key="",  # <-- Add securely
+        temperature=0.3,
+        max_tokens=2000,
+    )
 
+# ==== SSE Tooling ====
+sse_url = "https://mcp-server-sse-cg-employees-sandbox-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
 
+def sync_call(tool_name: str, params: dict):
+    async def call():
+        async with sse_client(url=sse_url) as streams:
+            async with ClientSession(*streams) as session:
+                await session.initialize()
+                return await session.call_tool(tool_name, params)
+    return asyncio.get_event_loop().run_until_complete(call())
 
+def fetch_all_tools():
+    async def fetch():
+        async with sse_client(url=sse_url) as streams:
+            async with ClientSession(*streams) as session:
+                await session.initialize()
+                return await session.list_tools()
+    return asyncio.get_event_loop().run_until_complete(fetch())
 
-Answer:
+# ==== Tool Factory ====
+def get_tools():
+    raw = fetch_all_tools()
+    tools = []
 
-| GGID | FirstName    | LastName | Phone  | Location   | Role            | EmploymentStatus | AssignmentStatus | Experience | PrimarySkill | PrimarySkillExp | SecondarySkill | SecondarySkillExp | email          |
-|------|--------------|----------|--------|------------|-----------------|------------------|------------------|------------|--------------|-----------------|----------------|-------------------|----------------|
-| 1001 | Edward       | Frank    | 1001   | Hyderabad  | Developer       | Active           | Active           | 6          | Mulesoft     | 4               | Java           | 2                 |                |
+    for t in getattr(raw, "tools", []):
+        name = t.name
+        schema = t.inputSchema or {}
+        required = schema.get("required", [])
+        props = schema.get("properties", {})
 
-> Finished chain.
+        def make_func(tool_name=name):
+            def fn(input_str: str) -> str:
+                try:
+                    parsed = json.loads(input_str) if input_str else {}
 
-Answer:
+                    # Remove hardcoded coercion: agent is now fully responsible
+                    result = sync_call(tool_name, parsed)
 
-Agent stopped due to iteration limit or time limit.
+                    return json.dumps(result, indent=2, default=str)
+                except Exception as e:
+                    return f"[ERROR] {tool_name}: {str(e)}"
+            return fn
+
+        tools.append(
+            Tool(
+                name=name,
+                func=make_func(),
+                description=f"{t.description or ''} Required fields: {required}. Schema: {json.dumps(props)}",
+                return_direct=False,
+            )
+        )
+    return tools
+
+# ==== Output Formatter ====
+def render_output_as_table(output_text: str):
+    try:
+        data = json.loads(output_text)
+        if isinstance(data, list):
+            df = pd.DataFrame(data)
+        elif isinstance(data, dict):
+            df = pd.DataFrame([data])
+        else:
+            return output_text
+        return df.to_string(index=False)
+    except Exception:
+        return output_text
+
+# ==== Custom Prompt ====
+CUSTOM_PREFIX = """
+You are a smart assistant working with employee data using structured tools. Use the schema and required fields in each tool's description to properly form input.
+
+Your responsibilities:
+- Identify all required fields by reading the tool's schema and required array.
+- If any required fields are missing from the user input, intelligently infer or ask about them.
+- Convert values to correct types: e.g., numbers for experience years.
+- Never hardcode assumptions. Always reason from the tool's schema and the user prompt.
+- When using CreateEmployee, ensure all required fields are passed, even if defaulted reasonably.
+- Return all results as clean tabular output, no markdown or emojis.
+
+You're allowed to retry tools if the initial call fails due to formatting or missing data.
+"""
+
+# ==== Agent Builder ====
+def build_agent():
+    tools = get_tools()
+    llm = get_openai_client()
+    return initialize_agent(
+        tools=tools,
+        llm=llm,
+        agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+        verbose=True,
+        max_iterations=10,
+        handle_parsing_errors=True,
+        agent_kwargs={"prefix": CUSTOM_PREFIX}
+    )
+
+# ==== CLI ====
+if __name__ == "__main__":
+    print("=== MCP ReAct Agent (Schema-Driven, No Hardcoding) ===")
+    cid = create_session()
+    agent = build_agent()
+
+    print(f"[Session ID: {cid}]")
+
+    while True:
+        cleanup_expired_sessions()
+        query = input("\nYour question: ").strip()
+        if query.lower() in ("exit", "quit"):
+            print(f"[Session {cid}] closed.")
+            break
+
+        if "chat history" in query.lower():
+            print("\n[Chat History]\n")
+            for i, m in enumerate(get_history(cid), 1):
+                print(f"{i}. {m['role'].capitalize()}: {m['content']}")
+            continue
+
+        try:
+            result = agent.invoke({"input": query})
+            final_output = result["output"]
+            print("\nAnswer:\n")
+            print(render_output_as_table(final_output))
+
+            add_message(cid, "user", query)
+            add_message(cid, "assistant", final_output)
+
+        except Exception as e:
+            print("Error:", str(e))
