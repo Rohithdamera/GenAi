@@ -4,15 +4,17 @@ import nest_asyncio
 import pandas as pd
 import uuid
 import os
- 
+import time
+from datetime import datetime, timedelta
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 from langchain.chat_models import AzureChatOpenAI
 from langchain.agents import Tool, initialize_agent
 from langchain.agents.agent_types import AgentType
- 
+from langchain.memory import ConversationBufferMemory
+
 nest_asyncio.apply()
- 
+
 # === Azure OpenAI Setup ===
 def get_openai_client():
     return AzureChatOpenAI(
@@ -23,10 +25,10 @@ def get_openai_client():
         temperature=0.3,
         max_tokens=2000,
     )
- 
+
 # === Tool Calling Logic ===
 sse_url = "https://mcp-server-sse-cg-employees-sandbox-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
- 
+
 def sync_call_tool(tool_name: str, params: dict):
     async def call():
         async with sse_client(url=sse_url) as streams:
@@ -34,7 +36,7 @@ def sync_call_tool(tool_name: str, params: dict):
                 await session.initialize()
                 return await session.call_tool(tool_name, params)
     return asyncio.get_event_loop().run_until_complete(call())
- 
+
 def fetch_all_tools():
     async def fetch():
         async with sse_client(url=sse_url) as streams:
@@ -42,16 +44,16 @@ def fetch_all_tools():
                 await session.initialize()
                 return await session.list_tools()
     return asyncio.get_event_loop().run_until_complete(fetch())
- 
+
 # === Tool Conversion ===
 def get_tools():
     raw = fetch_all_tools()
     tools = []
- 
+
     for t in getattr(raw, "tools", []):
         name = t.name
         required_fields = t.inputSchema.get("required", []) if t.inputSchema else []
- 
+
         def make_func(tool_name=name, req=required_fields):
             def fn(input_str: str) -> str:
                 try:
@@ -66,7 +68,7 @@ def get_tools():
                 except Exception as e:
                     return f"[ERROR] {tool_name}: {str(e)}"
             return fn
- 
+
         tools.append(
             Tool(
                 name=name,
@@ -75,9 +77,8 @@ def get_tools():
                 return_direct=False,
             )
         )
- 
     return tools
- 
+
 # === Table Renderer ===
 def render_output_as_table(output_text: str):
     try:
@@ -91,25 +92,25 @@ def render_output_as_table(output_text: str):
         return df.to_string(index=False)
     except Exception:
         return output_text
- 
+
 # === Custom Prompt ===
 CUSTOM_PREFIX = """
 You are an intelligent support agent with access to multiple tools containing employee, project, and organizational data.
- 
+
 Your responsibilities:
- 
+
 - Always check all tools for relevant data before concluding that something is not found.
 - If a tool returns partial information (like employee ID), use that to search in other tools.
 - If names are misspelled or abbreviated (e.g., HYD for Hyderabad, benguluru for Bangalore), still attempt to resolve them using available data across all tools.
-- Present the final answer in a **tabular format** without any emojis or markdown.
+- Present the final answer in a tabular format without any emojis or markdown.
 - Always attempt a multi-hop reasoning process until an accurate and complete answer is found.
 - Never stop after a single failed attempt unless all tools are tried.
- 
+
 You must produce clear, structured, complete answers.
 """
- 
-# === Build the Agent ===
-def build_agent():
+
+# === Memory-Aware Agent Builder ===
+def build_agent(memory):
     tools = get_tools()
     llm = get_openai_client()
     return initialize_agent(
@@ -117,69 +118,66 @@ def build_agent():
         llm=llm,
         agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
         verbose=True,
+        memory=memory,
         max_iterations=10,
         handle_parsing_errors=True,
         agent_kwargs={"prefix": CUSTOM_PREFIX}
     )
- 
-# === Save Chat History ===
-def save_chat_history(conversation_id, chat_history):
-    os.makedirs("chat_logs", exist_ok=True)
-    file_path = f"chat_logs/{conversation_id}.json"
+
+# === Chat History Storage & Cleanup ===
+LOG_DIR = "chat_logs"
+SESSION_TIMEOUT_MINUTES = 30  # Auto-delete after 30 mins
+
+def save_chat_history(conversation_id, memory):
+    os.makedirs(LOG_DIR, exist_ok=True)
+    file_path = f"{LOG_DIR}/{conversation_id}.json"
+    chat_data = {
+        "timestamp": time.time(),
+        "chat_history": memory.chat_memory.messages
+    }
     with open(file_path, "w") as f:
-        json.dump(chat_history, f, indent=2)
+        json.dump(chat_data, f, indent=2, default=str)
     print(f"\n[Chat history saved to {file_path}]")
- 
+
+def cleanup_old_sessions():
+    if not os.path.exists(LOG_DIR):
+        return
+    now = time.time()
+    for fname in os.listdir(LOG_DIR):
+        if fname.endswith(".json"):
+            fpath = os.path.join(LOG_DIR, fname)
+            with open(fpath, "r") as f:
+                try:
+                    session = json.load(f)
+                    ts = session.get("timestamp", now)
+                    if now - ts > SESSION_TIMEOUT_MINUTES * 60:
+                        os.remove(fpath)
+                        print(f"[Auto-cleanup] Deleted session: {fname}")
+                except Exception:
+                    continue
+
 # === CLI Interface ===
 if __name__ == "__main__":
-    print("=== MCP ReAct Agent (Deep Tool Search, Cross-linked) ===")
-    agent = build_agent()
- 
+    print("=== MCP ReAct Agent (Session Isolated & Auto-Cleanup) ===")
+    cleanup_old_sessions()
+
     conversation_id = str(uuid.uuid4())
-    chat_history = []
- 
+    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+    agent = build_agent(memory)
+
     print(f"\n[Session Conversation ID: {conversation_id}]")
- 
+
     while True:
         query = input("\nYour question: ").strip()
         if query.lower() in ("exit", "quit"):
-            save_chat_history(conversation_id, chat_history)
+            save_chat_history(conversation_id, memory)
             break
- 
+
         try:
             print(f"\n[Conversation ID: {conversation_id}]")
             result = agent.invoke({"input": query})
             final = result["output"]
             print("\nAnswer:\n")
             print(render_output_as_table(final))
- 
-            # Store in chat history
-            chat_history.append({
-                "query": query,
-                "response": final
-            })
- 
         except Exception as e:
-            print(" Error:", str(e))
- 
-
-
------------------------------------------------------------------------------
-
-
-agent2.invoke("Locate and summarize pom.xml, store internally for Agent 3.")
- 
-    print("\n=== Agent 3: Unified Summary Generator ===")
-    memory3 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-    agent3 = initialize_agent(
-        tools=[
-            Tool(name="GenerateUnifiedSummary", func=generate_unified_report, description="Combine Mule and pom.xml summaries into one report."),
-        ],
-        llm=get_openai_client(),
-        agent_type="openai-functions",
-        memory=memory3,
-        verbose=True
-    )
-    final_report = agent3.invoke("Generate final unified summary combining Mule XML and Maven pom.xml insights.")
-    print("\n[FINAL UNIFIED SUMMARY]:\n")
-    print(final_report)
+            print("Error:", str(e))
