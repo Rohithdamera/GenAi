@@ -7,7 +7,7 @@ from langchain.agents.agent_types import AgentType
 
 nest_asyncio.apply()
 
-# ——— Session Memory & TTL ———
+# ——— Session Memory with TTL ———
 chat_sessions = {}
 SESSION_TTL = 30 * 60
 
@@ -25,9 +25,9 @@ def get_history(cid):
 
 def cleanup_sessions():
     now = time.time()
-    for cid, ses in list(chat_sessions.items()):
-        if now - ses["start"] > SESSION_TTL:
-            del chat_sessions[cid]
+    expired = [cid for cid, ses in chat_sessions.items() if now - ses["start"] > SESSION_TTL]
+    for cid in expired:
+        del chat_sessions[cid]
 
 # ——— LLM Setup ———
 def get_openai_client():
@@ -35,7 +35,7 @@ def get_openai_client():
         azure_deployment="Fourth_Chatbot",
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         openai_api_version="2024-08-01-preview",
-        azure_openai_api_key="",  # YOUR KEY HERE
+        azure_openai_api_key="",  # Insert key securely
         temperature=0.3,
     )
 
@@ -44,18 +44,33 @@ sse_url = "https://mcp-server-sse-cg-employees-sandbox-6b0n6.dw4w1g-2.gbr-e1.clo
 
 def sync_call(tool_name, params):
     async def call():
-        async with sse_client(url=sse_url) as flows:
-            async with ClientSession(*flows) as sess:
-                await sess.initialize()
-                return await sess.call_tool(tool_name, params)
+        async with sse_client(url=sse_url) as streams:
+            async with ClientSession(*streams) as session:
+                await session.initialize()
+                result = await session.call_tool(tool_name, params)
+                return parse_tool_result(result)
     return asyncio.get_event_loop().run_until_complete(call())
+
+def parse_tool_result(result):
+    """Ensure response is safely JSON serializable"""
+    if hasattr(result, "content"):
+        try:
+            if isinstance(result.content, list):
+                return [c.text for c in result.content if hasattr(c, "text")]
+            elif isinstance(result.content, str):
+                return result.content
+            elif hasattr(result.content, "text"):
+                return result.content.text
+        except Exception as e:
+            return f"[Tool Result Error] {str(e)}"
+    return str(result)
 
 def fetch_tools():
     async def call():
-        async with sse_client(url=sse_url) as flows:
-            async with ClientSession(*flows) as sess:
-                await sess.initialize()
-                return await sess.list_tools()
+        async with sse_client(url=sse_url) as streams:
+            async with ClientSession(*streams) as session:
+                await session.initialize()
+                return await session.list_tools()
     return asyncio.get_event_loop().run_until_complete(call())
 
 def build_tools():
@@ -63,16 +78,21 @@ def build_tools():
     tools = []
 
     for t in getattr(raw, "tools", []):
-        name, schema = t.name, (t.inputSchema or {})
+        name = t.name
+        schema = t.inputSchema or {}
         required = schema.get("required", [])
         props = schema.get("properties", {})
 
-        def make_fn(n=name, req=required, props=props):
-            def fn(inp: str) -> str:
-                data = json.loads(inp or "{}")
-                for k in req:
-                    data.setdefault(k, "")
-                return json.dumps(sync_call(n, data), indent=2)
+        def make_fn(tool_name=name, req=required):
+            def fn(input_str: str) -> str:
+                try:
+                    parsed = json.loads(input_str or "{}")
+                    for k in req:
+                        parsed.setdefault(k, "")
+                    result = sync_call(tool_name, parsed)
+                    return json.dumps(result, indent=2, default=str)
+                except Exception as e:
+                    return f"[ERROR] {tool_name}: {str(e)}"
             return fn
 
         tools.append(Tool(
@@ -86,21 +106,27 @@ def build_tools():
 # ——— Output Formatting ———
 def to_table(text: str):
     try:
-        d = json.loads(text)
-        df = pd.DataFrame(d) if isinstance(d, list) else pd.DataFrame([d])
+        data = json.loads(text)
+        if isinstance(data, list):
+            df = pd.DataFrame(data)
+        elif isinstance(data, dict):
+            df = pd.DataFrame([data])
+        else:
+            return str(data)
         return df.to_string(index=False)
-    except:
+    except Exception:
         return text
 
-# ——— Custom Agent Prompt ———
+# ——— Agent Prompt ———
 PROMPT = """
-You have full schema for CreateEmployee. Build a correct CreateEmployee JSON payload from user text.
-Validate all required fields and types before calling. Present a single table with Status & Message.
+You are a smart assistant for employee data. Use the tools with proper schema.
+Always format your CreateEmployee and other tool inputs to match required fields and data types.
+If an operation fails, analyze why and correct it. Output everything in clean tabular format.
 """
 
-# ——— Build Agent ———
+# ——— Agent Builder ———
 def build_agent():
-    agent = initialize_agent(
+    return initialize_agent(
         tools=build_tools(),
         llm=get_openai_client(),
         agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
@@ -109,28 +135,32 @@ def build_agent():
         handle_parsing_errors=True,
         agent_kwargs={"prefix": PROMPT}
     )
-    return agent
 
-# ——— Main Loop ———
+# ——— CLI or Lambda Entry ———
 if __name__ == "__main__":
     cid = create_session()
     agent = build_agent()
-    print(f"Session ID: {cid}")
+    print(f"[Session ID: {cid}]")
 
     while True:
         cleanup_sessions()
         q = input("> ").strip()
         if q.lower() in ("exit", "quit"):
+            print("Session ended.")
             break
 
-        add_msg(cid, "user", q)
-        hist = get_history(cid)
-
         if "chat history" in q.lower():
-            for m in hist:
-                print(f"{m['role']}: {m['msg']}")
+            print("\n[Chat History]")
+            for m in get_history(cid):
+                print(f"{m['role'].capitalize()}: {m['msg']}")
             continue
 
-        res = agent.invoke({"input": q})["output"]
-        print(to_table(res))
-        add_msg(cid, "assistant", res)
+        add_msg(cid, "user", q)
+        try:
+            result = agent.invoke({"input": q})
+            output = result["output"]
+            print("\nAnswer:\n")
+            print(to_table(output))
+            add_msg(cid, "assistant", output)
+        except Exception as e:
+            print("[Error]", str(e))
