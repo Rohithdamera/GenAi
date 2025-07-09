@@ -40,6 +40,15 @@ Observation: [
 ]
 Thought:
 
+
+
+
+Answer:
+
+| GGID | FirstName    | LastName | Phone  | Location   | Role            | EmploymentStatus | AssignmentStatus | Experience | PrimarySkill | PrimarySkillExp | SecondarySkill | SecondarySkillExp | email          |
+|------|--------------|----------|--------|------------|-----------------|------------------|------------------|------------|--------------|-----------------|----------------|-------------------|----------------|
+| 1001 | Edward       | Frank    | 1001   | Hyderabad  | Developer       | Active           | Active           | 6          | Mulesoft     | 4               | Java           | 2                 |                |
+
 > Finished chain.
 
 Answer:
