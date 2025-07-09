@@ -1,134 +1,136 @@
-import asyncio
-import json
-import nest_asyncio
-import pandas as pd
-import uuid
-import time
-
+import time, uuid, json, nest_asyncio, pandas as pd, asyncio
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 from langchain.chat_models import AzureChatOpenAI
 from langchain.agents import Tool, initialize_agent
 from langchain.agents.agent_types import AgentType
-from langchain.memory import ConversationBufferMemory
 
 nest_asyncio.apply()
 
-# ------------ Session Management (in-memory TTL 30min) ------------ #
-SESSION_TTL = 30 * 60
+# ——— Session Memory & TTL ———
 chat_sessions = {}
+SESSION_TTL = 30 * 60
+
 def create_session():
     cid = str(uuid.uuid4())
     chat_sessions[cid] = {"start": time.time(), "messages": []}
     return cid
 
-def add_msg(cid, role, text):
+def add_msg(cid, role, msg):
     if cid in chat_sessions:
-        chat_sessions[cid]["messages"].append({"role": role, "text": text})
+        chat_sessions[cid]["messages"].append({"role": role, "msg": msg})
+
+def get_history(cid):
+    return chat_sessions.get(cid, {}).get("messages", [])
 
 def cleanup_sessions():
     now = time.time()
-    expired = [cid for cid,data in chat_sessions.items() if now - data["start"] > SESSION_TTL]
-    for cid in expired:
-        del chat_sessions[cid]
+    for cid, ses in list(chat_sessions.items()):
+        if now - ses["start"] > SESSION_TTL:
+            del chat_sessions[cid]
 
-# ------------ OpenAI Client ------------ #
+# ——— LLM Setup ———
 def get_openai_client():
     return AzureChatOpenAI(
         azure_deployment="Fourth_Chatbot",
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         openai_api_version="2024-08-01-preview",
-        openai_api_key="",  # YOUR KEY
+        azure_openai_api_key="",  # YOUR KEY HERE
         temperature=0.3,
-        max_tokens=2000,
     )
 
-# ------------ Tool Infrastructure ------------ #
-sse_url = "https://.../sse"
+# ——— Tool Helpers ———
+sse_url = "https://mcp-server-sse-cg-employees-sandbox-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
 
 def sync_call(tool_name, params):
-    async def c():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as sess:
+    async def call():
+        async with sse_client(url=sse_url) as flows:
+            async with ClientSession(*flows) as sess:
                 await sess.initialize()
                 return await sess.call_tool(tool_name, params)
-    return asyncio.get_event_loop().run_until_complete(c())
+    return asyncio.get_event_loop().run_until_complete(call())
 
 def fetch_tools():
-    async def c():
-        async with sse_client(url=sse_url) as streams:
-            async with ClientSession(*streams) as sess:
+    async def call():
+        async with sse_client(url=sse_url) as flows:
+            async with ClientSession(*flows) as sess:
                 await sess.initialize()
                 return await sess.list_tools()
-    return asyncio.get_event_loop().run_until_complete(c())
+    return asyncio.get_event_loop().run_until_complete(call())
 
 def build_tools():
     raw = fetch_tools()
     tools = []
-    for t in getattr(raw, "tools", []):
-        name, schema = t.name, t.inputSchema or {}
-        req = schema.get("required", [])
 
-        def make_fn(n=name, req=req):
-            def fn(input_str: str) -> str:
-                data = json.loads(input_str) if input_str else {}
+    for t in getattr(raw, "tools", []):
+        name, schema = t.name, (t.inputSchema or {})
+        required = schema.get("required", [])
+        props = schema.get("properties", {})
+
+        def make_fn(n=name, req=required, props=props):
+            def fn(inp: str) -> str:
+                data = json.loads(inp or "{}")
                 for k in req:
                     data.setdefault(k, "")
-                resp = sync_call(n, data)
-                return json.dumps(resp, indent=2)
+                return json.dumps(sync_call(n, data), indent=2)
             return fn
 
-        tools.append(Tool(name=name, func=make_fn(),
-                          description=f"{t.description} | required: {req}", return_direct=False))
+        tools.append(Tool(
+            name=name,
+            func=make_fn(),
+            description=f"{t.description} | required: {required}",
+            return_direct=False
+        ))
     return tools
 
-# ------------ Table Utility ------------ #
-def to_table(data):
+# ——— Output Formatting ———
+def to_table(text: str):
     try:
-        j = json.loads(data)
-        df = pd.DataFrame(j) if isinstance(j, list) else pd.DataFrame([j])
+        d = json.loads(text)
+        df = pd.DataFrame(d) if isinstance(d, list) else pd.DataFrame([d])
         return df.to_string(index=False)
     except:
-        return data
+        return text
 
-# ------------ Agent Prompt ------------ #
+# ——— Custom Agent Prompt ———
 PROMPT = """
-You can create employees via CreateEmployee. Read its required inputSchema to request all fields. 
-Validate types, formats, then invoke once. Present response status in a small table (Status, Message).
+You have full schema for CreateEmployee. Build a correct CreateEmployee JSON payload from user text.
+Validate all required fields and types before calling. Present a single table with Status & Message.
 """
 
-# ------------ Build Agent ------------ #
+# ——— Build Agent ———
 def build_agent():
-    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
     agent = initialize_agent(
         tools=build_tools(),
         llm=get_openai_client(),
         agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-        memory=memory, verbose=True,
+        verbose=True,
         max_iterations=5,
+        handle_parsing_errors=True,
         agent_kwargs={"prefix": PROMPT}
     )
-    return agent, memory
+    return agent
 
-# ------------ CLI Loop ------------ #
-if __name__=="__main__":
+# ——— Main Loop ———
+if __name__ == "__main__":
     cid = create_session()
-    agent, mem = build_agent()
-    print("Session ID:", cid)
+    agent = build_agent()
+    print(f"Session ID: {cid}")
 
     while True:
         cleanup_sessions()
         q = input("> ").strip()
-        if q.lower() in ("exit","quit"):
+        if q.lower() in ("exit", "quit"):
             break
+
         add_msg(cid, "user", q)
+        hist = get_history(cid)
 
         if "chat history" in q.lower():
-            print("History:")
-            for m in mem.chat_memory.messages:
-                print(m.role, ":", m.content)
+            for m in hist:
+                print(f"{m['role']}: {m['msg']}")
             continue
 
-        resp = agent.invoke({"input": q})["output"]
-        add_msg(cid, "assistant", resp)
-        print(to_table(resp))
+        res = agent.invoke({"input": q})["output"]
+        print(to_table(res))
+        add_msg(cid, "assistant", res)
