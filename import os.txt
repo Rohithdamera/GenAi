@@ -1,16 +1,15 @@
+# MCPReActAzure/function_app.py
+
 import time
 import uuid
 import json
-import nest_asyncio
+import asyncio
 import pandas as pd
 from langchain.chat_models import AzureChatOpenAI
 from langchain.agents import Tool, initialize_agent
 from langchain.agents.agent_types import AgentType
 from mcp import ClientSession
 from mcp.client.sse import sse_client
-import asyncio
-
-nest_asyncio.apply()
 
 # ==== Chat Session Memory ====
 chat_sessions = {}
@@ -18,18 +17,12 @@ SESSION_TTL = 30 * 60  # 30 minutes
 
 def create_session():
     conversation_id = str(uuid.uuid4())
-    chat_sessions[conversation_id] = {
-        "created_at": time.time(),
-        "messages": []
-    }
+    chat_sessions[conversation_id] = {"created_at": time.time(), "messages": []}
     return conversation_id
 
 def add_message(conversation_id, role, content):
     if conversation_id in chat_sessions:
-        chat_sessions[conversation_id]["messages"].append({
-            "role": role,
-            "content": content
-        })
+        chat_sessions[conversation_id]["messages"].append({"role": role, "content": content})
 
 def get_history(conversation_id):
     return chat_sessions.get(conversation_id, {}).get("messages", [])
@@ -47,7 +40,7 @@ def get_openai_client():
         azure_deployment="Fourth_Chatbot",
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         openai_api_version="2024-08-01-preview",
-        openai_api_key="",  # Provide securely
+        openai_api_key="",  # Provide securely via Azure Key Vault or environment
         temperature=0.3,
         max_tokens=2000,
     )
@@ -147,36 +140,77 @@ def build_agent():
         agent_kwargs={"prefix": CUSTOM_PREFIX}
     )
 
-# ==== CLI ====
-if __name__ == "__main__":
-    print("=== MCP ReAct Agent (Session Memory with TTL) ===")
-    conversation_id = create_session()
+# ==== Azure Function Endpoint ====
+def run_agent_on_query(query, conversation_id=None):
+    if not conversation_id:
+        conversation_id = create_session()
+    cleanup_expired_sessions()
     agent = build_agent()
 
-    print(f"[Session ID: {conversation_id}]")
+    result = agent.invoke({"input": query})
+    output = result["output"]
 
-    while True:
-        cleanup_expired_sessions()
-        query = input("\nYour question: ").strip()
-        if query.lower() in ("exit", "quit"):
-            print(f"[Session {conversation_id}] closed.")
-            break
+    add_message(conversation_id, "user", query)
+    add_message(conversation_id, "assistant", output)
 
-        if "chat history" in query.lower():
-            print("\n[Chat History]\n")
-            history = get_history(conversation_id)
-            for i, item in enumerate(history, 1):
-                print(f"{i}. {item['role'].capitalize()}: {item['content']}")
-            continue
+    return conversation_id, render_output_as_table(output)
 
-        try:
-            result = agent.invoke({"input": query})
-            final_output = result["output"]
-            print("\nAnswer:\n")
-            print(render_output_as_table(final_output))
 
-            add_message(conversation_id, "user", query)
-            add_message(conversation_id, "assistant", final_output)
 
-        except Exception as e:
-            print("Error:", str(e))
+
+
+
+--------------------------------------------------
+
+
+
+# MCPReActAzure/__init__.py
+
+import logging
+import azure.functions as func
+import json
+from .function_app import run_agent_on_query
+
+def main(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("Processing MCP ReAct query")
+
+    try:
+        body = req.get_json()
+        query = body.get("query", "")
+        cid = body.get("conversation_id", None)
+
+        if not query:
+            return func.HttpResponse("Missing query", status_code=400)
+
+        conv_id, output = run_agent_on_query(query, cid)
+
+        return func.HttpResponse(
+            json.dumps({
+                "conversation_id": conv_id,
+                "output": output
+            }),
+            mimetype="application/json",
+            status_code=200
+        )
+
+    except Exception as e:
+        logging.error(f"Error: {str(e)}")
+        return func.HttpResponse(f"Server error: {str(e)}", status_code=500)
+
+
+
+---------------------------------------
+
+
+azure-functions==1.18.0
+nest_asyncio==1.6.0
+pandas==2.2.2
+langchain==0.1.20
+openai==1.25.1
+tqdm==4.66.4
+aiohttp==3.9.5
+typing-extensions==4.12.1
+mcp==0.1.4  # Replace with actual version you're using
+
+
+
