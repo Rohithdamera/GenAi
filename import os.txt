@@ -12,26 +12,33 @@ import asyncio
 
 nest_asyncio.apply()
 
-# ==== Session Management ====
+# ==== Chat Session Memory ====
 chat_sessions = {}
 SESSION_TTL = 30 * 60  # 30 minutes
 
 def create_session():
-    cid = str(uuid.uuid4())
-    chat_sessions[cid] = {"created_at": time.time(), "messages": []}
-    return cid
+    conversation_id = str(uuid.uuid4())
+    chat_sessions[conversation_id] = {
+        "created_at": time.time(),
+        "messages": []
+    }
+    return conversation_id
 
-def add_message(cid, role, content):
-    if cid in chat_sessions:
-        chat_sessions[cid]["messages"].append({"role": role, "content": content})
+def add_message(conversation_id, role, content):
+    if conversation_id in chat_sessions:
+        chat_sessions[conversation_id]["messages"].append({
+            "role": role,
+            "content": content
+        })
 
-def get_history(cid):
-    return chat_sessions.get(cid, {}).get("messages", [])
+def get_history(conversation_id):
+    return chat_sessions.get(conversation_id, {}).get("messages", [])
 
 def cleanup_expired_sessions():
-    now = time.time()
-    expired = [cid for cid, s in chat_sessions.items() if now - s["created_at"] > SESSION_TTL]
-    for cid in expired:
+    current_time = time.time()
+    expired_ids = [cid for cid, s in chat_sessions.items()
+                   if current_time - s["created_at"] > SESSION_TTL]
+    for cid in expired_ids:
         del chat_sessions[cid]
 
 # ==== Azure OpenAI Setup ====
@@ -40,15 +47,15 @@ def get_openai_client():
         azure_deployment="Fourth_Chatbot",
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         openai_api_version="2024-08-01-preview",
-        openai_api_key="",  # <-- Add securely
+        openai_api_key="",  # Provide securely
         temperature=0.3,
         max_tokens=2000,
     )
 
-# ==== SSE Tooling ====
+# ==== Tool Setup ====
 sse_url = "https://mcp-server-sse-cg-employees-sandbox-6b0n6.dw4w1g-2.gbr-e1.cloudhub.io/sse"
 
-def sync_call(tool_name: str, params: dict):
+def sync_call_tool(tool_name: str, params: dict):
     async def call():
         async with sse_client(url=sse_url) as streams:
             async with ClientSession(*streams) as session:
@@ -64,25 +71,24 @@ def fetch_all_tools():
                 return await session.list_tools()
     return asyncio.get_event_loop().run_until_complete(fetch())
 
-# ==== Tool Factory ====
 def get_tools():
     raw = fetch_all_tools()
     tools = []
 
     for t in getattr(raw, "tools", []):
         name = t.name
-        schema = t.inputSchema or {}
-        required = schema.get("required", [])
-        props = schema.get("properties", {})
+        required_fields = t.inputSchema.get("required", []) if t.inputSchema else []
 
-        def make_func(tool_name=name):
+        def make_func(tool_name=name, req=required_fields):
             def fn(input_str: str) -> str:
                 try:
                     parsed = json.loads(input_str) if input_str else {}
-
-                    # Remove hardcoded coercion: agent is now fully responsible
-                    result = sync_call(tool_name, parsed)
-
+                except:
+                    parsed = {}
+                for key in req:
+                    parsed.setdefault(key, "")
+                try:
+                    result = sync_call_tool(tool_name, parsed)
                     return json.dumps(result, indent=2, default=str)
                 except Exception as e:
                     return f"[ERROR] {tool_name}: {str(e)}"
@@ -92,13 +98,14 @@ def get_tools():
             Tool(
                 name=name,
                 func=make_func(),
-                description=f"{t.description or ''} Required fields: {required}. Schema: {json.dumps(props)}",
+                description=f"{t.description or ''} Required fields: {required_fields}",
                 return_direct=False,
             )
         )
+
     return tools
 
-# ==== Output Formatter ====
+# ==== Output Renderer ====
 def render_output_as_table(output_text: str):
     try:
         data = json.loads(output_text)
@@ -114,20 +121,19 @@ def render_output_as_table(output_text: str):
 
 # ==== Custom Prompt ====
 CUSTOM_PREFIX = """
-You are a smart assistant working with employee data using structured tools. Use the schema and required fields in each tool's description to properly form input.
+You are an intelligent support agent with access to multiple tools containing employee, project, and organizational data.
 
 Your responsibilities:
-- Identify all required fields by reading the tool's schema and required array.
-- If any required fields are missing from the user input, intelligently infer or ask about them.
-- Convert values to correct types: e.g., numbers for experience years.
-- Never hardcode assumptions. Always reason from the tool's schema and the user prompt.
-- When using CreateEmployee, ensure all required fields are passed, even if defaulted reasonably.
-- Return all results as clean tabular output, no markdown or emojis.
 
-You're allowed to retry tools if the initial call fails due to formatting or missing data.
+- Always check all tools for relevant data before concluding that something is not found.
+- If a tool returns partial information (like employee ID), use that to search in other tools.
+- If names are misspelled or abbreviated (e.g., HYD for Hyderabad, benguluru for Bangalore), still attempt to resolve them using available data across all tools.
+- Present the final answer in a table format only, with no emojis or markdown.
+- Always attempt a multi-hop reasoning process until an accurate and complete answer is found.
+- Never stop after a single failed attempt unless all tools are tried.
 """
 
-# ==== Agent Builder ====
+# ==== Build Agent ====
 def build_agent():
     tools = get_tools()
     llm = get_openai_client()
@@ -143,23 +149,24 @@ def build_agent():
 
 # ==== CLI ====
 if __name__ == "__main__":
-    print("=== MCP ReAct Agent (Schema-Driven, No Hardcoding) ===")
-    cid = create_session()
+    print("=== MCP ReAct Agent (Session Memory with TTL) ===")
+    conversation_id = create_session()
     agent = build_agent()
 
-    print(f"[Session ID: {cid}]")
+    print(f"[Session ID: {conversation_id}]")
 
     while True:
         cleanup_expired_sessions()
         query = input("\nYour question: ").strip()
         if query.lower() in ("exit", "quit"):
-            print(f"[Session {cid}] closed.")
+            print(f"[Session {conversation_id}] closed.")
             break
 
         if "chat history" in query.lower():
             print("\n[Chat History]\n")
-            for i, m in enumerate(get_history(cid), 1):
-                print(f"{i}. {m['role'].capitalize()}: {m['content']}")
+            history = get_history(conversation_id)
+            for i, item in enumerate(history, 1):
+                print(f"{i}. {item['role'].capitalize()}: {item['content']}")
             continue
 
         try:
@@ -168,8 +175,8 @@ if __name__ == "__main__":
             print("\nAnswer:\n")
             print(render_output_as_table(final_output))
 
-            add_message(cid, "user", query)
-            add_message(cid, "assistant", final_output)
+            add_message(conversation_id, "user", query)
+            add_message(conversation_id, "assistant", final_output)
 
         except Exception as e:
             print("Error:", str(e))
