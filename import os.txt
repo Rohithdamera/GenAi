@@ -207,3 +207,42 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
             status_code=500,
             mimetype="application/json"
         )
+
+
+
+
+---------------------------------------------
+
+
+{
+  "bindings": [
+    {
+      "authLevel": "function",
+      "type": "httpTrigger",
+      "direction": "in",
+      "name": "req",
+      "methods": ["post"],
+      "route": "employee"
+    },
+    {
+      "type": "http",
+      "direction": "out",
+      "name": "$return"
+    }
+  ]
+}
+
+
+
+
+----------------------------------------------------------
+
+
+azure-functions==1.17.0
+nest_asyncio==1.6.0
+pandas==2.2.2
+langchain==0.1.16
+openai==1.30.1
+pycryptodome==3.20.0
+mcp==10.10.1  
+
