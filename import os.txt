@@ -1,68 +1,275 @@
-import React, { useState } from 'react';
-import axios from 'axios';
+import os
+import json
+import logging
+from base64 import b64decode
+from Crypto.Cipher import AES
+from langchain_community.chat_models import AzureChatOpenAI
+from langchain.schema import HumanMessage, SystemMessage
 
-const Landingpage = () => {
-  const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState('');
+logging.basicConfig(level=logging.INFO)
 
-  const handleSend = async () => {
-    if (!input.trim()) return;
+def unpad(data):
+    padding_length = data[-1]
+    return data[:-padding_length]
 
-    const userMessage = { sender: 'user', text: input };
-    setMessages(prev => [...prev, userMessage]);
+def decrypt(data, key):
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)
+    decrypted_data = cipher.decrypt(b64decode(data))
+    return unpad(decrypted_data).decode()
 
-    try {
-      const response = await axios.post(
-        'https://6i94qka2ml.execute-api.us-east-1.amazonaws.com/prod/Mcp_Server',
-        { query: input },  // ensure body is JSON
+def get_openai_client(model_instance_name):
+    try:
+        aes_key_base64 = os.environ['AES_KEY']
+        encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+        encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+        api_version = os.environ['AZURE_API_VERSION']
 
-        {
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          withCredentials: false  // important: avoid unnecessary cookies, prevent CORS conflicts
-        }
-      );
+        decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+        decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
 
-      const botMessage = {
-        sender: 'bot',
-        text: response.data.answer || response.data.response || 'No response from server.',
-      };
+        if not decrypted_api_base.endswith('/'):
+            decrypted_api_base += '/'
 
-      setMessages(prev => [...prev, botMessage]);
-    } catch (error) {
-      const errorMessage = {
-        sender: 'bot',
-        text: 'Error fetching response from server.',
-      };
-      setMessages(prev => [...prev, errorMessage]);
-      console.error('API Error:', error);
+        return AzureChatOpenAI(
+            deployment_name=model_instance_name,
+            openai_api_base=decrypted_api_base,
+            openai_api_key=decrypted_api_key,
+            openai_api_version=api_version,
+            temperature=0.0,
+            max_tokens=4096,
+            model_kwargs={"top_p": 0.95, "frequency_penalty": 0, "presence_penalty": 0}
+        )
+    except Exception as e:
+        logging.error(f"Error initializing OpenAI client: {e}")
+        raise ValueError(f"Error initializing OpenAI client: {e}")
+
+def generate_script(client, file_content, agent_name):
+    conversion_prompt = {
+        "xslt_to_Ruby": (
+            "Convert the given XSLT into a Ruby script.\n"
+            "The output should be a single, continuous Ruby script — not an array, not JSON, and not wrapped in markdown.\n"
+            "Use inline XML (not file input), and use string concatenation to build the output XML.\n"
+            "Ensure the code is well-formatted with proper indentation and blank lines for readability.\n"
+            "The final output should look like a real Ruby script, line by line, just like a developer would write it in a .rb file.\n"
+            "It should have return statement and also the response should be a compatible Workato Ruby snippet.\n"
+        ),
+        "xslt_to_Python": (
+            "Convert the given XSLT into a Python script.\n"
+            "The script must include a `main(xml_string)` function that demonstrates usage with example XML input.\n"
+            "Use `xml.etree.ElementTree` for XML parsing.\n"
+            "Ensure the output is returned as a list of strings, where each string is a single line of code.\n"
+            "Do not include any markdown formatting or language annotations like ```python.\n"
+            "Each line should be syntactically correct and properly indented.\n"
+            "It should have return statement and also the response should be a compatible Workato Python snippet.\n"
+        ),
+        "xslt_to_JavaScript": (
+            "Convert the given XSLT into a JavaScript script.\n"
+            "Ensure proper formatting, indentation, and line breaks for readability.\n"
+            "Return the code line by line, avoiding any markdown annotations like ```javascript.\n"
+            "It should have return statement and also the response should be a compatible Workato JavaScript snippet.\n"
+        ),
+        "xml_to_groovy": (
+            "Convert the given XML into a Groovy script.\n"
+            "Ensure the output is a valid Workato Groovy snippet with proper formatting and a return statement.\n"
+        ),
+        "xml_to_mapxml": (
+            "Convert the given XML into a Workato-compatible MapXML format.\n"
+            "The output should be a raw XML string that follows the MapXML schema used in Workato's mapping tools.\n"
+            "Do not hardcode any values like profile IDs or keys — instead, use placeholders or dynamically infer them from the input XML.\n"
+            "Ensure the structure includes:\n"
+            "- A root <Map> element with attributes like fromProfile and toProfile (use placeholder UUIDs if not provided).\n"
+            "- A <Mappings> section with one or more <Mapping> elements.\n"
+            "- Each <Mapping> must include only attributes: fromKey, fromKeyPath, toKey, toKeyPath, toType.\n"
+            "- Do not include any child elements inside <Mapping>. It must be a self-closing tag with only attributes.\n"
+            "- The toType attribute should describe semantic targets like 'profile', not data types like 'string'.\n"
+            "- Also include <Functions optimizeExecutionOrder=\"true\"/>, <Defaults/>, and <DocumentCacheJoins/> as sibling sections in the <Map>.\n"
+            "Avoid markdown formatting and return only the raw XML content.\n"
+        ),
+        "dwl_to_xslt": (
+            "Convert the given DataWeave (DWL) script into an equivalent XSLT transformation.\n"
+            "Analyze the DWL logic thoroughly, including data mappings, conditionals, loops, and functions. \n"
+            "Use appropriate XSLT constructs such as <xsl:template>, <xsl:value-of>, <xsl:for-each>, <xsl:if>, and <xsl:choose> to replicate the logic.\n"
+            "Ensure the XSLT includes a valid <xsl:stylesheet> root element with correct version and namespace declarations. \n"
+            "Structure the XSLT with proper templates and match rules to handle the input XML structure. \n"
+            "Format the XSLT code cleanly with proper indentation and syntax.\n"
+            "Ensure compatibility with standard XSLT processors (e.g., Saxon, Xalan). \n"
+            "Return only the raw XSLT code—no markdown, comments, or explanations. \n"
+            "Do not use vendor-specific extensions unless absolutely necessary.\n"
+            "The output should be ready for use in real-world XML transformation tasks. \n"
+        ),
+        "dwl_to_xml": (
+            "Convert the given DataWeave (DWL) script into its equivalent XML output.\n"
+            "Assume the DWL script is transforming data into XML format.\n"
+            "Parse the DWL logic and generate the resulting XML structure as it would appear after execution.\n"
+            "Use placeholder values where necessary, and ensure the XML is well-formed and properly indented.\n"
+            "Return only the raw XML output — no markdown, no comments, and no explanations.\n"
+            "The output should be suitable for use in XML-based integrations or testing.\n"
+        ),
+        
+        "xslt_to_dwl": (
+             "the first line should always be '%dw 2.0'.\n"
+             "Convert the given XSLT into an equivalent DataWeave (DWL) script.\n"
+             "Thoroughly analyze the XSLT logic, including:\n"
+             "- Variable declarations and usage\n"
+             "- Data mappings and field extraction\n"
+             "- Conditional logic and optional fields\n"
+             "- Iteration over collections\n"
+             "- URL construction and string concatenation\n"
+             "\n"
+             "Use idiomatic DWL constructs such as:\n"
+             "- `using` blocks for scoped variables\n"
+             "- `map`, `if`, `when`, `otherwise` for logic\n"
+             "- `trim`, `++`, and other DWL functions where appropriate\n"
+             "\n"
+             "Ensure the DWL script:\n"
+             "- Starts with `output application/json` followed by `---`\n"
+             "- Declares all static variables at the top using `var`\n"
+             "- Uses `using` to scope dynamic variables like `pageSize`\n"
+             "- Avoids unnecessary namespace prefixes (e.g., `ns0#`, `*ns1::`)\n"
+             "- Uses clean field access like `payload.getItemsResponse.PageInfo.pageSize`\n"
+             "-Includes a conditional `prev` link block using `if(pageIndex > 0)` with correct URL construction\n"
+             "- Uses `if(...)` and `(...) when` for optional fields\n"
+             "- Outputs valid DWL 2.0 syntax with `output application/json`\n"
+             "- Matches the transformation logic and output structure of the original XSLT\n"
+             "\n"
+             "Do not include markdown, comments, or extra annotations. Output only the DWL script."
+        ),
+        
     }
 
-    setInput('');
-  };
+    prompt = conversion_prompt.get(agent_name,
+        "Convert the given input into a structured script.\n"
+        "Ensure proper indentation and line breaks.\n"
+        "Do not add any programming language annotations like ```python, ```ruby, or ```javascript.\n"
+        "It should have a return statement and also the response should be a compatible Workato JavaScript/Python/Ruby snippet.\n"
+    )
 
-  return (
-    <div className="chat-container">
-      <div className="chat-window">
-        {messages.map((msg, idx) => (
-          <div key={idx} className={`message ${msg.sender}`}>
-            {msg.text}
-          </div>
-        ))}
-      </div>
-      <div className="input-area">
-        <input
-          type="text"
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && handleSend()}
-          placeholder="Ask me anything..."
-        />
-        <button onClick={handleSend}>Send</button>
-      </div>
-    </div>
-  );
-};
+    response = client.invoke([
+        SystemMessage(content=prompt),
+        HumanMessage(content=file_content)
+    ])
 
-export default Landingpage;
+    return response.content.strip()
+
+def lambda_handler(event, context):
+    try:
+        if 'body' not in event or not event['body']:
+            raise ValueError("Missing or empty request body.")
+
+        headers = event.get('headers', {})
+        model_instance_name = headers.get('model_instance_name', 'Default_Model')
+        query_params = event.get('queryStringParameters', {})
+
+        agent_name_param = query_params.get('Agent_name', '')
+
+        agent_names = [name.strip() for name in agent_name_param.split(',') if name.strip()]
+        if len(agent_names) != 1:
+            raise ValueError("Exactly one Agent_name must be provided in query parameters.")
+
+        agent_name = agent_names[0]
+
+        if event.get('isBase64Encoded', False):
+            file_content = b64decode(event['body']).decode('utf-8')
+        else:
+            file_content = event['body']
+
+        client = get_openai_client(model_instance_name)
+        processed_result = generate_script(client, file_content, agent_name)
+
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "text/plain"},
+            "body": processed_result
+        }
+    except Exception as e:
+        logging.error(f"An error occurred: {e}")
+        return {
+            "statusCode": 400,
+            "body": json.dumps({"error": str(e)})
+        }
+
+
+
+
+
+
+
+ "xslt_to_dwl": (
+             "the first line should always be '%dw 2.0'.\n"
+             "Convert the given XSLT into an equivalent DataWeave (DWL) script.\n"
+             "Thoroughly analyze the XSLT logic, including:\n"
+             "- Variable declarations and usage\n"
+             "- Data mappings and field extraction\n"
+             "- Conditional logic and optional fields\n"
+             "- Iteration over collections\n"
+             "- URL construction and string concatenation\n"
+             "\n"
+             "Use idiomatic DWL constructs such as:\n"
+             "- `using` blocks for scoped variables\n"
+             "- `map`, `if`, `when`, `otherwise` for logic\n"
+             "- `trim`, `++`, and other DWL functions where appropriate\n"
+             "\n"
+             "Ensure the DWL script:\n"
+             "- Starts with `output application/json` followed by `---`\n"
+             "- Declares all static variables at the top using `var`\n"
+             "- Uses `using` to scope dynamic variables like `pageSize`\n"
+             "- Avoids unnecessary namespace prefixes (e.g., `ns0#`, `*ns1::`)\n"
+             "- Uses clean field access like `payload.getItemsResponse.PageInfo.pageSize`\n"
+             "-Includes a conditional `prev` link block using `if(pageIndex > 0)` with correct URL construction\n"
+             "- Uses `if(...)` and `(...) when` for optional fields\n"
+             "- Outputs valid DWL 2.0 syntax with `output application/json`\n"
+             "- Matches the transformation logic and output structure of the original XSLT\n"
+             "\n"
+             "Do not include markdown, comments, or extra annotations. Output only the DWL script."
+        ),
+        
+    }
+
+
+
+
+
+
+
+but i want this dwl:
+%dw 2.0
+var baseUrl = "http://alainn-cosmetics.cloudhub.io/api/v1.0"
+var urlPage = "http://alainn-cosmetics.cloudhub.io/api/v1.0/items"
+var fullUrl = "http://alainn-cosmetics.cloudhub.io/api/v1.0/items"
+var pageIndex = 0
+var requestedPageSize = 4
+output application/json
+---
+using (pageSize = payload.getItemsResponse.PageInfo.pageSize) {
+     links: [
+        {
+            href: fullUrl,
+            rel : "self"
+        },
+        {
+            href: urlPage ++ "?pageIndex=" ++ (pageIndex + pageSize) ++ "&pageSize=" ++ requestedPageSize,
+            rel: "next"
+        },
+        ({
+            href: urlPage ++ "?pageIndex=" ++ (pageIndex - pageSize) ++ "&pageSize=" ++ requestedPageSize,
+            rel: "prev"
+        }) if(pageIndex > 0)
+     ],
+     collection: {
+        size: pageSize,
+        items: payload.getItemsResponse.*Item map (item) -> {
+            id: item.id,
+            'type': item.'type',
+            name: item.name,
+            (summary: item.summary) if(item.summary?),
+            (brand: item.brand) if(item.brand?),
+            links: (item.images.*image map (image) -> {
+                href: trim(image),
+                rel: image.@'type'
+            }) + {
+                href: baseUrl ++ "/" ++ item.id,
+                rel: "self"
+            }
+        }
+     }
+}
