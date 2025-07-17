@@ -9,27 +9,34 @@ const Landingpage = () => {
     if (!input.trim()) return;
 
     const userMessage = { sender: 'user', text: input };
-    setMessages([...messages, userMessage]);
+    setMessages(prev => [...prev, userMessage]);
 
     try {
       const response = await axios.post(
         'https://6i94qka2ml.execute-api.us-east-1.amazonaws.com/prod/Mcp_Server',
-        { query: input }, // plain JSON body
+        { query: input },  // ensure body is JSON
+
         {
           headers: {
-            'Content-Type': 'application/json', // required for CORS preflight
+            'Content-Type': 'application/json',
           },
+          withCredentials: false  // important: avoid unnecessary cookies, prevent CORS conflicts
         }
       );
 
       const botMessage = {
         sender: 'bot',
-        text: response.data.answer || response.data.response || 'No response',
+        text: response.data.answer || response.data.response || 'No response from server.',
       };
+
       setMessages(prev => [...prev, botMessage]);
     } catch (error) {
-      const errorMessage = { sender: 'bot', text: 'Error fetching response' };
+      const errorMessage = {
+        sender: 'bot',
+        text: 'Error fetching response from server.',
+      };
       setMessages(prev => [...prev, errorMessage]);
+      console.error('API Error:', error);
     }
 
     setInput('');
