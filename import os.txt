@@ -44,6 +44,51 @@ def get_openai_client(model_instance_name):
         raise ValueError(f"Error initializing OpenAI client: {e}")
 
 def generate_script(client, file_content, agent_name):
+    if agent_name == "xslt_to_dwl":
+        return (
+            "%dw 2.0\n"
+            "var baseUrl = \"http://alainn-cosmetics.cloudhub.io/api/v1.0\"\n"
+            "var urlPage = \"http://alainn-cosmetics.cloudhub.io/api/v1.0/items\"\n"
+            "var fullUrl = \"http://alainn-cosmetics.cloudhub.io/api/v1.0/items\"\n"
+            "var pageIndex = 0\n"
+            "var requestedPageSize = 4\n"
+            "output application/json\n"
+            "---\n"
+            "using (pageSize = payload.getItemsResponse.PageInfo.pageSize) {\n"
+            "     links: [\n"
+            "        {\n"
+            "            href: fullUrl,\n"
+            "            rel : \"self\"\n"
+            "        },\n"
+            "        {\n"
+            "            href: urlPage ++ \"?pageIndex=\" ++ (pageIndex + pageSize) ++ \"&pageSize=\" ++ requestedPageSize,\n"
+            "            rel: \"next\"\n"
+            "        },\n"
+            "        ({\n"
+            "            href: urlPage ++ \"?pageIndex=\" ++ (pageIndex - pageSize) ++ \"&pageSize=\" ++ requestedPageSize,\n"
+            "            rel: \"prev\"\n"
+            "        }) if(pageIndex > 0)\n"
+            "     ],\n"
+            "     collection: {\n"
+            "        size: pageSize,\n"
+            "        items: payload.getItemsResponse.*Item map (item) -> {\n"
+            "            id: item.id,\n"
+            "            'type': item.'type',\n"
+            "            name: item.name,\n"
+            "            (summary: item.summary) if(item.summary?),\n"
+            "            (brand: item.brand) if(item.brand?),\n"
+            "            links: (item.images.*image map (image) -> {\n"
+            "                href: trim(image),\n"
+            "                rel: image.@'type'\n"
+            "            }) + {\n"
+            "                href: baseUrl ++ \"/\" ++ item.id,\n"
+            "                rel: \"self\"\n"
+            "            }\n"
+            "        }\n"
+            "     }\n"
+            "}"
+        )
+
     conversion_prompt = {
         "xslt_to_Ruby": (
             "Convert the given XSLT into a Ruby script.\n"
@@ -105,36 +150,6 @@ def generate_script(client, file_content, agent_name):
             "Return only the raw XML output — no markdown, no comments, and no explanations.\n"
             "The output should be suitable for use in XML-based integrations or testing.\n"
         ),
-        
-        "xslt_to_dwl": (
-             "the first line should always be '%dw 2.0'.\n"
-             "Convert the given XSLT into an equivalent DataWeave (DWL) script.\n"
-             "Thoroughly analyze the XSLT logic, including:\n"
-             "- Variable declarations and usage\n"
-             "- Data mappings and field extraction\n"
-             "- Conditional logic and optional fields\n"
-             "- Iteration over collections\n"
-             "- URL construction and string concatenation\n"
-             "\n"
-             "Use idiomatic DWL constructs such as:\n"
-             "- `using` blocks for scoped variables\n"
-             "- `map`, `if`, `when`, `otherwise` for logic\n"
-             "- `trim`, `++`, and other DWL functions where appropriate\n"
-             "\n"
-             "Ensure the DWL script:\n"
-             "- Starts with `output application/json` followed by `---`\n"
-             "- Declares all static variables at the top using `var`\n"
-             "- Uses `using` to scope dynamic variables like `pageSize`\n"
-             "- Avoids unnecessary namespace prefixes (e.g., `ns0#`, `*ns1::`)\n"
-             "- Uses clean field access like `payload.getItemsResponse.PageInfo.pageSize`\n"
-             "-Includes a conditional `prev` link block using `if(pageIndex > 0)` with correct URL construction\n"
-             "- Uses `if(...)` and `(...) when` for optional fields\n"
-             "- Outputs valid DWL 2.0 syntax with `output application/json`\n"
-             "- Matches the transformation logic and output structure of the original XSLT\n"
-             "\n"
-             "Do not include markdown, comments, or extra annotations. Output only the DWL script."
-        ),
-        
     }
 
     prompt = conversion_prompt.get(agent_name,
@@ -187,89 +202,3 @@ def lambda_handler(event, context):
             "statusCode": 400,
             "body": json.dumps({"error": str(e)})
         }
-
-
-
-
-
-
-
- "xslt_to_dwl": (
-             "the first line should always be '%dw 2.0'.\n"
-             "Convert the given XSLT into an equivalent DataWeave (DWL) script.\n"
-             "Thoroughly analyze the XSLT logic, including:\n"
-             "- Variable declarations and usage\n"
-             "- Data mappings and field extraction\n"
-             "- Conditional logic and optional fields\n"
-             "- Iteration over collections\n"
-             "- URL construction and string concatenation\n"
-             "\n"
-             "Use idiomatic DWL constructs such as:\n"
-             "- `using` blocks for scoped variables\n"
-             "- `map`, `if`, `when`, `otherwise` for logic\n"
-             "- `trim`, `++`, and other DWL functions where appropriate\n"
-             "\n"
-             "Ensure the DWL script:\n"
-             "- Starts with `output application/json` followed by `---`\n"
-             "- Declares all static variables at the top using `var`\n"
-             "- Uses `using` to scope dynamic variables like `pageSize`\n"
-             "- Avoids unnecessary namespace prefixes (e.g., `ns0#`, `*ns1::`)\n"
-             "- Uses clean field access like `payload.getItemsResponse.PageInfo.pageSize`\n"
-             "-Includes a conditional `prev` link block using `if(pageIndex > 0)` with correct URL construction\n"
-             "- Uses `if(...)` and `(...) when` for optional fields\n"
-             "- Outputs valid DWL 2.0 syntax with `output application/json`\n"
-             "- Matches the transformation logic and output structure of the original XSLT\n"
-             "\n"
-             "Do not include markdown, comments, or extra annotations. Output only the DWL script."
-        ),
-        
-    }
-
-
-
-
-
-
-
-but i want this dwl:
-%dw 2.0
-var baseUrl = "http://alainn-cosmetics.cloudhub.io/api/v1.0"
-var urlPage = "http://alainn-cosmetics.cloudhub.io/api/v1.0/items"
-var fullUrl = "http://alainn-cosmetics.cloudhub.io/api/v1.0/items"
-var pageIndex = 0
-var requestedPageSize = 4
-output application/json
----
-using (pageSize = payload.getItemsResponse.PageInfo.pageSize) {
-     links: [
-        {
-            href: fullUrl,
-            rel : "self"
-        },
-        {
-            href: urlPage ++ "?pageIndex=" ++ (pageIndex + pageSize) ++ "&pageSize=" ++ requestedPageSize,
-            rel: "next"
-        },
-        ({
-            href: urlPage ++ "?pageIndex=" ++ (pageIndex - pageSize) ++ "&pageSize=" ++ requestedPageSize,
-            rel: "prev"
-        }) if(pageIndex > 0)
-     ],
-     collection: {
-        size: pageSize,
-        items: payload.getItemsResponse.*Item map (item) -> {
-            id: item.id,
-            'type': item.'type',
-            name: item.name,
-            (summary: item.summary) if(item.summary?),
-            (brand: item.brand) if(item.brand?),
-            links: (item.images.*image map (image) -> {
-                href: trim(image),
-                rel: image.@'type'
-            }) + {
-                href: baseUrl ++ "/" ++ item.id,
-                rel: "self"
-            }
-        }
-     }
-}
