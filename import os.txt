@@ -1,204 +1,157 @@
-import os
-import json
-import logging
-from base64 import b64decode
-from Crypto.Cipher import AES
-from langchain_community.chat_models import AzureChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage
+	
 
-logging.basicConfig(level=logging.INFO)
+i had employee microservice, , all the crud operations are done , now i want to call that microservice with another admin microservice using resttemplate declare all the implementations like entity , dto, mapper, service , service impl , and controller and also i want to use circuit breaker and cache
 
-def unpad(data):
-    padding_length = data[-1]
-    return data[:-padding_length]
+ @Id
+	@GeneratedValue(strategy = GenerationType.IDENTITY)
+	private long id;
+	
+	//@JsonProperty("firstname")
+	@Column(name ="Firstname")
+	private String firstname;
+	@Column(name ="Lastname")
+	private String lastname;
+	@Column(name ="Email")
+	private String email;
+	@Column(name ="Gender")
+	private String gender;
+	@Column(name ="Age")
+	private int age ;
+	
 
-def decrypt(data, key):
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted_data = cipher.decrypt(b64decode(data))
-    return unpad(decrypted_data).decode()
 
-def get_openai_client(model_instance_name):
-    try:
-        aes_key_base64 = os.environ['AES_KEY']
-        encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-        encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-        api_version = os.environ['AZURE_API_VERSION']
+dto 
 
-        decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-        decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+public class EmployeeDto {
+	
+    private long id;
+	private String firstname;
+	private String lastname;
+	private String email;
+	private String gender;
+	private int age ;
+	public long getId() {
+		return id;
 
-        if not decrypted_api_base.endswith('/'):
-            decrypted_api_base += '/'
 
-        return AzureChatOpenAI(
-            deployment_name=model_instance_name,
-            openai_api_base=decrypted_api_base,
-            openai_api_key=decrypted_api_key,
-            openai_api_version=api_version,
-            temperature=0.0,
-            max_tokens=4096,
-            model_kwargs={"top_p": 0.95, "frequency_penalty": 0, "presence_penalty": 0}
-        )
-    except Exception as e:
-        logging.error(f"Error initializing OpenAI client: {e}")
-        raise ValueError(f"Error initializing OpenAI client: {e}")
 
-def generate_script(client, file_content, agent_name):
-    if agent_name == "xslt_to_dwl":
-        return (
-            "%dw 2.0\n"
-            "var baseUrl = \"http://alainn-cosmetics.cloudhub.io/api/v1.0\"\n"
-            "var urlPage = \"http://alainn-cosmetics.cloudhub.io/api/v1.0/items\"\n"
-            "var fullUrl = \"http://alainn-cosmetics.cloudhub.io/api/v1.0/items\"\n"
-            "var pageIndex = 0\n"
-            "var requestedPageSize = 4\n"
-            "output application/json\n"
-            "---\n"
-            "using (pageSize = payload.getItemsResponse.PageInfo.pageSize) {\n"
-            "     links: [\n"
-            "        {\n"
-            "            href: fullUrl,\n"
-            "            rel : \"self\"\n"
-            "        },\n"
-            "        {\n"
-            "            href: urlPage ++ \"?pageIndex=\" ++ (pageIndex + pageSize) ++ \"&pageSize=\" ++ requestedPageSize,\n"
-            "            rel: \"next\"\n"
-            "        },\n"
-            "        ({\n"
-            "            href: urlPage ++ \"?pageIndex=\" ++ (pageIndex - pageSize) ++ \"&pageSize=\" ++ requestedPageSize,\n"
-            "            rel: \"prev\"\n"
-            "        }) if(pageIndex > 0)\n"
-            "     ],\n"
-            "     collection: {\n"
-            "        size: pageSize,\n"
-            "        items: payload.getItemsResponse.*Item map (item) -> {\n"
-            "            id: item.id,\n"
-            "            'type': item.'type',\n"
-            "            name: item.name,\n"
-            "            (summary: item.summary) if(item.summary?),\n"
-            "            (brand: item.brand) if(item.brand?),\n"
-            "            links: (item.images.*image map (image) -> {\n"
-            "                href: trim(image),\n"
-            "                rel: image.@'type'\n"
-            "            }) + {\n"
-            "                href: baseUrl ++ \"/\" ++ item.id,\n"
-            "                rel: \"self\"\n"
-            "            }\n"
-            "        }\n"
-            "     }\n"
-            "}"
-        )
+mapper 
 
-    conversion_prompt = {
-        "xslt_to_Ruby": (
-            "Convert the given XSLT into a Ruby script.\n"
-            "The output should be a single, continuous Ruby script — not an array, not JSON, and not wrapped in markdown.\n"
-            "Use inline XML (not file input), and use string concatenation to build the output XML.\n"
-            "Ensure the code is well-formatted with proper indentation and blank lines for readability.\n"
-            "The final output should look like a real Ruby script, line by line, just like a developer would write it in a .rb file.\n"
-            "It should have return statement and also the response should be a compatible Workato Ruby snippet.\n"
-        ),
-        "xslt_to_Python": (
-            "Convert the given XSLT into a Python script.\n"
-            "The script must include a `main(xml_string)` function that demonstrates usage with example XML input.\n"
-            "Use `xml.etree.ElementTree` for XML parsing.\n"
-            "Ensure the output is returned as a list of strings, where each string is a single line of code.\n"
-            "Do not include any markdown formatting or language annotations like ```python.\n"
-            "Each line should be syntactically correct and properly indented.\n"
-            "It should have return statement and also the response should be a compatible Workato Python snippet.\n"
-        ),
-        "xslt_to_JavaScript": (
-            "Convert the given XSLT into a JavaScript script.\n"
-            "Ensure proper formatting, indentation, and line breaks for readability.\n"
-            "Return the code line by line, avoiding any markdown annotations like ```javascript.\n"
-            "It should have return statement and also the response should be a compatible Workato JavaScript snippet.\n"
-        ),
-        "xml_to_groovy": (
-            "Convert the given XML into a Groovy script.\n"
-            "Ensure the output is a valid Workato Groovy snippet with proper formatting and a return statement.\n"
-        ),
-        "xml_to_mapxml": (
-            "Convert the given XML into a Workato-compatible MapXML format.\n"
-            "The output should be a raw XML string that follows the MapXML schema used in Workato's mapping tools.\n"
-            "Do not hardcode any values like profile IDs or keys — instead, use placeholders or dynamically infer them from the input XML.\n"
-            "Ensure the structure includes:\n"
-            "- A root <Map> element with attributes like fromProfile and toProfile (use placeholder UUIDs if not provided).\n"
-            "- A <Mappings> section with one or more <Mapping> elements.\n"
-            "- Each <Mapping> must include only attributes: fromKey, fromKeyPath, toKey, toKeyPath, toType.\n"
-            "- Do not include any child elements inside <Mapping>. It must be a self-closing tag with only attributes.\n"
-            "- The toType attribute should describe semantic targets like 'profile', not data types like 'string'.\n"
-            "- Also include <Functions optimizeExecutionOrder=\"true\"/>, <Defaults/>, and <DocumentCacheJoins/> as sibling sections in the <Map>.\n"
-            "Avoid markdown formatting and return only the raw XML content.\n"
-        ),
-        "dwl_to_xslt": (
-            "Convert the given DataWeave (DWL) script into an equivalent XSLT transformation.\n"
-            "Analyze the DWL logic thoroughly, including data mappings, conditionals, loops, and functions. \n"
-            "Use appropriate XSLT constructs such as <xsl:template>, <xsl:value-of>, <xsl:for-each>, <xsl:if>, and <xsl:choose> to replicate the logic.\n"
-            "Ensure the XSLT includes a valid <xsl:stylesheet> root element with correct version and namespace declarations. \n"
-            "Structure the XSLT with proper templates and match rules to handle the input XML structure. \n"
-            "Format the XSLT code cleanly with proper indentation and syntax.\n"
-            "Ensure compatibility with standard XSLT processors (e.g., Saxon, Xalan). \n"
-            "Return only the raw XSLT code—no markdown, comments, or explanations. \n"
-            "Do not use vendor-specific extensions unless absolutely necessary.\n"
-            "The output should be ready for use in real-world XML transformation tasks. \n"
-        ),
-        "dwl_to_xml": (
-            "Convert the given DataWeave (DWL) script into its equivalent XML output.\n"
-            "Assume the DWL script is transforming data into XML format.\n"
-            "Parse the DWL logic and generate the resulting XML structure as it would appear after execution.\n"
-            "Use placeholder values where necessary, and ensure the XML is well-formed and properly indented.\n"
-            "Return only the raw XML output — no markdown, no comments, and no explanations.\n"
-            "The output should be suitable for use in XML-based integrations or testing.\n"
-        ),
-    }
 
-    prompt = conversion_prompt.get(agent_name,
-        "Convert the given input into a structured script.\n"
-        "Ensure proper indentation and line breaks.\n"
-        "Do not add any programming language annotations like ```python, ```ruby, or ```javascript.\n"
-        "It should have a return statement and also the response should be a compatible Workato JavaScript/Python/Ruby snippet.\n"
-    )
+	public static EmployeeDto mapToEmployeeDto(Employee employee) {
+		return new  EmployeeDto(
+				employee.getId(),
+				employee.getFirstname(),
+				employee.getLastname(),
+				employee.getEmail(),
+				employee.getGender(),
+				employee.getAge()
+				);
+		
+	}	
+	
+	public static Employee mapToEmployee(EmployeeDto  employeeDto)	{
+		return new Employee(
+				employeeDto.getId(),
+				employeeDto.getFirstname(),
+				employeeDto.getLastname(),
+				employeeDto.getEmail(),
+				employeeDto.getGender(),
+				employeeDto.getAge()
+				
+				);
 
-    response = client.invoke([
-        SystemMessage(content=prompt),
-        HumanMessage(content=file_content)
-    ])
+repository 
 
-    return response.content.strip()
 
-def lambda_handler(event, context):
-    try:
-        if 'body' not in event or not event['body']:
-            raise ValueError("Missing or empty request body.")
+public interface EmployeeRepository  extends JpaRepository<Employee,    Long>{
+	
+List<Employee> getByAge(int age);
 
-        headers = event.get('headers', {})
-        model_instance_name = headers.get('model_instance_name', 'Default_Model')
-        query_params = event.get('queryStringParameters', {})
+}
 
-        agent_name_param = query_params.get('Agent_name', '')
 
-        agent_names = [name.strip() for name in agent_name_param.split(',') if name.strip()]
-        if len(agent_names) != 1:
-            raise ValueError("Exactly one Agent_name must be provided in query parameters.")
+service 
 
-        agent_name = agent_names[0]
+package Employee.Management.BackenEnd.service;
 
-        if event.get('isBase64Encoded', False):
-            file_content = b64decode(event['body']).decode('utf-8')
-        else:
-            file_content = event['body']
 
-        client = get_openai_client(model_instance_name)
-        processed_result = generate_script(client, file_content, agent_name)
 
-        return {
-            "statusCode": 200,
-            "headers": {"Content-Type": "text/plain"},
-            "body": processed_result
-        }
-    except Exception as e:
-        logging.error(f"An error occurred: {e}")
-        return {
-            "statusCode": 400,
-            "body": json.dumps({"error": str(e)})
-        }
+import java.util.List;
+
+import Employee.Management.BackenEnd.dto.EmployeeDto;
+
+public interface EmployeeService {
+	
+	EmployeeDto createEmployee(EmployeeDto employeeDto);
+	
+	EmployeeDto getEmployeeByid(Long Employeeid);
+	
+	List<EmployeeDto> getAllEmployee();
+	
+	List<EmployeeDto> GetEmployeebyage (int age);
+	
+	EmployeeDto updateEmployee(Long Employeeid , EmployeeDto updatedEmployee);
+	
+	
+	void deleteEmployee (Long Employeeid);
+	
+
+}
+
+service impl 
+
+@Override
+	public EmployeeDto getEmployeeByid(Long Employeeid) {
+		Employee employee= employeerepository.findById(Employeeid)
+		.orElseThrow(() -> new ResourceNotFoundException ("employee not found with id no "+Employeeid));
+		return EmployeeMapper.mapToEmployeeDto(employee);
+	}
+
+	@Override
+	public List<EmployeeDto> getAllEmployee() {
+		List<Employee> employees =employeerepository.findAll();
+		//return employees.stream().map((employee)->EmployeeMapper.mapToEmployeeDto(employee)).collect(Collectors.toList());
+		return employees.stream().map(EmployeeMapper:: mapToEmployeeDto).collect(Collectors.toList());
+	}
+
+
+controller
+
+	@GetMapping("/age/{age}")
+	public ResponseEntity<List<EmployeeDto>>GetEmployeebyage(@PathVariable("age")int age ){
+		List<EmployeeDto> employeeDto= employeeService.GetEmployeebyage(age);
+			return new ResponseEntity<>(employeeDto, HttpStatus.OK);
+		
+	}
+	
+	@GetMapping("/all")
+	public ResponseEntity<List<EmployeeDto>> getAllEmployee(){
+		List<EmployeeDto> employee= employeeService.getAllEmployee();
+		return  ResponseEntity.ok(employee);
+	}
+
+
+
+
+
+
+the code need to follow this structure 
+
+
+admin-service/
+├── controller/
+│   └── AdminController.java
+├── dto/
+│   └── EmployeeDto.java
+├── mapper/
+│   └── EmployeeMapper.java
+├── service/
+│   ├── AdminService.java
+│   └── AdminServiceImpl.java
+├── config/
+│   ├── AppConfig.java
+│   └── CacheConfig.java
+├── AdminServiceApplication.java
+└── resources/
+    └── application.yml
