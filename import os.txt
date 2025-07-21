@@ -242,3 +242,14 @@ def lambda_handler(event, context):
             },
             "body": json.dumps({"error": str(e)})
         }
+
+
+
+
+You said:
+
+
+
+
+
+i had a aws lambda in it uses python langchain code , so the code will do , it will try to connect with mcp server through url and get get the data based on query ,  using lambda (Rest api ) url  i will test in post man the query mentioned in  body of postman ,  it will return data according to query,  so now i made  front end react using ui box i have entered my question , but i am getting this error(Access to XMLHttpRequest at 'https://x6npy9z8v5.execute-api.us-east-1.amazonaws.com/prod/mcp' from origin ' has been blocked by CORS policy: Response to preflight request doesn't pass access control check: No 'Access-Control-Allow-Origin' header is present on the requested resource.)
