@@ -9,107 +9,83 @@ from langchain.schema import HumanMessage, SystemMessage
 logging.basicConfig(level=logging.INFO)
 
 def unpad(data):
-    padding_length = data[-1]
-    return data[:-padding_length]
+    return data[:-data[-1]]
 
 def decrypt(data, key):
     cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted_data = cipher.decrypt(b64decode(data))
-    return unpad(decrypted_data).decode()
+    decrypted = cipher.decrypt(b64decode(data))
+    return unpad(decrypted).decode()
 
-def get_openai_client(model_instance_name):
+def initialize_openai():
     try:
-        aes_key_base64 = os.environ['AES_KEY']
-        encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-        encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-        api_version = os.environ['AZURE_API_VERSION']
-
-        decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-        decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
-
-        if not decrypted_api_base.endswith('/'):
-            decrypted_api_base += '/'
+        aes_key = os.environ['AES_KEY']
+        api_base = decrypt(os.environ['ENCRYPTED_API_BASE'], aes_key)
+        api_key = decrypt(os.environ['ENCRYPTED_API_KEY'], aes_key)
+        version = os.environ['AZURE_API_VERSION']
 
         return AzureChatOpenAI(
-            deployment_name=model_instance_name,
-            openai_api_base=decrypted_api_base,
-            openai_api_key=decrypted_api_key,
-            openai_api_version=api_version,
+            deployment_name=os.environ.get('MODEL_NAME', 'Default_Model'),
+            openai_api_base=api_base.rstrip('/') + '/',
+            openai_api_key=api_key,
+            openai_api_version=version,
             temperature=0.0,
-            max_tokens=4096,
-            model_kwargs={"top_p": 0.95, "frequency_penalty": 0, "presence_penalty": 0}
+            max_tokens=4096
         )
     except Exception as e:
-        logging.error(f"Error initializing OpenAI client: {e}")
-        raise ValueError(f"Error initializing OpenAI client: {e}")
+        logging.error(f"OpenAI init error: {e}")
+        raise
 
-def generate_script(client, file_content, agent_name):
-    conversion_prompt = {
-        "xslt_to_Ruby": (
-            "Convert the given XSLT into a Ruby script.\n"
-            "The output should be a single, continuous Ruby script — not an array, not JSON, and not wrapped in markdown.\n"
-            "Use inline XML (not file input), and use string concatenation to build the output XML.\n"
-            "Ensure the code is well-formatted with proper indentation and blank lines for readability.\n"
-            "The final output should look like a real Ruby script, line by line, just like a developer would write it in a .rb file.\n"
-            "It should have return statement and also the response should be a compatible Workato Ruby snippet.\n"
-        ),
+def detect_file_type(content: str) -> str:
+    if content.strip().startswith("#%RAML"):
+        return "raml"
+    try:
+        data = json.loads(content)
+        if "swagger" in data or "openapi" in data:
+            return "swagger"
+    except json.JSONDecodeError:
+        pass
+    raise ValueError("Unsupported or unrecognized file format.")
 
-        "xslt_to_JavaScript": (
-            "Convert the given XSLT into a JavaScript script.\n"
-            "Ensure proper formatting, indentation, and line breaks for readability.\n"
-            "Return the code line by line, avoiding any markdown annotations like ```javascript.\n"
-            "It should have return statement and also the response should be a compatible Workato JavaScript snippet.\n"
-        ),
-       
-        
-    }
+def get_prompt(file_type: str) -> str:
+    if file_type == "raml":
+        return "Generate API test cases using Postman syntax from the given RAML file content."
+    elif file_type == "swagger":
+        return "Generate API test cases using Postman syntax from the given Swagger/OpenAPI JSON."
+    else:
+        raise ValueError("Unknown file type for prompt generation.")
 
-    prompt = conversion_prompt.get(agent_name,
-        "Convert the given input into a structured script.\n"
-        "Ensure proper indentation and line breaks.\n"
-        "Do not add any programming language annotations like ```python, ```ruby, or ```javascript.\n"
-        "It should have a return statement and also the response should be a compatible Workato JavaScript/Python/Ruby snippet.\n"
-    )
-
-    response = client.invoke([
+def generate_test_cases(client, content, file_type):
+    prompt = get_prompt(file_type)
+    messages = [
         SystemMessage(content=prompt),
-        HumanMessage(content=file_content)
-    ])
-
-    return response.content.strip()
+        HumanMessage(content=content)
+    ]
+    result = client.invoke(messages)
+    return result.content.strip()
 
 def lambda_handler(event, context):
     try:
         if 'body' not in event or not event['body']:
-            raise ValueError("Missing or empty request body.")
+            raise ValueError("Missing file content in request body.")
 
-        headers = event.get('headers', {})
-        model_instance_name = headers.get('model_instance_name', 'Default_Model')
-        query_params = event.get('queryStringParameters', {})
+        file_content = (
+            b64decode(event['body']).decode('utf-8')
+            if event.get('isBase64Encoded', False)
+            else event['body']
+        )
 
-        agent_name_param = query_params.get('Agent_name', '')
-
-        agent_names = [name.strip() for name in agent_name_param.split(',') if name.strip()]
-        if len(agent_names) != 1:
-            raise ValueError("Exactly one Agent_name must be provided in query parameters.")
-
-        agent_name = agent_names[0]
-
-        if event.get('isBase64Encoded', False):
-            file_content = b64decode(event['body']).decode('utf-8')
-        else:
-            file_content = event['body']
-
-        client = get_openai_client(model_instance_name)
-        processed_result = generate_script(client, file_content, agent_name)
+        file_type = detect_file_type(file_content)
+        client = initialize_openai()
+        test_cases = generate_test_cases(client, file_content, file_type)
 
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "text/plain"},
-            "body": processed_result
+            "body": test_cases
         }
+
     except Exception as e:
-        logging.error(f"An error occurred: {e}")
+        logging.error(f"Handler error: {e}")
         return {
             "statusCode": 400,
             "body": json.dumps({"error": str(e)})
