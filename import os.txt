@@ -1,8 +1,3 @@
-can you update the below code , add two more if else statement like 
-
- if input_type == "/testdataforraml": ( i will upload .raml file ) and else  input_type == "/testdataforSwagger" ( i will upload .json file ) based on the prompt inside it need to generate the test data , also i wont pass prompt in query params use default for these two  testdataforraml and testdataforSwagger, also dont change anything on the existing code  dont  change prompts , functionalty anything in the existing code 
-
-
 import os
 import logging
 import json
@@ -72,6 +67,22 @@ def get_instruction_and_prompt(input_type, custom_prompt=None):
         )
         default_prompt = "Please generate one XML payload for the following XSD:"
         content_type = "application/xml"
+    elif input_type == "/testdataforraml":
+        instruction = (
+            "You are an expert in generating test data from a RAML file. "
+            "Please analyze the RAML and generate realistic test data that follows the structure and constraints."
+            "\n\nIMPORTANT: Only return valid JSON. No explanations or comments."
+        )
+        default_prompt = "Generate test data from the RAML:"
+        content_type = "application/json"
+    elif input_type == "/testdataforSwagger":
+        instruction = (
+            "You are an expert in generating test data from a Swagger (OpenAPI) specification. "
+            "Analyze the Swagger JSON and return realistic test data matching the definitions."
+            "\n\nIMPORTANT: Only return valid JSON. No explanations or comments."
+        )
+        default_prompt = "Generate test data from the Swagger/OpenAPI JSON:"
+        content_type = "application/json"
     else:
         raise ValueError("Unsupported input type")
 
@@ -161,6 +172,19 @@ def lambda_handler(event, context):
                 "statusCode": 400,
                 "body": json.dumps({"error": "Only XSD or XSD-like .txt content is allowed for /sampleforxsd."})
             }
+        elif input_value == "/testdataforraml" and file_type != "raml":
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "Only RAML or RAML-like .txt content is allowed for /testdataforraml."})
+            }
+        elif input_value == "/testdataforSwagger":
+            try:
+                json.loads(file_content)
+            except:
+                return {
+                    "statusCode": 400,
+                    "body": json.dumps({"error": "Only valid Swagger/OpenAPI JSON is allowed for /testdataforSwagger."})
+                }
 
         prompt_data = get_instruction_and_prompt(input_value, custom_prompt)
         client = get_openai_client(model_instance_name)
@@ -173,7 +197,7 @@ def lambda_handler(event, context):
             ]
             response = client.invoke(message)
 
-            if input_value == "/sampleforraml":
+            if input_value in ["/sampleforraml", "/testdataforraml", "/testdataforSwagger"]:
                 parsed = extract_json_from_response(response.content.strip())
                 if parsed is not None:
                     results.append(parsed)
@@ -182,7 +206,7 @@ def lambda_handler(event, context):
             else:
                 results.append(response.content.strip())
 
-        if input_value == "/sampleforraml":
+        if input_value in ["/sampleforraml", "/testdataforraml", "/testdataforSwagger"]:
             return {
                 "statusCode": 200,
                 "headers": {"Content-Type": prompt_data["content_type"]},
@@ -201,6 +225,3 @@ def lambda_handler(event, context):
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
         }
-
-
-
