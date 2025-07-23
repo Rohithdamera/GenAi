@@ -1,19 +1,25 @@
+
+
 import os
 import json
 import logging
 from base64 import b64decode
-from Crypto.Cipher import AES
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage, SystemMessage
 
 logging.basicConfig(level=logging.INFO)
 
 def unpad(data):
-    return data[:-data[-1]]
+    pad_len = data[-1]
+    return data[:-pad_len]
 
-def decrypt(data, key):
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted_data = cipher.decrypt(b64decode(data))
+def decrypt(data, key_base64):
+    key = b64decode(key_base64)
+    cipher = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend())
+    decryptor = cipher.decryptor()
+    decrypted_data = decryptor.update(b64decode(data)) + decryptor.finalize()
     return unpad(decrypted_data).decode()
 
 def get_openai_client(model_name):
@@ -36,7 +42,7 @@ def get_openai_client(model_name):
             model_kwargs={"top_p": 0.95}
         )
     except Exception as e:
-        logging.error(f"OpenAI client initialization failed: {e}")
+        logging.error(f"OpenAI client init failed: {e}")
         raise
 
 def detect_file_type(file_content):
@@ -52,19 +58,17 @@ def generate_test_prompt(file_type, content):
     if file_type == 'raml':
         prompt = (
             "You are given a RAML API definition.\n"
-            "Generate example test cases or sample request/response data that can be used to validate this API.\n"
-            "Ensure the test data includes request paths, parameters, and expected outputs.\n"
-            "Respond in plain text with well-structured test examples."
+            "Generate realistic test cases including endpoint names, HTTP methods, parameters, and sample request/response bodies.\n"
+            "The output should be structured and readable, but do not include markdown syntax."
         )
     elif file_type == 'swagger':
         prompt = (
-            "You are given a Swagger/OpenAPI JSON definition.\n"
-            "Generate example test cases or sample request/response data to test each endpoint.\n"
-            "Include example requests, headers, query parameters, and expected responses.\n"
-            "Return the output as plain text — do not use markdown formatting."
+            "You are given a Swagger/OpenAPI specification in JSON format.\n"
+            "Generate example test cases covering each endpoint with HTTP methods, example request and response payloads, headers, and status codes.\n"
+            "Do not use markdown syntax, just plain text with structured formatting."
         )
     else:
-        raise ValueError("Unsupported or unknown API file format.")
+        raise ValueError("Unsupported API file format. Only RAML or Swagger/OpenAPI JSON is supported.")
 
     return [
         SystemMessage(content=prompt),
@@ -83,7 +87,7 @@ def lambda_handler(event, context):
 
         file_type = detect_file_type(file_content)
         if file_type == 'unknown':
-            raise ValueError("Unsupported or unrecognized API file format. Only RAML or Swagger/OpenAPI JSON is supported.")
+            raise ValueError("Unsupported or unrecognized file format. Only RAML or Swagger JSON supported.")
 
         model_name = event.get('headers', {}).get('model_instance_name', 'Default_Model')
         client = get_openai_client(model_name)
