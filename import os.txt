@@ -13,79 +13,91 @@ def unpad(data):
 
 def decrypt(data, key):
     cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted = cipher.decrypt(b64decode(data))
-    return unpad(decrypted).decode()
+    decrypted_data = cipher.decrypt(b64decode(data))
+    return unpad(decrypted_data).decode()
 
-def initialize_openai():
+def get_openai_client(model_name):
     try:
         aes_key = os.environ['AES_KEY']
-        api_base = decrypt(os.environ['ENCRYPTED_API_BASE'], aes_key)
-        api_key = decrypt(os.environ['ENCRYPTED_API_KEY'], aes_key)
-        version = os.environ['AZURE_API_VERSION']
+        decrypted_base = decrypt(os.environ['ENCRYPTED_API_BASE'], aes_key)
+        decrypted_key = decrypt(os.environ['ENCRYPTED_API_KEY'], aes_key)
+        api_version = os.environ['AZURE_API_VERSION']
+
+        if not decrypted_base.endswith('/'):
+            decrypted_base += '/'
 
         return AzureChatOpenAI(
-            deployment_name=os.environ.get('MODEL_NAME', 'Default_Model'),
-            openai_api_base=api_base.rstrip('/') + '/',
-            openai_api_key=api_key,
-            openai_api_version=version,
+            deployment_name=model_name,
+            openai_api_base=decrypted_base,
+            openai_api_key=decrypted_key,
+            openai_api_version=api_version,
             temperature=0.0,
-            max_tokens=4096
+            max_tokens=4096,
+            model_kwargs={"top_p": 0.95}
         )
     except Exception as e:
-        logging.error(f"OpenAI init error: {e}")
+        logging.error(f"OpenAI client initialization failed: {e}")
         raise
 
-def detect_file_type(content: str) -> str:
-    if content.strip().startswith("#%RAML"):
-        return "raml"
-    try:
-        data = json.loads(content)
-        if "swagger" in data or "openapi" in data:
-            return "swagger"
-    except json.JSONDecodeError:
-        pass
-    raise ValueError("Unsupported or unrecognized file format.")
-
-def get_prompt(file_type: str) -> str:
-    if file_type == "raml":
-        return "Generate API test cases using Postman syntax from the given RAML file content."
-    elif file_type == "swagger":
-        return "Generate API test cases using Postman syntax from the given Swagger/OpenAPI JSON."
+def detect_file_type(file_content):
+    content = file_content.lower()
+    if '#%raml' in content:
+        return 'raml'
+    elif '"swagger"' in content or '"openapi"' in content:
+        return 'swagger'
     else:
-        raise ValueError("Unknown file type for prompt generation.")
+        return 'unknown'
 
-def generate_test_cases(client, content, file_type):
-    prompt = get_prompt(file_type)
-    messages = [
+def generate_test_prompt(file_type, content):
+    if file_type == 'raml':
+        prompt = (
+            "You are given a RAML API definition.\n"
+            "Generate example test cases or sample request/response data that can be used to validate this API.\n"
+            "Ensure the test data includes request paths, parameters, and expected outputs.\n"
+            "Respond in plain text with well-structured test examples."
+        )
+    elif file_type == 'swagger':
+        prompt = (
+            "You are given a Swagger/OpenAPI JSON definition.\n"
+            "Generate example test cases or sample request/response data to test each endpoint.\n"
+            "Include example requests, headers, query parameters, and expected responses.\n"
+            "Return the output as plain text — do not use markdown formatting."
+        )
+    else:
+        raise ValueError("Unsupported or unknown API file format.")
+
+    return [
         SystemMessage(content=prompt),
         HumanMessage(content=content)
     ]
-    result = client.invoke(messages)
-    return result.content.strip()
 
 def lambda_handler(event, context):
     try:
         if 'body' not in event or not event['body']:
-            raise ValueError("Missing file content in request body.")
+            raise ValueError("Missing request body.")
 
-        file_content = (
-            b64decode(event['body']).decode('utf-8')
-            if event.get('isBase64Encoded', False)
-            else event['body']
-        )
+        if event.get('isBase64Encoded', False):
+            file_content = b64decode(event['body']).decode('utf-8')
+        else:
+            file_content = event['body']
 
         file_type = detect_file_type(file_content)
-        client = initialize_openai()
-        test_cases = generate_test_cases(client, file_content, file_type)
+        if file_type == 'unknown':
+            raise ValueError("Unsupported or unrecognized API file format. Only RAML or Swagger/OpenAPI JSON is supported.")
+
+        model_name = event.get('headers', {}).get('model_instance_name', 'Default_Model')
+        client = get_openai_client(model_name)
+        messages = generate_test_prompt(file_type, file_content)
+        response = client.invoke(messages)
 
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "text/plain"},
-            "body": test_cases
+            "body": response.content.strip()
         }
 
     except Exception as e:
-        logging.error(f"Handler error: {e}")
+        logging.error(f"Error: {e}")
         return {
             "statusCode": 400,
             "body": json.dumps({"error": str(e)})
