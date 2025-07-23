@@ -180,11 +180,9 @@ def lambda_handler(event, context):
         elif input_value == "/testdataforSwagger":
             try:
                 json.loads(file_content)
-            except:
-                return {
-                    "statusCode": 400,
-                    "body": json.dumps({"error": "Only valid Swagger/OpenAPI JSON is allowed for /testdataforSwagger."})
-                }
+            except Exception as e:
+                logger.warning(f"Swagger file is not strict JSON, continuing anyway: {str(e)}")
+                pass  # Let model handle it anyway
 
         prompt_data = get_instruction_and_prompt(input_value, custom_prompt)
         client = get_openai_client(model_instance_name)
