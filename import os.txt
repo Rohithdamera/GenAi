@@ -1,214 +1,85 @@
-take the below code as reference, i had a requirement, that i will pass a spring boot dependeincy in postman ->raw-> xml 
-
-the xml will be 
-
-		<dependency>
-			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-data-jpa</artifactId>
-		</dependency>
-
-
-or
-
-
-<dependency>
-<groupId>com.cg.integrations.connectors</groupId>
-<artifactId>connector-salesforce</artifactId>
-<version>${connector-salesforce.version}</version>
-</dependency>
-
-or mongo dependency so what ever the connecter dependy will i pass , the code need to generate what are the required fileds need to be give in application .properties
-
-for example 
-
-spring data jap 
-
- i need to  give below kind data in application .properties 
-
-so based on dependency it need to generate the content what should i need to keep in application.properties of my spring boot project , like a skelton structure to make developer life easy 
-
-below code for referal 
-
 import os
 import logging
-import json
 from base64 import b64decode
 from Crypto.Cipher import AES
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage
- 
-# Set up logging
+
+# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
- 
+
 def unpad(data):
-    """Remove padding from decrypted data."""
-    padding_length = data[-1]  # The last byte indicates the padding length
-    return data[:-padding_length]
- 
+    return data[:-data[-1]]
+
 def decrypt(data, key):
-    """Decrypt the data using AES and remove padding."""
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)  # Using ECB mode for simplicity
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)
     decrypted_data = cipher.decrypt(b64decode(data))
-    decrypted_data = unpad(decrypted_data)  # Remove padding
-    return decrypted_data.decode()
- 
-def get_openai_client(agent_name, model_instance_name):
-    """Initialize Azure OpenAI client using decrypted API credentials."""
+    return unpad(decrypted_data).decode()
+
+def get_openai_client(model_instance_name):
     try:
         aes_key_base64 = os.environ['AES_KEY']
         encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
         encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
         api_version = os.environ['AZURE_API_VERSION']
- 
-        # Decrypt credentials
+
         decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
         decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
- 
-        # Ensure the base URL ends with a slash
+
         if not decrypted_api_base.endswith('/'):
             decrypted_api_base += '/'
- 
-        # Construct request URL for debugging purposes
-        request_url = f"{decrypted_api_base}openai/deployments/{model_instance_name}/chat/completions?api-version={api_version}"
-        logger.info(f"Constructed Request URL: {request_url}")
- 
-        # Return OpenAI client
+
         return AzureChatOpenAI(
             deployment_name=model_instance_name,
             openai_api_base=decrypted_api_base,
             openai_api_key=decrypted_api_key,
             openai_api_version=api_version
         )
+
     except Exception as e:
         logger.error(f"Error initializing OpenAI client: {e}")
         raise ValueError(f"Error initializing OpenAI client: {e}")
- 
-def process_with_openai(client, file_content, agent_name):
-    """Process file content using OpenAI based on Agent_name."""
+
+def generate_properties_from_dependency(client, dependency_xml):
     try:
-        if agent_name == "dwl_to_xml":
-              prompt = (
-                   '''You are an expert in generating mappings for Boomi. I will provide DataWeave logic that outlines the transformation process. You need to convert this logic into a Boomi-compatible Mappings XML.
+        prompt = (
+            "You are a senior Spring Boot engineer. A developer will pass you one Maven dependency (in XML format). "
+            "Your job is to output only the required `application.properties` configuration for that dependency, if needed.\n\n"
+            "❗If the dependency does NOT require any properties, return exactly:\n"
+            "'This dependency doesn't require any specific application.properties configuration.'\n\n"
+            "⚠️ DO NOT include explanations, comments, or extra text. Output ONLY valid application.properties entries.\n\n"
+            f"{dependency_xml}"
+        )
 
-The output must include the following XML structure:
-<Map>
-  <Mappings>
-    <Mapping 
-      fromKey="..." 
-      fromKeyPath="*[@key='...']/*[@key='...']/*[@key='...']" 
-      fromNamePath="..." 
-      fromType="profile" 
-      toKey="..." 
-      toKeyPath="*[@key='...']/*[@key='...']/*[@key='...']" 
-      toNamePath="..." 
-      toType="profile"/>
-  </Mappings>
-  <Functions optimizeExecutionOrder="true"/>
-  <Defaults/>
-  <DocumentCacheJoins/>
-</Map>
-
-Instructions:
-- Do not include any explanatory text, preamble, or suffix.
-- Return only the valid XML content starting with <Map> and ending with </Map>.
-- Ensure every required tag is included, properly closed, aligned, and indented according to the XML format.
-- The `fromKey` and `toKey` must reflect the number of segments in their respective key paths (e.g., 3 segments = fromKey="3").
-- Replace any empty fields with meaningful placeholders like "defaultValue" or descriptive text.
-- Escape special characters like &apos; using &amp;apos; and &quot; using &amp;quot;.
-- Ensure all keys and paths are meaningful and valid.
-- Include `fromNamePath` and `toNamePath` based on the DataWeave logic.
-- Use nested key paths like *[@key='1']/*[@key='2']/*[@key='3'] or longer, with a minimum of 3 segments.
-- Remove mappings with undefined variables or invalid paths.
-- Ensure there is a space between each attribute in the <Mapping> tag.
-- Do not include fromProfile or toProfile attributes in the <Map> tag.
-
-Always return a valid, Boomi-compatible XML structure.
-
-'''
-              )
-        elif agent_name == "dwl_to_json":
-            prompt = (
-                "You are an expert in analyzing and converting DataWeave scripts into JSON structures. "
-                "Analyze the following DataWeave logic and extract the actual values for each key. "
-                "If the mapping file includes the '|' character, which is not supported in XML, ensure to handle it gracefully "
-                "by either replacing it with a supported character or removing it, based on the context. "
-                "The output should be a well-structured JSON array or object, *without any extra labels or keywords*. "
-                "Only return the raw JSON array or object. Do not include the words 'result', 'json', 'output', or any other labels."
-            )
- 
-        else:
-            raise ValueError(f"Unsupported Agent_name: {agent_name}")
- 
-        # Get OpenAI response
-        response = client.invoke([HumanMessage(content=prompt + "\n\n" + file_content)])
+        response = client.invoke([HumanMessage(content=prompt)])
         return response.content
+
     except Exception as e:
-        logger.error(f"Error in OpenAI API call: {e}")
+        logger.error(f"Error during OpenAI call: {e}")
         raise
- 
-def process_file_content(agent_name, file_content, model_instance_name):
-    """Process the DataWeave script based on the agent name."""
-    try:
-        # Initialize OpenAI client
-        client = get_openai_client(agent_name, model_instance_name)
-        # Process the content using OpenAI
-        result = process_with_openai(client, file_content, agent_name)
-        return result
-    except Exception as e:
-        logger.error(f"Error processing file content: {e}")
-        raise
- 
+
 def lambda_handler(event, context):
-    """AWS Lambda entry point."""
-    logger.info(f"Received event: {json.dumps(event)}")  # Log the entire event
- 
     try:
-        # Parse the incoming JSON body from API Gateway
-        if 'body' in event:
-            event_body = json.loads(event['body'])
- 
-            # Ensure required keys are present
-            required_keys = ['Agent_name', 'file_content', 'model_instance_name']
-            for key in required_keys:
-                if key not in event_body:
-                    raise ValueError(f"Missing required key: {key}")
- 
-            # Extract required data from request
-            agent_name = event_body['Agent_name']
-            file_content = event_body['file_content']
-            model_instance_name = event_body['model_instance_name']
- 
-            # Process the content based on the agent name
-            processed_result = process_file_content(agent_name, file_content, model_instance_name)
- 
-            # Return the result directly
+        if 'body' not in event or not event['body'].strip():
             return {
-                "statusCode": 200,
-                "body": processed_result  # Response is XML or JSON based on Agent_name
+                "statusCode": 400,
+                "body": "Missing or empty XML dependency in request body."
             }
- 
-        else:
-            raise ValueError("'body' is missing in the event.")
- 
+
+        dependency_xml = event['body']
+        model_instance_name = os.environ['AZURE_MODEL_DEPLOYMENT']  # set in Lambda config
+        client = get_openai_client(model_instance_name)
+        result = generate_properties_from_dependency(client, dependency_xml)
+
+        return {
+            "statusCode": 200,
+            "body": result
+        }
+
     except Exception as e:
-        logger.error(f"An error occurred: {e}")
+        logger.error(f"Unhandled exception: {e}")
         return {
             "statusCode": 500,
-            "body": json.dumps({
-                "error": str(e)
-            })
+            "body": f"Internal server error: {str(e)}"
         }
- 
- 
-spring.application.name=EMS_BackenEnd
-
-spring.datasource.url=jdbc:mysql://localhost:3306/employee_management
-spring.datasource.username=root
-spring.datasource.password=Admin
-
-
-spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.MySQLDialect
-spring.jpa.hibernate.ddl-auto=update
-
-
