@@ -105,3 +105,14 @@ def lambda_handler(event, context):
             "statusCode": 500,
             "body": f"Internal server error: {str(e)}"
         }
+
+
+
+	protected static final CustomApiLogger logger = CustomApiLogger.getLogger(SFDCClient.class);
+	private SFDCAuthTokenService sdfcAuthTokenService;
+	private SFDCConnector sfdcConnector;
+	public SFDCClient(SFDCAuthTokenService sdfcAuthTokenService, SFDCConnector sfdcConnector) {
+		this.sdfcAuthTokenService = sdfcAuthTokenService;
+		this.sfdcConnector = sfdcConnector;
+	}
+ 
