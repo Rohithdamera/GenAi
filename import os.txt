@@ -44,13 +44,35 @@ def get_openai_client(model_instance_name):
 def generate_properties_from_dependency(client, dependency_xml):
     try:
         prompt = (
-            "You are a senior Spring Boot engineer. A developer will pass you one Maven dependency (in XML format). "
-            "Your job is to output only the required `application.properties` configuration for that dependency, if needed.\n\n"
-            "❗If the dependency does NOT require any properties, return exactly:\n"
-            "'This dependency doesn't require any specific application.properties configuration.'\n\n"
-            "⚠️ DO NOT include explanations, comments, or extra text. Output ONLY valid application.properties entries.\n\n"
-            f"{dependency_xml}"
-        )
+         f"You are a senior Spring Boot engineer. A developer will provide you with a Maven dependency in XML format. "
+         f"Your task is to output only the required `application.properties` configuration for that dependency, if any. "
+         f"If the dependency does not require any specific configuration in `application.properties`, return exactly: "
+         f"'This dependency doesn't require any specific application.properties configuration.' "
+         f"You must support all types of dependencies, including but not limited to: "
+         f"databases (e.g., JPA, MongoDB), messaging systems (e.g., Kafka, RabbitMQ), cloud connectors (e.g., AWS, Azure, Salesforce), "
+         f"monitoring tools, and utility libraries. "
+         f"For Salesforce connectors, always return the configuration in the following format:\n"
+         f"core:\n"
+         f"  connectors:\n"
+         f"    sfdc:\n"
+         f"      authUrl: https://login.salesforce.com\n"
+         f"      username: your-username\n"
+         f"      password: your-password\n"
+         f"      client_id: your-client-id\n"
+         f"      client_secret: your-client-secret\n"
+         f"      grant_type: password\n"
+         f"      queryUrl: /\n"
+         f"      version: v53.0\n\n"
+         f"Do not include explanations, comments, or extra text. "
+         f"Output only valid configuration entries. "
+         f"If multiple configurations  "
+         f"Do not skip Salesforce-related configurations unless absolutely none are needed. "
+         f"Do not include explanations, comments, or extra text. "
+         f"Output only valid `application.properties` entries, if required. "
+         f"If multiple configurations are possible, output the most commonly used or default configuration.\n\n"
+         f"{dependency_xml}"
+)
+
 
         response = client.invoke([HumanMessage(content=prompt)])
         return response.content
