@@ -1,7 +1,6 @@
 import os
 import logging
 import json
-import re
 from base64 import b64decode
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage
@@ -10,29 +9,21 @@ from langchain.schema import HumanMessage
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-def get_openai_client(model_instance_name):
-    return AzureChatOpenAI(
-        deployment_name=model_instance_name,
-        openai_api_base=os.environ['AZURE_API_BASE'],
-        openai_api_key=os.environ['AZURE_API_KEY'],
-        openai_api_version=os.environ['AZURE_API_VERSION']
-    )
-
 def lambda_handler(event, context):
     try:
         logger.info("Received event")
 
-        if 'body' not in event or 'isBase64Encoded' not in event or not event['isBase64Encoded']:
+        # Validate base64-encoded body
+        if 'body' not in event or not event.get('isBase64Encoded', False):
             return {
                 "statusCode": 400,
                 "body": json.dumps({"error": "File content is missing or not base64-encoded."})
             }
 
-        # Decode uploaded file content
-        file_content = b64decode(event['body']).decode('utf-8')
-        logger.info("File content received and decoded.")
+        # Decode Java class content
+        java_code = b64decode(event['body']).decode('utf-8')
 
-        # Get headers
+        # Read model name from header
         headers = event.get('headers', {})
         model_instance_name = headers.get('model_instance_name')
         if not model_instance_name:
@@ -41,17 +32,23 @@ def lambda_handler(event, context):
                 "body": json.dumps({"error": "'model_instance_name' header is missing."})
             }
 
-        # Create client
-        client = get_openai_client(model_instance_name)
+        # Azure OpenAI setup
+        client = AzureChatOpenAI(
+            deployment_name=model_instance_name,
+            openai_api_base=os.environ['AZURE_API_BASE'],
+            openai_api_key=os.environ['AZURE_API_KEY'],
+            openai_api_version=os.environ['AZURE_API_VERSION']
+        )
 
-        # Construct prompt
+        # Prompt for generating JUnit
         prompt = (
             "You are a senior Java developer. Generate a complete JUnit 5 test class for the following Java class. "
             "Ensure all public methods are tested. Use proper imports, annotations, and mocks if needed. "
             "Do not include explanations or extra text. Output only valid Java code.\n\n"
-            f"{file_content}"
+            f"{java_code}"
         )
 
+        # Invoke OpenAI
         response = client.invoke([HumanMessage(content=prompt)])
 
         return {
