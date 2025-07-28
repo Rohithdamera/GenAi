@@ -1,4 +1,92 @@
-{
-  "statusCode": 400,
-  "body": "{\"error\": \"File content is missing or not base64-encoded.\"}"
-}
+import os
+import logging
+import json
+import re
+from base64 import b64decode
+from Crypto.Cipher import AES
+from langchain_community.chat_models import AzureChatOpenAI
+from langchain.schema import HumanMessage
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+def unpad(data):
+    padding_length = data[-1]
+    return data[:-padding_length]
+
+def decrypt(data, key):
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)
+    decrypted_data = cipher.decrypt(b64decode(data))
+    decrypted_data = unpad(decrypted_data)
+    return decrypted_data.decode()
+
+def get_openai_client(model_instance_name):
+    aes_key_base64 = os.environ['AES_KEY']
+    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+    api_version = os.environ['AZURE_API_VERSION']
+
+    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+
+    if not decrypted_api_base.endswith('/'):
+        decrypted_api_base += '/'
+
+    return AzureChatOpenAI(
+        deployment_name=model_instance_name,
+        openai_api_base=decrypted_api_base,
+        openai_api_key=decrypted_api_key,
+        openai_api_version=api_version
+    )
+
+def lambda_handler(event, context):
+    try:
+        logger.info("Event received")
+
+        if 'body' not in event or not event.get('isBase64Encoded', False):
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "File content is missing or not base64-encoded."})
+            }
+
+        file_content = b64decode(event['body']).decode('utf-8')
+
+        headers = event.get('headers', {})
+        model_instance_name = headers.get('model_instance_name')
+        if not model_instance_name:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "'model_instance_name' header is missing."})
+            }
+
+        client = get_openai_client(model_instance_name)
+
+        prompt = (
+            "You are a Java expert. Generate a complete JUnit 5 test class for the following Java code. "
+            "Ensure the tests are meaningful and cover edge cases. Return only valid Java code, no explanation.\n\n"
+            + file_content
+        )
+
+        messages = [
+            HumanMessage(content=prompt)
+        ]
+
+        response = client.invoke(messages)
+        raw_output = response.content.strip()
+
+        # Extract code block if exists
+        match = re.search(r"```(?:java)?\n?(.*?)```", raw_output, re.DOTALL)
+        junit_code = match.group(1).strip() if match else raw_output
+
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "text/plain"},
+            "body": junit_code
+        }
+
+    except Exception as e:
+        logger.error("Exception occurred: %s", str(e))
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
