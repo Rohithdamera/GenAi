@@ -1,64 +1,66 @@
 import os
 import logging
 import json
+import re
 from base64 import b64decode
-from langchain_community.chat_models import AzureChatOpenAI
-from langchain.schema import HumanMessage
+import openai
 
-# Logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+# Initialize OpenAI client
+def get_openai_client():
+    openai.api_key = os.environ['OPENAI_API_KEY']
+    return openai
+
+# Extract just the class name for use in prompts
+def extract_class_name(java_code):
+    match = re.search(r'public\s+class\s+(\w+)', java_code)
+    return match.group(1) if match else "UnknownClass"
+
+# Lambda handler
 def lambda_handler(event, context):
     try:
         logger.info("Received event")
 
-        # Validate base64-encoded body
-        if 'body' not in event or not event.get('isBase64Encoded', False):
+        if 'body' not in event or 'isBase64Encoded' not in event or not event['isBase64Encoded']:
             return {
                 "statusCode": 400,
                 "body": json.dumps({"error": "File content is missing or not base64-encoded."})
             }
 
-        # Decode Java class content
+        # Decode Java file
         java_code = b64decode(event['body']).decode('utf-8')
 
-        # Read model name from header
-        headers = event.get('headers', {})
-        model_instance_name = headers.get('model_instance_name')
-        if not model_instance_name:
-            return {
-                "statusCode": 400,
-                "body": json.dumps({"error": "'model_instance_name' header is missing."})
-            }
-
-        # Azure OpenAI setup
-        client = AzureChatOpenAI(
-            deployment_name=model_instance_name,
-            openai_api_base=os.environ['AZURE_API_BASE'],
-            openai_api_key=os.environ['AZURE_API_KEY'],
-            openai_api_version=os.environ['AZURE_API_VERSION']
-        )
-
-        # Prompt for generating JUnit
+        # Build prompt
+        class_name = extract_class_name(java_code)
         prompt = (
-            "You are a senior Java developer. Generate a complete JUnit 5 test class for the following Java class. "
-            "Ensure all public methods are tested. Use proper imports, annotations, and mocks if needed. "
-            "Do not include explanations or extra text. Output only valid Java code.\n\n"
-            f"{java_code}"
+            f"You are a Java expert. Generate a complete JUnit 5 test class for the following Java class named {class_name}. "
+            f"Ensure the test methods are meaningful, mock dependencies if needed, and cover edge cases. "
+            f"Do not include any explanations or comments. Just return the code.\n\n{java_code}"
         )
 
-        # Invoke OpenAI
-        response = client.invoke([HumanMessage(content=prompt)])
+        # Get response from OpenAI
+        client = get_openai_client()
+        response = client.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3
+        )
+
+        # Extract and return only the code block
+        content = response.choices[0].message.content.strip()
+        code_match = re.search(r"```(?:java)?\n?(.*?)```", content, re.DOTALL)
+        junit_code = code_match.group(1).strip() if code_match else content
 
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "text/plain"},
-            "body": response.content.strip()
+            "body": junit_code
         }
 
     except Exception as e:
-        logger.error(f"Unhandled exception: {str(e)}")
+        logger.error("Error: %s", str(e))
         return {
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})
