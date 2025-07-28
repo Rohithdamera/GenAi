@@ -1,59 +1,236 @@
+
+Response:
+{
+  "errorMessage": "Cannot load native module 'Crypto.Cipher._raw_ecb': Not found '_raw_ecb.cpython-39-aarch64-linux-gnu.so', Cannot load '_raw_ecb.abi3.so': /opt/python/lib/python3.9/site-packages/Crypto/Util/../Cipher/_raw_ecb.abi3.so: cannot open shared object file: No such file or directory, Not found '_raw_ecb.so'",
+  "errorType": "OSError",
+  "requestId": "",
+
+
 import os
 import logging
+import json
+import re
 from base64 import b64decode
 from Crypto.Cipher import AES
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.schema import HumanMessage
-
-# Logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
+ 
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+ 
 def unpad(data):
-    return data[:-data[-1]]
-
+    padding_length = data[-1]
+    return data[:-padding_length]
+ 
 def decrypt(data, key):
     cipher = AES.new(b64decode(key), AES.MODE_ECB)
     decrypted_data = cipher.decrypt(b64decode(data))
-    return unpad(decrypted_data).decode()
-
-def get_openai_client():
+    decrypted_data = unpad(decrypted_data)
+    return decrypted_data.decode()
+ 
+def get_openai_client(model_instance_name):
     aes_key_base64 = os.environ['AES_KEY']
-    decrypted_api_base = decrypt(os.environ['ENCRYPTED_API_BASE'], aes_key_base64)
-    decrypted_api_key = decrypt(os.environ['ENCRYPTED_API_KEY'], aes_key_base64)
-
+    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+    api_version = os.environ['AZURE_API_VERSION']
+ 
+    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+ 
     if not decrypted_api_base.endswith('/'):
         decrypted_api_base += '/'
-
+ 
     return AzureChatOpenAI(
-        deployment_name=os.environ['AZURE_MODEL_DEPLOYMENT'],
+        deployment_name=model_instance_name,
         openai_api_base=decrypted_api_base,
         openai_api_key=decrypted_api_key,
-        openai_api_version=os.environ['AZURE_API_VERSION']
+        openai_api_version=api_version
     )
-
-def generate_junit_from_java_code(client, java_code):
-    prompt = (
-        "You are a senior Java developer. Generate a complete JUnit 5 test class for the following Java class. "
-        "Ensure all public methods are tested. Use proper imports, annotations, and mocks if needed. "
-        "Do not include explanations or extra text. Output only valid Java code.\n\n"
-        f"{java_code}"
-    )
-    response = client.invoke([HumanMessage(content=prompt)])
-    return response.content
-
+ 
+def detect_file_type(file_content):
+    if re.search(r'^(%RAML)|(^#%RAML)', file_content.strip(), re.IGNORECASE):
+        return "raml"
+    elif "<xs:schema" in file_content or "http://www.w3.org/2001/XMLSchema" in file_content:
+        return "xsd"
+    return "unknown"
+ 
+def get_instruction_and_prompt(input_type, custom_prompt=None):
+    if input_type == "/sampleforraml":
+        instruction = (
+            "You are an expert in analysing the RAML and generating the payload from the RAML. "
+            "I am providing the RAML which will be used as an asset for designing my API. "
+            "Please analyze the RAML and generate the sample payload which will honor all the rules inside the RAML. "
+            "You can refer the link for any doubts related to RAML: https://raml.org/developers/raml-100-tutorial."
+            "\n\n**IMPORTANT**: Only return a valid JSON object or JSON array containing the payload. "
+            "Do NOT include any markdown, explanations, or extra text. The response must be parseable as JSON."
+        )
+        default_prompt = "Please generate one JSON payload from the following RAML:"
+        content_type = "application/json"
+    elif input_type == "/sampleforxsd":
+        instruction = (
+            "You are an expert in analysing the XSD and generating the payload from the XSD. "
+            "I am providing the XSD which will be used as an asset for designing my API. "
+            "Please analyze the XSD and generate the sample payload which will honor all the rules inside the XSD. "
+            "You can refer the link for any doubts related to XSD: https://www.tutorialspoint.com/xsd/index.htm"
+        )
+        default_prompt = "Please generate one XML payload for the following XSD:"
+        content_type = "application/xml"
+    elif input_type == "/testdataforraml":
+        instruction = (
+            "You are an expert in generating test data from a RAML file. "
+            "Please analyze the RAML and generate realistic test data that follows the structure and constraints."
+            "\n\nIMPORTANT: Only return valid JSON. No explanations or comments."
+        )
+        default_prompt = "Generate test data from the RAML:"
+        content_type = "application/json"
+    elif input_type == "/testdataforSwagger":
+        instruction = (
+            "You are an expert in generating test data from a Swagger (OpenAPI) specification. "
+            "Analyze the Swagger JSON and return realistic test data matching the definitions."
+            "\n\nIMPORTANT: Only return valid JSON. No explanations or comments."
+        )
+        default_prompt = "Generate test data from the Swagger/OpenAPI JSON:"
+        content_type = "application/json"
+    else:
+        raise ValueError("Unsupported input type")
+ 
+    return {
+        "instruction": instruction,
+        "prompt": custom_prompt or default_prompt,
+        "content_type": content_type
+    }
+ 
+def extract_json_from_response(text):
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+ 
+    json_matches = re.findall(r"```json(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    for match in json_matches:
+        try:
+            return json.loads(match.strip())
+        except:
+            continue
+ 
+    code_matches = re.findall(r"```(.*?)```", text, re.DOTALL)
+    for match in code_matches:
+        try:
+            return json.loads(match.strip())
+        except:
+            continue
+ 
+    obj_match = re.search(r"(\{.*\})", text, re.DOTALL)
+    if obj_match:
+        try:
+            return json.loads(obj_match.group(1))
+        except:
+            pass
+ 
+    arr_match = re.search(r"(\[.*\])", text, re.DOTALL)
+    if arr_match:
+        try:
+            return json.loads(arr_match.group(1))
+        except:
+            pass
+ 
+    return None
+ 
 def lambda_handler(event, context):
     try:
-        java_code = event.get('body', '')
-        client = get_openai_client()
-        result = generate_junit_from_java_code(client, java_code)
-        return {
-            "statusCode": 200,
-            "body": result
-        }
+        logger.info("Received event: %s", json.dumps(event)[:1000])
+ 
+        if 'body' not in event or 'isBase64Encoded' not in event or not event['isBase64Encoded']:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "File content is missing or not base64-encoded."})
+            }
+ 
+        file_content = b64decode(event['body']).decode('utf-8')
+        query_params = event.get('queryStringParameters', {})
+        input_value = query_params.get('input')
+        custom_prompt = query_params.get('prompt')
+ 
+        if not input_value:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "'input' parameter is missing in query string."})
+            }
+ 
+        headers = event.get('headers', {})
+        model_instance_name = headers.get('model_instance_name')
+        if not model_instance_name:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "'model_instance_name' header is missing."})
+            }
+ 
+        count = int(headers.get('count', '1'))
+ 
+        file_type = detect_file_type(file_content)
+        logger.info(f"Detected file type: {file_type}")
+ 
+        if input_value == "/sampleforraml" and file_type != "raml":
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "Only RAML or RAML-like .txt content is allowed for /sampleforraml."})
+            }
+        elif input_value == "/sampleforxsd" and file_type != "xsd":
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "Only XSD or XSD-like .txt content is allowed for /sampleforxsd."})
+            }
+        elif input_value == "/testdataforraml" and file_type != "raml":
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "Only RAML or RAML-like .txt content is allowed for /testdataforraml."})
+            }
+        elif input_value == "/testdataforSwagger":
+            try:
+                json.loads(file_content)
+            except:
+                return {
+                    "statusCode": 400,
+                    "body": json.dumps({"error": "Only valid Swagger/OpenAPI JSON is allowed for /testdataforSwagger."})
+                }
+ 
+        prompt_data = get_instruction_and_prompt(input_value, custom_prompt)
+        client = get_openai_client(model_instance_name)
+ 
+        results = []
+        for i in range(count):
+            message = [
+                HumanMessage(content=prompt_data["instruction"]),
+                HumanMessage(content=prompt_data["prompt"] + "\n\n" + file_content)
+            ]
+            response = client.invoke(message)
+ 
+            if input_value in ["/sampleforraml", "/testdataforraml", "/testdataforSwagger"]:
+                parsed = extract_json_from_response(response.content.strip())
+                if parsed is not None:
+                    results.append(parsed)
+                else:
+                    logger.warning(f"Failed to parse JSON from response {i+1}")
+            else:
+                results.append(response.content.strip())
+ 
+        if input_value in ["/sampleforraml", "/testdataforraml", "/testdataforSwagger"]:
+            return {
+                "statusCode": 200,
+                "headers": {"Content-Type": prompt_data["content_type"]},
+                "body": json.dumps(results, indent=2)
+            }
+        else:
+            return {
+                "statusCode": 200,
+                "headers": {"Content-Type": prompt_data["content_type"]},
+                "body": "\n\n".join(results)
+            }
+ 
     except Exception as e:
-        logger.error(f"Unhandled exception: {e}")
+        logger.error("Unhandled exception: %s", str(e))
         return {
             "statusCode": 500,
-            "body": f"Internal server error: {str(e)}"
+            "body": json.dumps({"error": str(e)})
         }
+ 
