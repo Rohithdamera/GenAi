@@ -1,158 +1,38 @@
-import os
-import json
-from pathlib import Path
-from langchain.chat_models import AzureChatOpenAI
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-from langchain.agents import initialize_agent, Tool
-from langchain.memory import ConversationBufferMemory
+=== AGENT 1: Java Code Analysis ===
 
-# === OpenAI Client ===
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        deployment_name="Fourth_Chatbot",
-        openai_api_key="",  # Add key here
-        openai_api_version="2024-08-01-preview",
-        openai_api_type="azure",
-        temperature=0.3,
-        max_tokens=2000,
-        model_kwargs={"top_p": 0.9, "frequency_penalty": 0.1, "presence_penalty": 0.0}
-    )
 
-# === Input Project Path ===
-project_path = r"C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement"
+> Entering new AgentExecutor chain...
+First, I need to list all the Java files in the directory.
+Action: ListJavaFiles
+Action Input: /
+Observation: [FOUND] 6 Java files.
+Thought:Now that I have found 6 Java files, I need to extract class information from each of these files.
+Action: ExtractCodeInfo
+Action Input: /[ERROR] Failed to analyze C:\Users\rdamera\Downloads\osif-java-cg-candidate\osif-java-cg-candidate\osif-java-cg-candidate\src\main\java\com\example\osif_java_cg_candidate\OsifJavaCgCandidateApplication.java: Missing some input keys: {'\n  "class_name"'}
+[ERROR] Failed to analyze C:\Users\rdamera\Downloads\osif-java-cg-candidate\osif-java-cg-candidate\osif-java-cg-candidate\src\main\java\com\example\osif_java_cg_candidate\config\CandidateConfig.java: Missing some input keys: {'\n  "class_name"'}
+[ERROR] Failed to analyze C:\Users\rdamera\Downloads\osif-java-cg-candidate\osif-java-cg-candidate\osif-java-cg-candidate\src\main\java\com\example\osif_java_cg_candidate\controller\CandidateController.java: Missing some input keys: {'\n  "class_name"'}
+[ERROR] Failed to analyze C:\Users\rdamera\Downloads\osif-java-cg-candidate\osif-java-cg-candidate\osif-java-cg-candidate\src\main\java\com\example\osif_java_cg_candidate\model\CandidateModel.java: Missing some input keys: {'\n  "class_name"'}
+[ERROR] Failed to analyze C:\Users\rdamera\Downloads\osif-java-cg-candidate\osif-java-cg-candidate\osif-java-cg-candidate\src\main\java\com\example\osif_java_cg_candidate\service\CandidateService.java: Missing some input keys: {'\n  "class_name"'}
+[ERROR] Failed to analyze C:\Users\rdamera\Downloads\osif-java-cg-candidate\osif-java-cg-candidate\osif-java-cg-candidate\src\test\java\com\example\osif_java_cg_candidate\OsifJavaCgCandidateApplicationTests.java: Missing some input keys: {'\n  "class_name"'}
 
-# === Shared State ===
-java_files = []
-parsed_code_info = []
-generated_tests = []
+Observation: [SUCCESS] Parsed 0 Java files.
+Thought:I now know that no class information was extracted from the Java files.
+Final Answer: No class information was extracted from the Java files.
 
-# === Agent 1: Java Source Parser ===
-def list_java_files(_: str) -> str:
-    global java_files
-    java_files = [
-        os.path.join(root, f)
-        for root, _, files in os.walk(project_path)
-        for f in files if f.endswith(".java")
-    ]
-    if not java_files:
-        return "[STOP] No Java files found."
-    return f"[FOUND] {len(java_files)} Java files."
+> Finished chain.
 
-def extract_code_info(_: str) -> str:
-    global parsed_code_info, java_files
-    if not java_files:
-        return "[SKIP] No Java files."
+=== AGENT 2: JUnit Generator ===
 
-    client = get_openai_client()
-    analysis_prompt = PromptTemplate(
-        input_variables=["java_source"],
-        template="""
-You are a static Java code analyzer.
 
-Given the following Java file, extract:
-- class name
-- class type (Service, Controller, Repository, etc.)
-- package path
-- list of public method signatures
-- class dependencies (called classes)
+> Entering new AgentExecutor chain...
+To create JUnit tests for analyzed Java classes, I need to generate test classes using the provided tool.
 
-Output JSON like:
-{
-  "class_name": "CandidateServiceImpl",
-  "class_type": "Service",
-  "package_path": "com.example.service",
-  "dependencies": ["CandidateRepository"],
-  "methods": ["public Candidate save(Candidate c)", "public List<Candidate> findAll()"]
-}
+Action: GenerateJUnitTests
+Action Input: "analyzed Java classes"
+Observation: [SKIP] No parsed code info.
+Thought:I now know the final answer
+Final Answer: I cannot generate JUnit tests without specific Java class code details. Please provide the Java class code to proceed with generating accurate and complete JUnit tests.
 
-Java file content:
-{java_source}
-"""
-    )
+> Finished chain.
 
-    chain = LLMChain(llm=client, prompt=analysis_prompt)
-
-    parsed_code_info = []
-    for file in java_files:
-        try:
-            content = Path(file).read_text(encoding="utf-8")
-            result = chain.run(java_source=content)
-            parsed_code_info.append(result)
-        except Exception as e:
-            print(f"[ERROR] Failed to analyze {file}: {e}")
-    return f"[SUCCESS] Parsed {len(parsed_code_info)} Java files."
-
-# === Agent 2: JUnit Generator ===
-def generate_junit_tests(_: str) -> str:
-    global parsed_code_info, generated_tests
-
-    if not parsed_code_info:
-        return "[SKIP] No parsed code info."
-
-    client = get_openai_client()
-    junit_prompt = PromptTemplate(
-        input_variables=["code_info"],
-        template="""
-You are a Java test generator.
-
-Given this Java class metadata, generate a JUnit 5 test class using Mockito if needed. Cover at least 80% of methods.
-
-Return strictly in this JSON format:
-{
-  "file_name": "<ClassName>Test.java>",
-  "package_path": "<com/example/service>",
-  "code": "<full valid JUnit test class code>"
-}
-
-Class metadata:
-{code_info}
-"""
-    )
-
-    chain = LLMChain(llm=client, prompt=junit_prompt)
-
-    generated_tests = []
-    for info in parsed_code_info:
-        try:
-            result = chain.run(code_info=info)
-            generated_tests.append(result)
-        except Exception as e:
-            print(f"[ERROR] Failed to generate test: {e}")
-    return f"[SUCCESS] Generated {len(generated_tests)} JUnit test classes."
-
-# === MAIN EXECUTION ===
-if __name__ == "__main__":
-    print("\n=== AGENT 1: Java Code Analysis ===")
-    memory1 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-    agent1 = initialize_agent(
-        tools=[
-            Tool(name="ListJavaFiles", func=list_java_files, description="Scan Java files."),
-            Tool(name="ExtractCodeInfo", func=extract_code_info, description="Parse class metadata."),
-        ],
-        llm=get_openai_client(),
-        agent_type="openai-functions",
-        memory=memory1,
-        verbose=True,
-    )
-
-    agent1.invoke("Scan and extract all class info from Java files.")
-
-    print("\n=== AGENT 2: JUnit Generator ===")
-    memory2 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-    agent2 = initialize_agent(
-        tools=[
-            Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Generate test classes."),
-        ],
-        llm=get_openai_client(),
-        agent_type="openai-functions",
-        memory=memory2,
-        verbose=True,
-    )
-
-    agent2.invoke("Create accurate and complete JUnit tests for analyzed Java classes.")
-
-    print("\n=== ✅ Final Output: JUnit Test Classes ===")
-    for idx, test in enumerate(generated_tests, start=1):
-        print(f"\n[Generated Test {idx}]:\n{test}")
+=== ✅ Final Output: JUnit Test Classes ===
