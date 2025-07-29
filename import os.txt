@@ -1,18 +1,18 @@
 import os
+import json
 from pathlib import Path
 from langchain.chat_models import AzureChatOpenAI
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
-from langchain.schema.output_parser import StrOutputParser
 from langchain.agents import initialize_agent, Tool
 from langchain.memory import ConversationBufferMemory
 
-# === Azure OpenAI client ===
+# === OpenAI Client ===
 def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="Fourth_Chatbot",
-        openai_api_key="",  # Add your key
+        openai_api_key="",  # Add key here
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
         temperature=0.3,
@@ -20,12 +20,15 @@ def get_openai_client():
         model_kwargs={"top_p": 0.9, "frequency_penalty": 0.1, "presence_penalty": 0.0}
     )
 
+# === Input Project Path ===
 project_path = r"C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement"
 
-# === Agent 1: Java Source File Scanner ===
+# === Shared State ===
 java_files = []
-parsed_code_info = ""
+parsed_code_info = []
+generated_tests = []
 
+# === Agent 1: Java Source Parser ===
 def list_java_files(_: str) -> str:
     global java_files
     java_files = [
@@ -35,30 +38,27 @@ def list_java_files(_: str) -> str:
     ]
     if not java_files:
         return "[STOP] No Java files found."
-    return f"Found {len(java_files)} Java files."
+    return f"[FOUND] {len(java_files)} Java files."
 
 def extract_code_info(_: str) -> str:
-    global java_files, parsed_code_info
-
+    global parsed_code_info, java_files
     if not java_files:
-        return "[SKIP] No Java files found to analyze."
+        return "[SKIP] No Java files."
 
     client = get_openai_client()
-
-    # Prompt for parsing Java code to get structure
     analysis_prompt = PromptTemplate(
         input_variables=["java_source"],
         template="""
-You are a static code analyzer for Java projects.
+You are a static Java code analyzer.
 
-Given this Java file content, extract:
+Given the following Java file, extract:
 - class name
-- class type (Controller, Service, Repository, etc.)
-- its package path
-- list of public methods with parameters
-- which classes it depends on (calls)
+- class type (Service, Controller, Repository, etc.)
+- package path
+- list of public method signatures
+- class dependencies (called classes)
 
-Return structured JSON per file like:
+Output JSON like:
 {
   "class_name": "CandidateServiceImpl",
   "class_type": "Service",
@@ -67,97 +67,92 @@ Return structured JSON per file like:
   "methods": ["public Candidate save(Candidate c)", "public List<Candidate> findAll()"]
 }
 
-Java File:
+Java file content:
 {java_source}
 """
     )
 
-    chain = (
-        lambda _: java_files
-        | (lambda paths: [Path(p).read_text(encoding="utf-8") for p in paths])
-        | (lambda contents: [{"java_source": c} for c in contents])
-        | (lambda dicts: [LLMChain(llm=client, prompt=analysis_prompt).run(**d) for d in dicts])
-    )
+    chain = LLMChain(llm=client, prompt=analysis_prompt)
 
-    parsed_code_info = chain(None)
-    return "[SUCCESS] Java files analyzed and structure extracted."
+    parsed_code_info = []
+    for file in java_files:
+        try:
+            content = Path(file).read_text(encoding="utf-8")
+            result = chain.run(java_source=content)
+            parsed_code_info.append(result)
+        except Exception as e:
+            print(f"[ERROR] Failed to analyze {file}: {e}")
+    return f"[SUCCESS] Parsed {len(parsed_code_info)} Java files."
 
 # === Agent 2: JUnit Generator ===
-generated_tests = []
-
 def generate_junit_tests(_: str) -> str:
     global parsed_code_info, generated_tests
 
     if not parsed_code_info:
-        return "[SKIP] No parsed code available."
+        return "[SKIP] No parsed code info."
 
     client = get_openai_client()
-
     junit_prompt = PromptTemplate(
         input_variables=["code_info"],
         template="""
-You are a Java test generation expert.
+You are a Java test generator.
 
-Given this Java class info, generate a JUnit 5 test class using Mockito if needed. Test at least 80% of public methods.
+Given this Java class metadata, generate a JUnit 5 test class using Mockito if needed. Cover at least 80% of methods.
 
-Return response as JSON:
+Return strictly in this JSON format:
 {
-  "file_name": "<ClassName>Test.java",
-  "package_path": "<same as source, like com/example/service>",
-  "code": "<FULL VALID JAVA TEST CLASS CODE>"
+  "file_name": "<ClassName>Test.java>",
+  "package_path": "<com/example/service>",
+  "code": "<full valid JUnit test class code>"
 }
 
-Use standard test structure:
-- @BeforeEach setup method
-- @Test per method
-- Mocks for dependencies
-- Realistic method coverage
-
-Class Info:
+Class metadata:
 {code_info}
 """
     )
 
-    # Generate JUnit tests for each parsed class
-    generated_tests = [
-        LLMChain(llm=client, prompt=junit_prompt).run(code_info=info)
-        for info in parsed_code_info
-    ]
-    return "[SUCCESS] JUnit test classes generated."
+    chain = LLMChain(llm=client, prompt=junit_prompt)
 
-# === MAIN ===
+    generated_tests = []
+    for info in parsed_code_info:
+        try:
+            result = chain.run(code_info=info)
+            generated_tests.append(result)
+        except Exception as e:
+            print(f"[ERROR] Failed to generate test: {e}")
+    return f"[SUCCESS] Generated {len(generated_tests)} JUnit test classes."
+
+# === MAIN EXECUTION ===
 if __name__ == "__main__":
-    print("\n=== Agent 1: Java Source Parser ===")
+    print("\n=== AGENT 1: Java Code Analysis ===")
     memory1 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
     agent1 = initialize_agent(
         tools=[
-            Tool(name="ListJavaFiles", func=list_java_files, description="List all Java source files."),
-            Tool(name="ExtractCodeInfo", func=extract_code_info, description="Parse Java classes, methods, dependencies."),
+            Tool(name="ListJavaFiles", func=list_java_files, description="Scan Java files."),
+            Tool(name="ExtractCodeInfo", func=extract_code_info, description="Parse class metadata."),
         ],
         llm=get_openai_client(),
         agent_type="openai-functions",
         memory=memory1,
-        verbose=True
+        verbose=True,
     )
 
-    agent1.invoke("List and extract class details from Java project source.")
+    agent1.invoke("Scan and extract all class info from Java files.")
 
-    print("\n=== Agent 2: JUnit Code Generator ===")
+    print("\n=== AGENT 2: JUnit Generator ===")
     memory2 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
     agent2 = initialize_agent(
         tools=[
-            Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Generate real JUnit test code files."),
+            Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Generate test classes."),
         ],
         llm=get_openai_client(),
         agent_type="openai-functions",
         memory=memory2,
-        verbose=True
+        verbose=True,
     )
 
-    agent2.invoke("Generate test classes for each Java source class found.")
+    agent2.invoke("Create accurate and complete JUnit tests for analyzed Java classes.")
 
-    print("\n=== ✅ Final Output: Generated JUnit Test Classes ===")
-    for output in generated_tests:
-        print(output)
+    print("\n=== ✅ Final Output: JUnit Test Classes ===")
+    for idx, test in enumerate(generated_tests, start=1):
+        print(f"\n[Generated Test {idx}]:\n{test}")
