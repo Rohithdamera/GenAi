@@ -1,169 +1,39 @@
-import os
-import json
-from pathlib import Path
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-from langchain.agents import Tool, initialize_agent
-from langchain.chat_models import AzureChatOpenAI
+C:\Users\rdamera\AppData\Local\Temp\ipykernel_50544\3796873581.py:13: LangChainDeprecationWarning: The class `AzureChatOpenAI` was deprecated in LangChain 0.0.10 and will be removed in 1.0. An updated version of the class exists in the :class:`~langchain-openai package and should be used instead. To use it run `pip install -U :class:`~langchain-openai` and import as `from :class:`~langchain_openai import AzureChatOpenAI``.
+  return AzureChatOpenAI(
+C:\Users\rdamera\AppData\Local\Temp\ipykernel_50544\3796873581.py:152: LangChainDeprecationWarning: LangChain agents will continue to be supported, but it is recommended for new use cases to be built with LangGraph. LangGraph offers a more flexible and full-featured framework for building agents, including support for tool-calling, persistence of state, and human-in-the-loop workflows. For details, refer to the `LangGraph documentation <https://langchain-ai.github.io/langgraph/>`_ as well as guides for `Migrating from AgentExecutor <https://python.langchain.com/docs/how_to/migrate_agent/>`_ and LangGraph's `Pre-built ReAct agent <https://langchain-ai.github.io/langgraph/how-tos/create-react-agent/>`_.
+  agent = initialize_agent(
+C:\Users\rdamera\AppData\Local\Temp\ipykernel_50544\3796873581.py:159: LangChainDeprecationWarning: The method `Chain.run` was deprecated in langchain 0.1.0 and will be removed in 1.0. Use :meth:`~invoke` instead.
+  result = agent.run(f"""
 
-# === OpenAI Azure Client ===
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        deployment_name="Fourth_Chatbot",
-        openai_api_key="",  # Keep this blank if using env var
-        openai_api_version="2024-08-01-preview",
-        openai_api_type="azure",
-        temperature=0.3,
-        max_tokens=2000,
-        model_kwargs={
-            "top_p": 0.9,
-            "frequency_penalty": 0.1,
-            "presence_penalty": 0.0,
-        },
-    )
 
-# === Input Project Path ===
-project_path = r"C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement"
+> Entering new AgentExecutor chain...
+First, I need to list all the Java files in the specified directory to understand the scope of files I will be working with.
 
-# === Global Stores ===
-java_files = []
-parsed_code_info = []
-junit_suggestions = []
+Action: ListJavaFiles
+Action Input: C:\Users\rdamera\Downloads\osif-java-cg-candidate
+Observation: [FOUND] 6 Java files.
+Thought:Now that I know there are 6 Java files, I need to extract information from each file to understand their class types and other details.
 
-# === Tool 1: List Java Files ===
-def list_java_files(directory: str) -> str:
-    global java_files
-    java_files = list(Path(directory).rglob("*.java"))
-    return f"[FOUND] {len(java_files)} Java files."
+Action: ExtractCodeInfo
+Action Input: C:\Users\rdamera\Downloads\osif-java-cg-candidate
+C:\Users\rdamera\AppData\Local\Temp\ipykernel_50544\3796873581.py:63: LangChainDeprecationWarning: The class `LLMChain` was deprecated in LangChain 0.1.17 and will be removed in 1.0. Use :meth:`~RunnableSequence, e.g., `prompt | llm`` instead.
+  chain = LLMChain(llm=get_openai_client(), prompt=prompt)
 
-# === Tool 2: Extract Java Metadata ===
-def extract_code_info(_: str) -> str:
-    global java_files, parsed_code_info
+Observation: [SUCCESS] Parsed 6 files.
+Thought:With the class information extracted, I can now generate JUnit 5 test classes for each Java file, using appropriate frameworks like Mockito or WebMvcTest based on the class type.
 
-    if not java_files:
-        return "[SKIP] No Java files to parse."
+Action: GenerateJUnitTests
+Action Input: C:\Users\rdamera\Downloads\osif-java-cg-candidate
+Observation: [SUCCESS] Generated 6 test classes.
+Thought:Now that the test classes have been generated, the final step is to save these test files into a `generated_tests` directory under the matching package structure.
 
-    prompt = PromptTemplate(
-        input_variables=["source"],
-        template="""
-Analyze the following Java source code. Return a valid **single-line JSON** with:
-- class_name
-- class_type: Controller, Service, Repository, Model, Config, Other
-- package_path (from `package` declaration)
-- methods: list of all public method names
+Action: SaveJUnitTests
+Action Input: C:\Users\rdamera\Downloads\osif-java-cg-candidate\generated_tests
+Observation: [SUCCESS] Saved 6 test files.
+Thought:All steps have been successfully completed. The Java files were listed, analyzed, JUnit test classes were generated, and finally, these test files were saved in the specified directory.
 
-Only return compact valid JSON. No extra text.
+Final Answer: All Java files under the directory C:\Users\rdamera\Downloads\osif-java-cg-candidate have been processed to generate and save JUnit 5 test classes in the `generated_tests` directory as per the specified package structure.
 
-Java Code:
-{source}
-"""
-    )
+> Finished chain.
 
-    chain = LLMChain(llm=get_openai_client(), prompt=prompt)
-
-    for file_path in java_files:
-        try:
-            content = Path(file_path).read_text(encoding="utf-8")
-            result = chain.run(source=content)
-            result_json = json.loads(result.strip())
-            if "class_name" in result_json:
-                parsed_code_info.append(result_json)
-        except Exception as e:
-            print(f"[ERROR] Failed to parse {file_path.name}: {e}")
-
-    return f"[SUCCESS] Parsed {len(parsed_code_info)} files."
-
-# === Tool 3: Generate JUnit Tests ===
-def generate_junit_tests(_: str) -> str:
-    global parsed_code_info, junit_suggestions
-
-    if not parsed_code_info:
-        return "[SKIP] No parsed metadata to use."
-
-    prompt = PromptTemplate(
-        input_variables=["class_name", "class_type", "package_path", "methods"],
-        template="""
-You are a Java test expert.
-
-Write a complete JUnit 5 test class for this Java class:
-- Class Name: {class_name}
-- Type: {class_type}
-- Package: {package_path}
-- Public Methods:
-{methods}
-
-Requirements:
-- Use correct package and import statements
-- Use `Mockito`, `@Mock`, `@InjectMocks` for Service classes
-- Use `@WebMvcTest` + MockMvc for Controllers
-- Include `@SpringBootTest` for Config classes
-- Generate at least 1 test per method
-- Output ONLY valid Java class code (no markdown or explanation)
-"""
-    )
-
-    chain = LLMChain(llm=get_openai_client(), prompt=prompt)
-
-    for item in parsed_code_info:
-        try:
-            test_code = chain.run(
-                class_name=item["class_name"],
-                class_type=item["class_type"],
-                package_path=item["package_path"],
-                methods="\n".join(item["methods"]),
-            )
-            junit_suggestions.append({
-                "file_name": f"{item['class_name']}Test.java",
-                "package_path": item["package_path"],
-                "code": test_code
-            })
-        except Exception as e:
-            print(f"[ERROR] Could not generate test for {item['class_name']}: {e}")
-
-    return f"[SUCCESS] Generated {len(junit_suggestions)} test classes."
-
-# === Tool 4: Save Generated Tests ===
-def save_junit_tests(_: str) -> str:
-    global junit_suggestions
-
-    if not junit_suggestions:
-        return "[SKIP] No JUnit classes to save."
-
-    for test in junit_suggestions:
-        folder = Path("generated_tests") / test["package_path"].replace(".", "/")
-        folder.mkdir(parents=True, exist_ok=True)
-        file_path = folder / test["file_name"]
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(test["code"])
-
-    return f"[SUCCESS] Saved {len(junit_suggestions)} test files."
-
-# === Define Agent Tools ===
-tools = [
-    Tool(name="ListJavaFiles", func=list_java_files, description="Lists all .java files recursively."),
-    Tool(name="ExtractCodeInfo", func=extract_code_info, description="Extracts class info from Java source."),
-    Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Generates JUnit 5 test classes."),
-    Tool(name="SaveJUnitTests", func=save_junit_tests, description="Saves generated test files to disk.")
-]
-
-# === Run Everything ===
-def run_pipeline():
-    agent = initialize_agent(
-        tools=tools,
-        llm=get_openai_client(),
-        agent="zero-shot-react-description",
-        verbose=True
-    )
-
-    result = agent.run(f"""
-List all Java files under: {project_path}.
-Then analyze each to extract class_name, class_type, package_path, and method names.
-Then generate JUnit 5 test classes using Mockito or WebMvcTest depending on the class type.
-Then save the test files into `generated_tests` under matching package structure.
-""")
-
-    print("\n✅ Final Result:", result)
-
-if __name__ == "__main__":
-    run_pipeline()
+✅ Final Result: All Java files under the directory C:\Users\rdamera\Downloads\osif-java-cg-candidate have been processed to generate and save JUnit 5 test classes in the `generated_tests` directory as per the specified package structure.
