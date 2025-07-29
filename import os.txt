@@ -1,126 +1,160 @@
 import os
-import json
-from langchain.chains import LLMChain
+import re
+from pathlib import Path
+
+from langchain.chat_models import AzureChatOpenAI
 from langchain.prompts import PromptTemplate
-from langchain.chat_models import ChatOpenAI
+from langchain.chains import LLMChain
+from langchain.schema.output_parser import StrOutputParser
+from langchain.schema.runnable import RunnableLambda, RunnablePassthrough, RunnableMap
+from langchain.agents import initialize_agent, Tool
+from langchain.memory import ConversationBufferMemory
 
-# === Configure your OpenAI client ===
+# === Azure OpenAI client ===
 def get_openai_client():
-    return ChatOpenAI(temperature=0, model="gpt-4")
+    return AzureChatOpenAI(
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        deployment_name="Fourth_Chatbot",
+        openai_api_key="",  # Add key
+        openai_api_version="2024-08-01-preview",
+        openai_api_type="azure",
+        temperature=0.7,
+        max_tokens=2000,
+        model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
+    )
 
-# === Load all Java files ===
-def load_java_project_code(directory="./java_project"):
-    code = []
-    for root, _, files in os.walk(directory):
-        for file in files:
-            if file.endswith(".java"):
-                with open(os.path.join(root, file), "r", encoding="utf-8") as f:
-                    code.append(f.read())
-    return "\n".join(code)
+project_path = r"C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement"
 
-# === CHAIN 1: Analyze Java Project Structure ===
-def analyze_java_codebase(combined_code: str):
-    prompt = PromptTemplate(
-        input_variables=["java_code"],
+# === AGENT 1: Java Class Parser ===
+java_files = []
+java_summary = ""
+
+def list_java_files(_: str) -> str:
+    global java_files
+    java_files = [
+        os.path.join(root, f)
+        for root, _, files in os.walk(project_path)
+        for f in files if f.endswith(".java")
+    ]
+    if not java_files:
+        return "[STOP] No Java files found."
+    return f"Found {len(java_files)} Java files."
+
+def summarize_java_code(_: str) -> str:
+    global java_summary, java_files
+
+    if not java_files:
+        return "[SKIP] No Java files to process."
+
+    client = get_openai_client()
+    java_prompt = PromptTemplate(
+        input_variables=["java_content"],
         template="""
-You are a code analysis agent. Analyze the following Java codebase and extract its structure as JSON.
+You are a Java code analysis expert.
 
-Respond with ONLY JSON like:
-{{
-  "com.example.service.CandidateService": {{
-    "type": "Service",
-    "methods": {{
-      "getCandidate": {{
-        "returns": "CandidateModel",
-        "calls": ["candidateRepo.get"]
-      }},
-      "addCandidate": {{
-        "returns": "CandidateModel",
-        "calls": ["UUID.randomUUID().toString", "candidateRepo.put"]
-      }}
-    }},
-    "depends_on": []
-  }},
-  "com.example.controller.CandidateController": {{
-    "type": "Controller",
-    "methods": {{
-      "getCandidate": {{
-        "returns": "ResponseEntity<CandidateModel>",
-        "calls": ["candidateService.getCandidate"]
-      }}
-    }},
-    "depends_on": ["CandidateService"]
-  }}
-}}
+Given this Java source file, extract:
+- Class name
+- Package path
+- Type (Controller, Service, Repository, etc.)
+- All public methods with signatures
+- Internal method calls to other classes/methods
+- List of dependencies (other classes it calls)
 
-No markdown. No explanation. JSON only.
+{java_content}
 
-{java_code}
+Return structured JSON format per file.
 """
     )
 
-    llm = get_openai_client()
-    chain = LLMChain(llm=llm, prompt=prompt)
+    chain = (
+        RunnablePassthrough()
+        | RunnableLambda(lambda paths: [Path(p).read_text(encoding="utf-8") for p in paths])
+        | RunnableLambda(lambda contents: [{"java_content": c} for c in contents])
+        | RunnableMap({"java_content": RunnablePassthrough()})
+        | java_prompt
+        | client
+        | StrOutputParser()
+    )
 
-    result = chain.run(java_code=combined_code)
+    java_summary = chain.invoke(java_files)
+    return "[SUCCESS] Java source files summarized successfully."
 
-    # Safely load JSON
-    try:
-        java_structure = json.loads(result)
-    except json.JSONDecodeError:
-        print("ERROR: Could not parse structure JSON")
-        print(result)
-        raise
+# === AGENT 2: JUnit Generator ===
+junit_suggestions = []
 
-    return java_structure
+def generate_junit_tests(_: str) -> str:
+    global java_summary
 
-# === CHAIN 2: Generate JUnit Test Code ===
-def generate_junit_tests(java_structure: dict):
-    prompt = PromptTemplate(
-        input_variables=["java_structure"],
+    if not java_summary:
+        return "[SKIP] Java summary missing."
+
+    client = get_openai_client()
+    junit_prompt = PromptTemplate(
+        input_variables=["java_summary"],
         template="""
-Given the following Java class structure, generate proper JUnit test classes for each Controller and ServiceImpl.
+You are a senior Java developer and test engineer.
 
-Return JSON in this format:
-{{
+Given a JSON structure of the Java codebase, generate accurate and complete JUnit 5 test classes for each:
+- ServiceImpl
+- Repository
+- Controller
+
+Each test class should:
+- Be named like <ClassName>Test.java
+- Use Mockito where needed
+- Cover at least 80% of public methods
+- Use realistic assertions
+- Return output in the format:
+{
   "file_name": "CandidateServiceImplTest.java",
   "package_path": "com/example/service",
-  "code": "// Java code here"
-}}
+  "code": "import org.junit.jupiter.api.Test; ..."
+}
 
-Generate proper test methods using Mockito and JUnit5. Include @Test, mocks, setup, and validation based on method names and dependencies.
-
-{java_structure}
+Process this input:
+{java_summary}
 """
     )
 
-    llm = get_openai_client()
-    chain = LLMChain(llm=llm, prompt=prompt)
+    chain = LLMChain(llm=client, prompt=junit_prompt)
+    result = chain.run(java_summary=java_summary)
 
-    return chain.run(java_structure=json.dumps(java_structure))
+    global junit_suggestions
+    junit_suggestions = result
+    return "[SUCCESS] JUnit classes generated."
 
-# === Main Flow ===
+# === MAIN ===
 if __name__ == "__main__":
-    print("\n=== CHAIN 1: Analyzing Java Code ===")
-    codebase = load_java_project_code()
-    structure = analyze_java_codebase(codebase)
-    print(json.dumps(structure, indent=2))  # Optional: for debug
+    print("\n=== Agent 1: Java Source Analysis ===")
+    memory1 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
 
-    print("\n=== CHAIN 2: Generating JUnit Code ===")
-    test_code_json = generate_junit_tests(structure)
+    agent1 = initialize_agent(
+        tools=[
+            Tool(name="ListJavaFiles", func=list_java_files, description="List all Java source files."),
+            Tool(name="SummarizeJavaCode", func=summarize_java_code, description="Parse all Java classes and summarize.")
+        ],
+        llm=get_openai_client(),
+        agent_type="openai-functions",
+        memory=memory1,
+        verbose=True
+    )
 
-    # Try parse output to structured format
-    try:
-        test_output = json.loads(test_code_json)
-    except json.JSONDecodeError:
-        print("ERROR: Could not parse generated test code")
-        print(test_code_json)
-        raise
+    agent1.invoke("List and summarize Java code files for class dependencies and method map.")
 
-    # Save files (optional)
-    for test in test_output if isinstance(test_output, list) else [test_output]:
-        file_path = os.path.join("generated_tests", test["package_path"], test["file_name"])
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(test["code"])
-        print(f"✅ Wrote {file_path}")
+    print("\n=== Agent 2: JUnit Generator ===")
+    memory2 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+
+    agent2 = initialize_agent(
+        tools=[
+            Tool(name="GenerateJUnit", func=generate_junit_tests, description="Generate JUnit test classes from parsed structure.")
+        ],
+        llm=get_openai_client(),
+        agent_type="openai-functions",
+        memory=memory2,
+        verbose=True
+    )
+
+    agent2.invoke("Generate JUnit tests with >80% coverage for all services, repositories, and controllers.")
+
+    print("\n=== Output: Suggested JUnit Test Classes ===")
+    print(junit_suggestions)
