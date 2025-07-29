@@ -1,172 +1,212 @@
-import os
-import json
-from pathlib import Path
-from langchain.chat_models import AzureChatOpenAI
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-from langchain.agents import initialize_agent, Tool
-from langchain.memory import ConversationBufferMemory
+--------------------------------------------------------------------------
+ValueError                                Traceback (most recent call last)
+Cell In[4], line 161
+    153 memory1 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+    154 agent1 = initialize_agent(
+    155     tools=[Tool(name="AnalyzeJavaProject", func=analyze_java_project, description="Analyze and map Java structure")],
+    156     llm=get_openai_client(),
+   (...)
+    159     verbose=True
+    160 )
+--> 161 agent1.invoke("Analyze the Java project and decide what classes need JUnit.")
+    163 print("\n=== CHAIN 2: Generate JUnit Code ===")
+    164 memory2 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
 
+File ~\myenv\lib\site-packages\langchain\chains\base.py:167, in Chain.invoke(self, input, config, **kwargs)
+    165 except BaseException as e:
+    166     run_manager.on_chain_error(e)
+--> 167     raise e
+    168 run_manager.on_chain_end(outputs)
+    170 if include_run_info:
 
-# === Azure OpenAI Client ===
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        deployment_name="Fourth_Chatbot",
-        openai_api_key="",  # Replace with your Azure OpenAI Key
-        openai_api_version="2024-08-01-preview",
-        openai_api_type="azure",
-        temperature=0.3,
-        max_tokens=4000,
-    )
+File ~\myenv\lib\site-packages\langchain\chains\base.py:157, in Chain.invoke(self, input, config, **kwargs)
+    154 try:
+    155     self._validate_inputs(inputs)
+    156     outputs = (
+--> 157         self._call(inputs, run_manager=run_manager)
+    158         if new_arg_supported
+    159         else self._call(inputs)
+    160     )
+    162     final_outputs: dict[str, Any] = self.prep_outputs(
+    163         inputs, outputs, return_only_outputs
+    164     )
+    165 except BaseException as e:
 
+File ~\myenv\lib\site-packages\langchain\agents\agent.py:1620, in AgentExecutor._call(self, inputs, run_manager)
+   1618 # We now enter the agent loop (until it returns something).
+   1619 while self._should_continue(iterations, time_elapsed):
+-> 1620     next_step_output = self._take_next_step(
+   1621         name_to_tool_map,
+   1622         color_mapping,
+   1623         inputs,
+   1624         intermediate_steps,
+   1625         run_manager=run_manager,
+   1626     )
+   1627     if isinstance(next_step_output, AgentFinish):
+   1628         return self._return(
+   1629             next_step_output, intermediate_steps, run_manager=run_manager
+   1630         )
 
-# === Project Configuration ===
-project_path = r"C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement"
-test_output_path = os.path.join(project_path, "src", "test", "java")
-java_analysis_result = {}
+File ~\myenv\lib\site-packages\langchain\agents\agent.py:1326, in AgentExecutor._take_next_step(self, name_to_tool_map, color_mapping, inputs, intermediate_steps, run_manager)
+   1317 def _take_next_step(
+   1318     self,
+   1319     name_to_tool_map: dict[str, BaseTool],
+   (...)
+   1323     run_manager: Optional[CallbackManagerForChainRun] = None,
+   1324 ) -> Union[AgentFinish, list[tuple[AgentAction, str]]]:
+   1325     return self._consume_next_step(
+-> 1326         [
+   1327             a
+   1328             for a in self._iter_next_step(
+   1329                 name_to_tool_map,
+   1330                 color_mapping,
+   1331                 inputs,
+   1332                 intermediate_steps,
+   1333                 run_manager,
+   1334             )
+   1335         ]
+   1336     )
 
+File ~\myenv\lib\site-packages\langchain\agents\agent.py:1326, in <listcomp>(.0)
+   1317 def _take_next_step(
+   1318     self,
+   1319     name_to_tool_map: dict[str, BaseTool],
+   (...)
+   1323     run_manager: Optional[CallbackManagerForChainRun] = None,
+   1324 ) -> Union[AgentFinish, list[tuple[AgentAction, str]]]:
+   1325     return self._consume_next_step(
+-> 1326         [
+   1327             a
+   1328             for a in self._iter_next_step(
+   1329                 name_to_tool_map,
+   1330                 color_mapping,
+   1331                 inputs,
+   1332                 intermediate_steps,
+   1333                 run_manager,
+   1334             )
+   1335         ]
+   1336     )
 
-# === CHAIN 1: Analyze Java Project and Infer Structure ===
-def collect_all_java_files(base_path: str):
-    java_files = []
-    for root, _, files in os.walk(base_path):
-        if "target" in root:
-            continue
-        for file in files:
-            if file.endswith(".java"):
-                java_files.append(os.path.join(root, file))
-    return java_files
+File ~\myenv\lib\site-packages\langchain\agents\agent.py:1411, in AgentExecutor._iter_next_step(self, name_to_tool_map, color_mapping, inputs, intermediate_steps, run_manager)
+   1409     yield agent_action
+   1410 for agent_action in actions:
+-> 1411     yield self._perform_agent_action(
+   1412         name_to_tool_map, color_mapping, agent_action, run_manager
+   1413     )
 
+File ~\myenv\lib\site-packages\langchain\agents\agent.py:1433, in AgentExecutor._perform_agent_action(self, name_to_tool_map, color_mapping, agent_action, run_manager)
+   1431         tool_run_kwargs["llm_prefix"] = ""
+   1432     # We then call the tool on the tool input to get an observation
+-> 1433     observation = tool.run(
+   1434         agent_action.tool_input,
+   1435         verbose=self.verbose,
+   1436         color=color,
+   1437         callbacks=run_manager.get_child() if run_manager else None,
+   1438         **tool_run_kwargs,
+   1439     )
+   1440 else:
+   1441     tool_run_kwargs = self._action_agent.tool_run_logging_kwargs()
 
-def analyze_java_project(_: str) -> str:
-    global java_analysis_result
+File ~\myenv\lib\site-packages\langchain_core\tools\base.py:771, in BaseTool.run(self, tool_input, verbose, start_color, color, callbacks, tags, metadata, run_name, run_id, config, tool_call_id, **kwargs)
+    769 if error_to_raise:
+    770     run_manager.on_tool_error(error_to_raise)
+--> 771     raise error_to_raise
+    772 output = _format_output(content, artifact, tool_call_id, self.name, status)
+    773 run_manager.on_tool_end(output, color=color, name=self.name, **kwargs)
 
-    java_files = collect_all_java_files(project_path)
-    if not java_files:
-        return "[STOP] No Java files found."
+File ~\myenv\lib\site-packages\langchain_core\tools\base.py:740, in BaseTool.run(self, tool_input, verbose, start_color, color, callbacks, tags, metadata, run_name, run_id, config, tool_call_id, **kwargs)
+    738     if config_param := _get_runnable_config_param(self._run):
+    739         tool_kwargs = tool_kwargs | {config_param: config}
+--> 740     response = context.run(self._run, *tool_args, **tool_kwargs)
+    741 if self.response_format == "content_and_artifact":
+    742     if not isinstance(response, tuple) or len(response) != 2:
 
-    file_contents = [Path(f).read_text(encoding="utf-8")[:4000] for f in java_files[:10]]  # batch limited
-    combined_code = "\n\n".join(file_contents)
+File ~\myenv\lib\site-packages\langchain_core\tools\simple.py:105, in Tool._run(self, config, run_manager, *args, **kwargs)
+    103     if config_param := _get_runnable_config_param(self.func):
+    104         kwargs[config_param] = config
+--> 105     return self.func(*args, **kwargs)
+    106 msg = "Tool does not support sync invocation."
+    107 raise NotImplementedError(msg)
 
-    prompt = PromptTemplate(
-        input_variables=["combined_code"],
-        template="""
-You are a static code analysis tool for Java.
+Cell In[4], line 80, in analyze_java_project(_)
+     77 client = get_openai_client()
+     78 chain = LLMChain(llm=client, prompt=prompt)
+---> 80 result = chain.run(combined_code=combined_code)
+     82 try:
+     83     java_analysis_result = eval(result)  # Safe only because prompt structure is tightly controlled
 
-Analyze the following Java codebase and decide:
-- Which classes are suitable for unit testing
-- Their fully-qualified names and types (e.g., ServiceImpl, Controller)
-- What dependencies they have (e.g., repositories or services)
-- What methods exist and what they call internally
+File ~\myenv\lib\site-packages\langchain_core\_api\deprecation.py:191, in deprecated.<locals>.deprecate.<locals>.warning_emitting_wrapper(*args, **kwargs)
+    189     warned = True
+    190     emit_warning()
+--> 191 return wrapped(*args, **kwargs)
 
-Output a raw structured dictionary where:
-- keys = fully-qualified class names
-- values = {
-  "type": "ServiceImpl" | "Controller" | "Repository" | "Other",
-  "package": "fully.qualified.package",
-  "methods": ["method1", "method2"],
-  "dependencies": ["XService", "YRepo"]
-}
+File ~\myenv\lib\site-packages\langchain\chains\base.py:608, in Chain.run(self, callbacks, tags, metadata, *args, **kwargs)
+    603     return self(args[0], callbacks=callbacks, tags=tags, metadata=metadata)[
+    604         _output_key
+    605     ]
+    607 if kwargs and not args:
+--> 608     return self(kwargs, callbacks=callbacks, tags=tags, metadata=metadata)[
+    609         _output_key
+    610     ]
+    612 if not kwargs and not args:
+    613     raise ValueError(
+    614         "`run` supported with either positional arguments or keyword arguments,"
+    615         " but none were provided."
+    616     )
 
-Do not format, do not explain. Just return valid raw Python dictionary.
-{combined_code}
-"""
-    )
+File ~\myenv\lib\site-packages\langchain_core\_api\deprecation.py:191, in deprecated.<locals>.deprecate.<locals>.warning_emitting_wrapper(*args, **kwargs)
+    189     warned = True
+    190     emit_warning()
+--> 191 return wrapped(*args, **kwargs)
 
-    client = get_openai_client()
-    chain = LLMChain(llm=client, prompt=prompt)
+File ~\myenv\lib\site-packages\langchain\chains\base.py:386, in Chain.__call__(self, inputs, return_only_outputs, callbacks, tags, metadata, run_name, include_run_info)
+    354 """Execute the chain.
+    355 
+    356 Args:
+   (...)
+    377         `Chain.output_keys`.
+    378 """
+    379 config = {
+    380     "callbacks": callbacks,
+    381     "tags": tags,
+    382     "metadata": metadata,
+    383     "run_name": run_name,
+    384 }
+--> 386 return self.invoke(
+    387     inputs,
+    388     cast(RunnableConfig, {k: v for k, v in config.items() if v is not None}),
+    389     return_only_outputs=return_only_outputs,
+    390     include_run_info=include_run_info,
+    391 )
 
-    result = chain.run(combined_code=combined_code)
+File ~\myenv\lib\site-packages\langchain\chains\base.py:167, in Chain.invoke(self, input, config, **kwargs)
+    165 except BaseException as e:
+    166     run_manager.on_chain_error(e)
+--> 167     raise e
+    168 run_manager.on_chain_end(outputs)
+    170 if include_run_info:
 
-    try:
-        java_analysis_result = eval(result)  # Safe only because prompt structure is tightly controlled
-        return "[SUCCESS] Java project analyzed."
-    except Exception as e:
-        print("[ERROR] Could not parse analysis result:")
-        print(result)
-        return "[ERROR] Java analysis failed."
+File ~\myenv\lib\site-packages\langchain\chains\base.py:155, in Chain.invoke(self, input, config, **kwargs)
+    148 run_manager = callback_manager.on_chain_start(
+    149     None,
+    150     inputs,
+    151     run_id,
+    152     name=run_name,
+    153 )
+    154 try:
+--> 155     self._validate_inputs(inputs)
+    156     outputs = (
+    157         self._call(inputs, run_manager=run_manager)
+    158         if new_arg_supported
+    159         else self._call(inputs)
+    160     )
+    162     final_outputs: dict[str, Any] = self.prep_outputs(
+    163         inputs, outputs, return_only_outputs
+    164     )
 
+File ~\myenv\lib\site-packages\langchain\chains\base.py:287, in Chain._validate_inputs(self, inputs)
+    285 missing_keys = set(self.input_keys).difference(inputs)
+    286 if missing_keys:
+--> 287     raise ValueError(f"Missing some input keys: {missing_keys}")
 
-# === CHAIN 2: Generate JUnit + File Path Suggestions ===
-def generate_junit_tests(_: str) -> str:
-    if not java_analysis_result:
-        return "[STOP] No analysis data found."
-
-    client = get_openai_client()
-
-    prompt = PromptTemplate(
-        input_variables=["class_name", "class_info"],
-        template="""
-You are a JUnit 5 test code generator for Java Spring Boot projects.
-
-Based on this class:
-Class Name: {class_name}
-Class Info: {class_info}
-
-Generate:
-1. The full JUnit test class code with proper annotations and mocking (Spring Boot + Mockito).
-2. Suggest the correct directory path to place the test file (e.g., src/test/java/com/example/service).
-
-Requirements:
-- Use @WebMvcTest for Controller
-- Use @ExtendWith(MockitoExtension.class) for ServiceImpl
-- Include proper imports
-- Include setup method if needed (@BeforeEach)
-- Include at least 1 valid test method (mocked if needed)
-- Output ONLY:
-{{
-  "file_name": "CandidateServiceImplTest.java",
-  "package_path": "com/example/service",
-  "code": "...Junit test class code..."
-}}
-"""
-    )
-
-    os.makedirs(test_output_path, exist_ok=True)
-
-    for class_name, class_info in java_analysis_result.items():
-        try:
-            formatted_info = json.dumps(class_info, indent=2)
-            chain = LLMChain(llm=client, prompt=prompt)
-            result = chain.run(class_name=class_name, class_info=formatted_info)
-
-            parsed = json.loads(result)
-            full_dir = os.path.join(test_output_path, parsed["package_path"])
-            os.makedirs(full_dir, exist_ok=True)
-
-            full_file_path = os.path.join(full_dir, parsed["file_name"])
-            with open(full_file_path, "w", encoding="utf-8") as f:
-                f.write(parsed["code"])
-
-            print(f"[✅] Generated: {full_file_path}")
-
-        except Exception as e:
-            print(f"[⚠️] Failed for class {class_name}: {e}")
-
-    return "[DONE] All test classes processed."
-
-
-# === EXECUTION ===
-if __name__ == "__main__":
-    print("=== CHAIN 1: Java Project Structure Analysis ===")
-    memory1 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-    agent1 = initialize_agent(
-        tools=[Tool(name="AnalyzeJavaProject", func=analyze_java_project, description="Analyze and map Java structure")],
-        llm=get_openai_client(),
-        agent_type="openai-functions",
-        memory=memory1,
-        verbose=True
-    )
-    agent1.invoke("Analyze the Java project and decide what classes need JUnit.")
-
-    print("\n=== CHAIN 2: Generate JUnit Code ===")
-    memory2 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-    agent2 = initialize_agent(
-        tools=[Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Create JUnit test classes for analyzable classes")],
-        llm=get_openai_client(),
-        agent_type="openai-functions",
-        memory=memory2,
-        verbose=True
-    )
-    agent2.invoke("Create JUnit tests and suggest file paths.")
+ValueError: Missing some input keys: {'\n  "type"'}
