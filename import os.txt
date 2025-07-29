@@ -1,16 +1,14 @@
 import os
 import json
 from langchain.chains import LLMChain
-from langchain.agents import Tool, initialize_agent
-from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
-from langchain.chat_models import ChatOpenAI  # Assuming this is your LLM client
+from langchain.chat_models import ChatOpenAI
 
-# === Setup your OpenAI LLM ===
+# === Configure your OpenAI client ===
 def get_openai_client():
     return ChatOpenAI(temperature=0, model="gpt-4")
 
-# === Step 1: Combine Java code files ===
+# === Load all Java files ===
 def load_java_project_code(directory="./java_project"):
     code = []
     for root, _, files in os.walk(directory):
@@ -20,63 +18,77 @@ def load_java_project_code(directory="./java_project"):
                     code.append(f.read())
     return "\n".join(code)
 
-# === Chain 1: Analyze project structure ===
-def analyze_java_project(_):
-    combined_code = load_java_project_code()
-
+# === CHAIN 1: Analyze Java Project Structure ===
+def analyze_java_codebase(combined_code: str):
     prompt = PromptTemplate(
-        input_variables=["combined_code"],
+        input_variables=["java_code"],
         template="""
-Analyze the given Java codebase and return a structured JSON in the following format.
+You are a code analysis agent. Analyze the following Java codebase and extract its structure as JSON.
 
 Respond with ONLY JSON like:
 {{
-  "com.example.service.UserServiceImpl": {{
-    "type": "ServiceImpl",
+  "com.example.service.CandidateService": {{
+    "type": "Service",
     "methods": {{
-      "getUserById": {{
-        "returns": "User",
-        "calls": ["userRepo.findById"]
+      "getCandidate": {{
+        "returns": "CandidateModel",
+        "calls": ["candidateRepo.get"]
+      }},
+      "addCandidate": {{
+        "returns": "CandidateModel",
+        "calls": ["UUID.randomUUID().toString", "candidateRepo.put"]
       }}
     }},
-    "depends_on": ["UserRepository"]
+    "depends_on": []
+  }},
+  "com.example.controller.CandidateController": {{
+    "type": "Controller",
+    "methods": {{
+      "getCandidate": {{
+        "returns": "ResponseEntity<CandidateModel>",
+        "calls": ["candidateService.getCandidate"]
+      }}
+    }},
+    "depends_on": ["CandidateService"]
   }}
 }}
 
-Do not include markdown, explanation, or extra text. Only JSON.
-{combined_code}
+No markdown. No explanation. JSON only.
+
+{java_code}
 """
     )
 
     llm = get_openai_client()
     chain = LLMChain(llm=llm, prompt=prompt)
 
-    result = chain.run(combined_code=combined_code)
+    result = chain.run(java_code=combined_code)
 
-    # Safe parse
+    # Safely load JSON
     try:
-        result_json = json.loads(result)
+        java_structure = json.loads(result)
     except json.JSONDecodeError:
-        print("Failed to parse JSON:")
+        print("ERROR: Could not parse structure JSON")
         print(result)
         raise
 
-    return json.dumps(result_json, indent=2)
+    return java_structure
 
-# === Chain 2: Generate JUnit tests from structure ===
-def generate_junit_tests(java_structure_json: str):
+# === CHAIN 2: Generate JUnit Test Code ===
+def generate_junit_tests(java_structure: dict):
     prompt = PromptTemplate(
         input_variables=["java_structure"],
         template="""
-Given this Java class structure, generate JUnit test classes for each service or controller.
+Given the following Java class structure, generate proper JUnit test classes for each Controller and ServiceImpl.
 
-Respond ONLY with code blocks per class and filename comments like:
-// File: src/test/java/com/example/service/UserServiceImplTest.java
+Return JSON in this format:
+{{
+  "file_name": "CandidateServiceImplTest.java",
+  "package_path": "com/example/service",
+  "code": "// Java code here"
+}}
 
-Only include:
-- Proper `@Test` annotated methods
-- Required mock setup with Mockito
-- Use actual method names and return types
+Generate proper test methods using Mockito and JUnit5. Include @Test, mocks, setup, and validation based on method names and dependencies.
 
 {java_structure}
 """
@@ -85,14 +97,30 @@ Only include:
     llm = get_openai_client()
     chain = LLMChain(llm=llm, prompt=prompt)
 
-    return chain.run(java_structure=java_structure_json)
+    return chain.run(java_structure=json.dumps(java_structure))
 
-# === Orchestrator ===
+# === Main Flow ===
 if __name__ == "__main__":
-    print("\n=== CHAIN 1: Analyzing Java project structure ===")
-    structure_json_str = analyze_java_project(None)
-    print(structure_json_str)
+    print("\n=== CHAIN 1: Analyzing Java Code ===")
+    codebase = load_java_project_code()
+    structure = analyze_java_codebase(codebase)
+    print(json.dumps(structure, indent=2))  # Optional: for debug
 
-    print("\n=== CHAIN 2: Generating JUnit Test Code ===")
-    junit_code_output = generate_junit_tests(structure_json_str)
-    print(junit_code_output)
+    print("\n=== CHAIN 2: Generating JUnit Code ===")
+    test_code_json = generate_junit_tests(structure)
+
+    # Try parse output to structured format
+    try:
+        test_output = json.loads(test_code_json)
+    except json.JSONDecodeError:
+        print("ERROR: Could not parse generated test code")
+        print(test_code_json)
+        raise
+
+    # Save files (optional)
+    for test in test_output if isinstance(test_output, list) else [test_output]:
+        file_path = os.path.join("generated_tests", test["package_path"], test["file_name"])
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(test["code"])
+        print(f"✅ Wrote {file_path}")
