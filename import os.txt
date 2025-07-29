@@ -1,212 +1,98 @@
---------------------------------------------------------------------------
-ValueError                                Traceback (most recent call last)
-Cell In[4], line 161
-    153 memory1 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-    154 agent1 = initialize_agent(
-    155     tools=[Tool(name="AnalyzeJavaProject", func=analyze_java_project, description="Analyze and map Java structure")],
-    156     llm=get_openai_client(),
-   (...)
-    159     verbose=True
-    160 )
---> 161 agent1.invoke("Analyze the Java project and decide what classes need JUnit.")
-    163 print("\n=== CHAIN 2: Generate JUnit Code ===")
-    164 memory2 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+import os
+import json
+from langchain.chains import LLMChain
+from langchain.agents import Tool, initialize_agent
+from langchain.memory import ConversationBufferMemory
+from langchain.prompts import PromptTemplate
+from langchain.chat_models import ChatOpenAI  # Assuming this is your LLM client
 
-File ~\myenv\lib\site-packages\langchain\chains\base.py:167, in Chain.invoke(self, input, config, **kwargs)
-    165 except BaseException as e:
-    166     run_manager.on_chain_error(e)
---> 167     raise e
-    168 run_manager.on_chain_end(outputs)
-    170 if include_run_info:
+# === Setup your OpenAI LLM ===
+def get_openai_client():
+    return ChatOpenAI(temperature=0, model="gpt-4")
 
-File ~\myenv\lib\site-packages\langchain\chains\base.py:157, in Chain.invoke(self, input, config, **kwargs)
-    154 try:
-    155     self._validate_inputs(inputs)
-    156     outputs = (
---> 157         self._call(inputs, run_manager=run_manager)
-    158         if new_arg_supported
-    159         else self._call(inputs)
-    160     )
-    162     final_outputs: dict[str, Any] = self.prep_outputs(
-    163         inputs, outputs, return_only_outputs
-    164     )
-    165 except BaseException as e:
+# === Step 1: Combine Java code files ===
+def load_java_project_code(directory="./java_project"):
+    code = []
+    for root, _, files in os.walk(directory):
+        for file in files:
+            if file.endswith(".java"):
+                with open(os.path.join(root, file), "r", encoding="utf-8") as f:
+                    code.append(f.read())
+    return "\n".join(code)
 
-File ~\myenv\lib\site-packages\langchain\agents\agent.py:1620, in AgentExecutor._call(self, inputs, run_manager)
-   1618 # We now enter the agent loop (until it returns something).
-   1619 while self._should_continue(iterations, time_elapsed):
--> 1620     next_step_output = self._take_next_step(
-   1621         name_to_tool_map,
-   1622         color_mapping,
-   1623         inputs,
-   1624         intermediate_steps,
-   1625         run_manager=run_manager,
-   1626     )
-   1627     if isinstance(next_step_output, AgentFinish):
-   1628         return self._return(
-   1629             next_step_output, intermediate_steps, run_manager=run_manager
-   1630         )
+# === Chain 1: Analyze project structure ===
+def analyze_java_project(_):
+    combined_code = load_java_project_code()
 
-File ~\myenv\lib\site-packages\langchain\agents\agent.py:1326, in AgentExecutor._take_next_step(self, name_to_tool_map, color_mapping, inputs, intermediate_steps, run_manager)
-   1317 def _take_next_step(
-   1318     self,
-   1319     name_to_tool_map: dict[str, BaseTool],
-   (...)
-   1323     run_manager: Optional[CallbackManagerForChainRun] = None,
-   1324 ) -> Union[AgentFinish, list[tuple[AgentAction, str]]]:
-   1325     return self._consume_next_step(
--> 1326         [
-   1327             a
-   1328             for a in self._iter_next_step(
-   1329                 name_to_tool_map,
-   1330                 color_mapping,
-   1331                 inputs,
-   1332                 intermediate_steps,
-   1333                 run_manager,
-   1334             )
-   1335         ]
-   1336     )
+    prompt = PromptTemplate(
+        input_variables=["combined_code"],
+        template="""
+Analyze the given Java codebase and return a structured JSON in the following format.
 
-File ~\myenv\lib\site-packages\langchain\agents\agent.py:1326, in <listcomp>(.0)
-   1317 def _take_next_step(
-   1318     self,
-   1319     name_to_tool_map: dict[str, BaseTool],
-   (...)
-   1323     run_manager: Optional[CallbackManagerForChainRun] = None,
-   1324 ) -> Union[AgentFinish, list[tuple[AgentAction, str]]]:
-   1325     return self._consume_next_step(
--> 1326         [
-   1327             a
-   1328             for a in self._iter_next_step(
-   1329                 name_to_tool_map,
-   1330                 color_mapping,
-   1331                 inputs,
-   1332                 intermediate_steps,
-   1333                 run_manager,
-   1334             )
-   1335         ]
-   1336     )
+Respond with ONLY JSON like:
+{{
+  "com.example.service.UserServiceImpl": {{
+    "type": "ServiceImpl",
+    "methods": {{
+      "getUserById": {{
+        "returns": "User",
+        "calls": ["userRepo.findById"]
+      }}
+    }},
+    "depends_on": ["UserRepository"]
+  }}
+}}
 
-File ~\myenv\lib\site-packages\langchain\agents\agent.py:1411, in AgentExecutor._iter_next_step(self, name_to_tool_map, color_mapping, inputs, intermediate_steps, run_manager)
-   1409     yield agent_action
-   1410 for agent_action in actions:
--> 1411     yield self._perform_agent_action(
-   1412         name_to_tool_map, color_mapping, agent_action, run_manager
-   1413     )
+Do not include markdown, explanation, or extra text. Only JSON.
+{combined_code}
+"""
+    )
 
-File ~\myenv\lib\site-packages\langchain\agents\agent.py:1433, in AgentExecutor._perform_agent_action(self, name_to_tool_map, color_mapping, agent_action, run_manager)
-   1431         tool_run_kwargs["llm_prefix"] = ""
-   1432     # We then call the tool on the tool input to get an observation
--> 1433     observation = tool.run(
-   1434         agent_action.tool_input,
-   1435         verbose=self.verbose,
-   1436         color=color,
-   1437         callbacks=run_manager.get_child() if run_manager else None,
-   1438         **tool_run_kwargs,
-   1439     )
-   1440 else:
-   1441     tool_run_kwargs = self._action_agent.tool_run_logging_kwargs()
+    llm = get_openai_client()
+    chain = LLMChain(llm=llm, prompt=prompt)
 
-File ~\myenv\lib\site-packages\langchain_core\tools\base.py:771, in BaseTool.run(self, tool_input, verbose, start_color, color, callbacks, tags, metadata, run_name, run_id, config, tool_call_id, **kwargs)
-    769 if error_to_raise:
-    770     run_manager.on_tool_error(error_to_raise)
---> 771     raise error_to_raise
-    772 output = _format_output(content, artifact, tool_call_id, self.name, status)
-    773 run_manager.on_tool_end(output, color=color, name=self.name, **kwargs)
+    result = chain.run(combined_code=combined_code)
 
-File ~\myenv\lib\site-packages\langchain_core\tools\base.py:740, in BaseTool.run(self, tool_input, verbose, start_color, color, callbacks, tags, metadata, run_name, run_id, config, tool_call_id, **kwargs)
-    738     if config_param := _get_runnable_config_param(self._run):
-    739         tool_kwargs = tool_kwargs | {config_param: config}
---> 740     response = context.run(self._run, *tool_args, **tool_kwargs)
-    741 if self.response_format == "content_and_artifact":
-    742     if not isinstance(response, tuple) or len(response) != 2:
+    # Safe parse
+    try:
+        result_json = json.loads(result)
+    except json.JSONDecodeError:
+        print("Failed to parse JSON:")
+        print(result)
+        raise
 
-File ~\myenv\lib\site-packages\langchain_core\tools\simple.py:105, in Tool._run(self, config, run_manager, *args, **kwargs)
-    103     if config_param := _get_runnable_config_param(self.func):
-    104         kwargs[config_param] = config
---> 105     return self.func(*args, **kwargs)
-    106 msg = "Tool does not support sync invocation."
-    107 raise NotImplementedError(msg)
+    return json.dumps(result_json, indent=2)
 
-Cell In[4], line 80, in analyze_java_project(_)
-     77 client = get_openai_client()
-     78 chain = LLMChain(llm=client, prompt=prompt)
----> 80 result = chain.run(combined_code=combined_code)
-     82 try:
-     83     java_analysis_result = eval(result)  # Safe only because prompt structure is tightly controlled
+# === Chain 2: Generate JUnit tests from structure ===
+def generate_junit_tests(java_structure_json: str):
+    prompt = PromptTemplate(
+        input_variables=["java_structure"],
+        template="""
+Given this Java class structure, generate JUnit test classes for each service or controller.
 
-File ~\myenv\lib\site-packages\langchain_core\_api\deprecation.py:191, in deprecated.<locals>.deprecate.<locals>.warning_emitting_wrapper(*args, **kwargs)
-    189     warned = True
-    190     emit_warning()
---> 191 return wrapped(*args, **kwargs)
+Respond ONLY with code blocks per class and filename comments like:
+// File: src/test/java/com/example/service/UserServiceImplTest.java
 
-File ~\myenv\lib\site-packages\langchain\chains\base.py:608, in Chain.run(self, callbacks, tags, metadata, *args, **kwargs)
-    603     return self(args[0], callbacks=callbacks, tags=tags, metadata=metadata)[
-    604         _output_key
-    605     ]
-    607 if kwargs and not args:
---> 608     return self(kwargs, callbacks=callbacks, tags=tags, metadata=metadata)[
-    609         _output_key
-    610     ]
-    612 if not kwargs and not args:
-    613     raise ValueError(
-    614         "`run` supported with either positional arguments or keyword arguments,"
-    615         " but none were provided."
-    616     )
+Only include:
+- Proper `@Test` annotated methods
+- Required mock setup with Mockito
+- Use actual method names and return types
 
-File ~\myenv\lib\site-packages\langchain_core\_api\deprecation.py:191, in deprecated.<locals>.deprecate.<locals>.warning_emitting_wrapper(*args, **kwargs)
-    189     warned = True
-    190     emit_warning()
---> 191 return wrapped(*args, **kwargs)
+{java_structure}
+"""
+    )
 
-File ~\myenv\lib\site-packages\langchain\chains\base.py:386, in Chain.__call__(self, inputs, return_only_outputs, callbacks, tags, metadata, run_name, include_run_info)
-    354 """Execute the chain.
-    355 
-    356 Args:
-   (...)
-    377         `Chain.output_keys`.
-    378 """
-    379 config = {
-    380     "callbacks": callbacks,
-    381     "tags": tags,
-    382     "metadata": metadata,
-    383     "run_name": run_name,
-    384 }
---> 386 return self.invoke(
-    387     inputs,
-    388     cast(RunnableConfig, {k: v for k, v in config.items() if v is not None}),
-    389     return_only_outputs=return_only_outputs,
-    390     include_run_info=include_run_info,
-    391 )
+    llm = get_openai_client()
+    chain = LLMChain(llm=llm, prompt=prompt)
 
-File ~\myenv\lib\site-packages\langchain\chains\base.py:167, in Chain.invoke(self, input, config, **kwargs)
-    165 except BaseException as e:
-    166     run_manager.on_chain_error(e)
---> 167     raise e
-    168 run_manager.on_chain_end(outputs)
-    170 if include_run_info:
+    return chain.run(java_structure=java_structure_json)
 
-File ~\myenv\lib\site-packages\langchain\chains\base.py:155, in Chain.invoke(self, input, config, **kwargs)
-    148 run_manager = callback_manager.on_chain_start(
-    149     None,
-    150     inputs,
-    151     run_id,
-    152     name=run_name,
-    153 )
-    154 try:
---> 155     self._validate_inputs(inputs)
-    156     outputs = (
-    157         self._call(inputs, run_manager=run_manager)
-    158         if new_arg_supported
-    159         else self._call(inputs)
-    160     )
-    162     final_outputs: dict[str, Any] = self.prep_outputs(
-    163         inputs, outputs, return_only_outputs
-    164     )
+# === Orchestrator ===
+if __name__ == "__main__":
+    print("\n=== CHAIN 1: Analyzing Java project structure ===")
+    structure_json_str = analyze_java_project(None)
+    print(structure_json_str)
 
-File ~\myenv\lib\site-packages\langchain\chains\base.py:287, in Chain._validate_inputs(self, inputs)
-    285 missing_keys = set(self.input_keys).difference(inputs)
-    286 if missing_keys:
---> 287     raise ValueError(f"Missing some input keys: {missing_keys}")
-
-ValueError: Missing some input keys: {'\n  "type"'}
+    print("\n=== CHAIN 2: Generating JUnit Test Code ===")
+    junit_code_output = generate_junit_tests(structure_json_str)
+    print(junit_code_output)
