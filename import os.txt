@@ -1,2 +1,214 @@
-# Example for us-east-1:
-arn:aws:lambda:us-east-1:770693421928:layer:Klayers-p39-Crypto:9
+
+import os
+from pathlib import Path
+from langchain.chat_models import AzureChatOpenAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+from langchain.agents import initialize_agent, Tool
+from langchain.memory import ConversationBufferMemory
+from langchain.schema.output_parser import StrOutputParser
+from langchain.schema.runnable import RunnableLambda, RunnablePassthrough, RunnableMap
+
+# === Azure OpenAI client ===
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        deployment_name="Fourth_Chatbot",
+        openai_api_key="",  # Add key
+        openai_api_version="2024-08-01-preview",
+        openai_api_type="azure",
+        temperature=0.7,
+        max_tokens=2000,
+        model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
+    )
+
+project_path = r"C:\\Users\\rdamera\\Downloads\\OrderManagement 1\\OrderManagement"
+
+# === Shared Logic ===
+def find_all_xml_files(base_path: str, subfolder: str) -> list:
+    xml_files = []
+    for root, dirs, files in os.walk(base_path):
+        if any("target" in part.lower() for part in Path(root).parts):
+            continue
+        if os.path.normpath(root).endswith(os.path.normpath(subfolder)):
+            for sub_root, _, sub_files in os.walk(root):
+                for file in sub_files:
+                    if file.lower().endswith(".xml"):
+                        xml_files.append(os.path.join(sub_root, file))
+    return xml_files
+
+# === AGENT 1: Mule XML Summarizer ===
+mule_files = []
+mule_summary = ""
+combined_summaries = []
+
+def list_mule_xml_files(_: str) -> str:
+    global mule_files
+    mule_files = find_all_xml_files(project_path, os.path.join("src", "main", "mule"))
+    if not mule_files:
+        return "[STOP] No Mule XML files found."
+    return f"Found {len(mule_files)} Mule XML files:\n" + "\n".join(mule_files)
+
+def summarize_all_files(_: str) -> str:
+    global mule_summary, combined_summaries
+    if not mule_files:
+        return "[SKIP] No Mule files to summarize."
+
+    client = get_openai_client()
+
+    parallel_prompt = PromptTemplate(
+        input_variables=["xml_content"],
+        template="""
+You are an expert in MuleSoft. Explain this XML configuration clearly for developers and architects.
+Focus on flows, subflows, processors, and global configs.
+
+{xml_content}
+"""
+    )
+
+    chain = (
+        RunnablePassthrough()
+        | RunnableLambda(lambda paths: [Path(p).read_text(encoding="utf-8") for p in paths])
+        | RunnableLambda(lambda contents: [{"xml_content": c} for c in contents])
+        | RunnableMap({"xml_content": RunnablePassthrough()})
+        | parallel_prompt
+        | client
+        | StrOutputParser()
+    )
+
+    mule_summary = chain.invoke(mule_files)
+    combined_summaries = mule_summary if isinstance(mule_summary, list) else [mule_summary]
+
+    return "[SUCCESS] All XML files summarized successfully."
+
+def generate_final_summary(_: str) -> str:
+    global combined_summaries
+    if not combined_summaries:
+        return "[SKIP] No summaries available. Skipping final summary."
+
+    client = get_openai_client()
+    prompt_template = PromptTemplate(
+        input_variables=["combined_summaries"],
+        template="""
+You are an expert in summarizing complex XML-based MuleSoft configuration files used in integration applications.
+Explain the logic in a clear and understandable way for beginners, non-technical stakeholders, and developers.
+Focus on identifying and explaining flows, global configurations, data flow, and how components interact.
+
+Include:
+- Major flows/subflows
+- Key global configurations or services
+- Overall integration flow and purpose
+
+{combined_summaries}
+"""
+    )
+    try:
+        chain = LLMChain(llm=client, prompt=prompt_template)
+        return chain.run(combined_summaries="\n\n".join(combined_summaries))
+    except Exception as e:
+        return f"[ERROR] Final summary generation failed: {str(e)}"
+
+# === AGENT 2: pom.xml Summarizer ===
+pom_summary = ""
+
+def find_pom_file(_: str) -> str:
+    global pom_file
+    pom_file = os.path.join(project_path, "pom.xml")
+    if not os.path.exists(pom_file):
+        return "[STOP] pom.xml not found."
+    return f"Found pom.xml at: {pom_file}"
+
+def summarize_pom(_: str) -> str:
+    if not os.path.exists(pom_file):
+        return "[SKIP] pom.xml not available."
+    client = get_openai_client()
+    prompt = PromptTemplate(
+        input_variables=["xml_content"],
+        template="""
+You are an expert in analyzing Maven pom.xml files. Given a pom.xml, summarize its contents in a clear and structured manner. 
+Begin by identifying the runtime environment details, such as the Java version, packaging type, build profiles, or any other 
+configuration that defines how the project runs. Then, extract and list all the dependencies, specifying their groupId, artifactId, and version, along with a brief explanation of the purpose or functionality each dependency provides within the project. Finally, analyze any shared libraries, parent POMs, BOM imports, or Maven plugins used in the project, and explain their roles—such as managing builds, running tests, or handling deployment. Focus on summarizing the file in a way that provides both technical clarity and high-level understanding.
+
+{xml_content}
+"""
+    )
+    with open(pom_file, "r", encoding="utf-8") as f:
+        xml_content = f.read()
+    chain = LLMChain(llm=client, prompt=prompt)
+    global pom_summary
+    pom_summary = chain.run(xml_content=xml_content)
+    return "[SUCCESS] pom.xml summarized successfully."
+
+# === AGENT 3: Unified Report Generator ===
+def generate_unified_report(_: str) -> str:
+    if not mule_summary or not pom_summary:
+        return "[SKIP] One or both summaries are missing."
+    client = get_openai_client()
+    prompt = PromptTemplate(
+        input_variables=["mule_summary", "pom_summary"],
+        template="""
+You are Agent3, responsible for generating a unified, developer-friendly technical report. 
+You will receive two inputs: one from Agent1, which summarizes the contents and structure of MuleSoft XML files 
+(such as flows, connectors, configurations, and logic), and another from Agent2, which summarizes the Maven pom.xml
+ file (including runtime settings, dependencies, plugins, and build configurations). Your task is to carefully 
+combine both summaries into a single comprehensive and well-structured report. The goal is to help a new developer
+ or team member quickly understand the full technical setup of the project—how it is configured, what components 
+it uses, how they interact, and how the project is built and run. Ensure the report flows logically, avoids duplication, 
+and clearly highlights how the XML-based configurations and the Maven setup work together in the context of the overall 
+application.
+
+Mule XML Summary:
+{mule_summary}
+
+POM Summary:
+{pom_summary}
+"""
+    )
+    chain = LLMChain(llm=client, prompt=prompt)
+    return chain.run(mule_summary="\n\n".join(combined_summaries), pom_summary=pom_summary)
+
+# === MAIN ===
+if __name__ == "__main__":
+    print("\n=== Agent 1: Mule Folder XML Analysis ===")
+    memory1 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+    agent1 = initialize_agent(
+        tools=[
+            Tool(name="ListMuleXMLFiles", func=list_mule_xml_files, description="List Mule XMLs."),
+            Tool(name="SummarizeAllFiles", func=summarize_all_files, description="Summarize Mule XMLs."),
+            Tool(name="GenerateFinalSummary", func=generate_final_summary, description="Generate Mule summary only (used by Agent 3).")
+        ],
+        llm=get_openai_client(),
+        agent_type="openai-functions",
+        memory=memory1,
+        verbose=True
+    )
+    agent1.invoke("List MuleSoft XML files strictly under src/main/mule, summarize and store the summary internally. Do not print.")
+
+    print("\n=== Agent 2: pom.xml Analyzer ===")
+    memory2 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+    agent2 = initialize_agent(
+        tools=[
+            Tool(name="FindPOM", func=find_pom_file, description="Find the pom.xml in the root folder."),
+            Tool(name="SummarizePOM", func=summarize_pom, description="Summarize Maven pom.xml into structure and dependencies."),
+        ],
+        llm=get_openai_client(),
+        agent_type="openai-functions",
+        memory=memory2,
+        verbose=True
+    )
+    agent2.invoke("Locate and summarize pom.xml, store internally for Agent 3.")
+
+    print("\n=== Agent 3: Unified Summary Generator ===")
+    memory3 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+    agent3 = initialize_agent(
+        tools=[
+            Tool(name="GenerateUnifiedSummary", func=generate_unified_report, description="Combine Mule and pom.xml summaries into one report."),
+        ],
+        llm=get_openai_client(),
+        agent_type="openai-functions",
+        memory=memory3,
+        verbose=True
+    )
+    final_report = agent3.invoke("Generate final unified summary combining Mule XML and Maven pom.xml insights.")
+    print("\n[FINAL UNIFIED SUMMARY]:\n")
+    print(final_report)
