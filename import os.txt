@@ -1,113 +1,172 @@
-=== Chain 1: Analyze Java Code ===
+import os
+import json
+from pathlib import Path
+from langchain.chat_models import AzureChatOpenAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+from langchain.agents import initialize_agent, Tool
+from langchain.memory import ConversationBufferMemory
 
 
-> Entering new AgentExecutor chain...
-To analyze the full Java code structure, I need to use the AnalyzeJavaCodebase tool.
-Action: AnalyzeJavaCodebase
-Action Input: Full Java codebase
-Observation: [ERROR] Failed to parse Java analysis output. Raw:
-### Analysis of Java Files
-
-#### 1. Main Application Class
-- **Full Class Name with Package:** com.example.osif_java_cg_candidate.OsifJavaCgCandidateApplication
-- **Class Type:** Main Application Class
-- **Method Names and Return Types:**
-  - `main(String[] args)`: void
-- **Method Calls within Methods:**
-  - `SpringApplication.run(OsifJavaCgCandidateApplication.class, args)`
-- **Dependencies:** None
-
-#### 2. Configuration Class
-- **Full Class Name with Package:** com.example.osif_java_cg_candidate.config.CandidateConfig
-- **Class Type:** Configuration Class
-- **Method Names and Return Types:** None
-- **Method Calls within Methods:** None
-- **Dependencies:** None
-
-#### 3. Controller Class
-- **Full Class Name with Package:** com.example.osif_java_cg_candidate.controller.CandidateController
-- **Class Type:** Controller
-- **Method Names and Return Types:**
-  - `addCandidate(CandidateModel candidate)`: ResponseEntity<CandidateModel>
-  - `getCandidate(String id)`: ResponseEntity<CandidateModel>
-  - `getAllCandidates()`: ResponseEntity<List<CandidateModel>>
-- **Method Calls within Methods:**
-  - `candidateService.addCandidate(candidate)`
-  - `candidateService.getCandidate(id)`
-  - `candidateService.getAllCandidates()`
-- **Dependencies:**
-  - Autowired: CandidateService candidateService
-
-#### 4. Model Class
-- **Full Class Name with Package:** com.example.osif_java_cg_candidate.model.CandidateModel
-- **Class Type:** Model
-- **Method Names and Return Types:** None (Data class with Lombok annotations)
-- **Method Calls within Methods:** None
-- **Dependencies:** None
-
-#### 5. Service Class
-- **Full Class Name with Package:** com.example.osif_java_cg_candidate.service.CandidateService
-- **Class Type:** Service
-- **Method Names and Return Types:**
-  - `addCandidate(CandidateModel candidate)`: CandidateModel
-  - `getCandidate(String id)`: CandidateModel
-  - `getAllCandidates()`: List<CandidateModel>
-- **Method Calls within Methods:**
-  - `UUID.randomUUID().toString()`
-  - `candidate.setCandidateId(id)`
-  - `candidateRepo.put(id, candidate)`
-  - `candidateRepo.get(id)`
-  - `new ArrayList<>(candidateRepo.values())`
-- **Dependencies:** None
-
-#### 6. Test Class
-- **Full Class Name with Package:** com.example.osif_java_cg_candidate.OsifJavaCgCandidateApplicationTests
-- **Class Type:** Test
-- **Method Names and Return Types:**
-  - `contextLoads()`: void
-- **Method Calls within Methods:** None
-- **Dependencies:** None
-
-This analysis covers the basic structure, methods, method calls, and dependencies of the classes in the provided Java files.
-Thought:I now know the final answer.
-Final Answer: The Java codebase consists of several classes, each serving different purposes:
-
-1. **Main Application Class** (`com.example.osif_java_cg_candidate.OsifJavaCgCandidateApplication`):
-   - Contains the `main` method which starts the application using `SpringApplication.run`.
-   - No dependencies.
-
-2. **Configuration Class** (`com.example.osif_java_cg_candidate.config.CandidateConfig`):
-   - A configuration class with no methods or dependencies.
-
-3. **Controller Class** (`com.example.osif_java_cg_candidate.controller.CandidateController`):
-   - Methods include `addCandidate`, `getCandidate`, and `getAllCandidates`, all returning `ResponseEntity`.
-   - Depends on `CandidateService` for business logic.
-
-4. **Model Class** (`com.example.osif_java_cg_candidate.model.CandidateModel`):
-   - A data class with Lombok annotations, no methods.
-
-5. **Service Class** (`com.example.osif_java_cg_candidate.service.CandidateService`):
-   - Methods include `addCandidate`, `getCandidate`, and `getAllCandidates`.
-   - Uses `UUID` for generating unique IDs and manages candidates using a repository pattern.
-
-6. **Test Class** (`com.example.osif_java_cg_candidate.OsifJavaCgCandidateApplicationTests`):
-   - Contains a `contextLoads` method to test if the application context loads properly.
-   - No dependencies.
-
-This structure indicates a typical Spring Boot application with separation of concerns among configuration, controller, service, and model layers, along with a main application class and a test class.
-
-> Finished chain.
-
-=== Chain 2: Generate JUnit ===
+# === Azure OpenAI Client ===
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        deployment_name="Fourth_Chatbot",
+        openai_api_key="",  # Replace with your Azure OpenAI Key
+        openai_api_version="2024-08-01-preview",
+        openai_api_type="azure",
+        temperature=0.3,
+        max_tokens=4000,
+    )
 
 
-> Entering new AgentExecutor chain...
-To generate JUnit test classes, I need to use the tool provided.
+# === Project Configuration ===
+project_path = r"C:\Users\rdamera\Downloads\OrderManagement 1\OrderManagement"
+test_output_path = os.path.join(project_path, "src", "test", "java")
+java_analysis_result = {}
 
-Action: GenerateJUnitTests
-Action Input: Java codebase from previous analysis
-Observation: [STOP] Java analysis data not available.
-Thought:I cannot proceed without the Java codebase data.
-Final Answer: Unable to generate JUnit test classes due to lack of Java codebase data from previous analysis.
 
-> Finished chain.
+# === CHAIN 1: Analyze Java Project and Infer Structure ===
+def collect_all_java_files(base_path: str):
+    java_files = []
+    for root, _, files in os.walk(base_path):
+        if "target" in root:
+            continue
+        for file in files:
+            if file.endswith(".java"):
+                java_files.append(os.path.join(root, file))
+    return java_files
+
+
+def analyze_java_project(_: str) -> str:
+    global java_analysis_result
+
+    java_files = collect_all_java_files(project_path)
+    if not java_files:
+        return "[STOP] No Java files found."
+
+    file_contents = [Path(f).read_text(encoding="utf-8")[:4000] for f in java_files[:10]]  # batch limited
+    combined_code = "\n\n".join(file_contents)
+
+    prompt = PromptTemplate(
+        input_variables=["combined_code"],
+        template="""
+You are a static code analysis tool for Java.
+
+Analyze the following Java codebase and decide:
+- Which classes are suitable for unit testing
+- Their fully-qualified names and types (e.g., ServiceImpl, Controller)
+- What dependencies they have (e.g., repositories or services)
+- What methods exist and what they call internally
+
+Output a raw structured dictionary where:
+- keys = fully-qualified class names
+- values = {
+  "type": "ServiceImpl" | "Controller" | "Repository" | "Other",
+  "package": "fully.qualified.package",
+  "methods": ["method1", "method2"],
+  "dependencies": ["XService", "YRepo"]
+}
+
+Do not format, do not explain. Just return valid raw Python dictionary.
+{combined_code}
+"""
+    )
+
+    client = get_openai_client()
+    chain = LLMChain(llm=client, prompt=prompt)
+
+    result = chain.run(combined_code=combined_code)
+
+    try:
+        java_analysis_result = eval(result)  # Safe only because prompt structure is tightly controlled
+        return "[SUCCESS] Java project analyzed."
+    except Exception as e:
+        print("[ERROR] Could not parse analysis result:")
+        print(result)
+        return "[ERROR] Java analysis failed."
+
+
+# === CHAIN 2: Generate JUnit + File Path Suggestions ===
+def generate_junit_tests(_: str) -> str:
+    if not java_analysis_result:
+        return "[STOP] No analysis data found."
+
+    client = get_openai_client()
+
+    prompt = PromptTemplate(
+        input_variables=["class_name", "class_info"],
+        template="""
+You are a JUnit 5 test code generator for Java Spring Boot projects.
+
+Based on this class:
+Class Name: {class_name}
+Class Info: {class_info}
+
+Generate:
+1. The full JUnit test class code with proper annotations and mocking (Spring Boot + Mockito).
+2. Suggest the correct directory path to place the test file (e.g., src/test/java/com/example/service).
+
+Requirements:
+- Use @WebMvcTest for Controller
+- Use @ExtendWith(MockitoExtension.class) for ServiceImpl
+- Include proper imports
+- Include setup method if needed (@BeforeEach)
+- Include at least 1 valid test method (mocked if needed)
+- Output ONLY:
+{{
+  "file_name": "CandidateServiceImplTest.java",
+  "package_path": "com/example/service",
+  "code": "...Junit test class code..."
+}}
+"""
+    )
+
+    os.makedirs(test_output_path, exist_ok=True)
+
+    for class_name, class_info in java_analysis_result.items():
+        try:
+            formatted_info = json.dumps(class_info, indent=2)
+            chain = LLMChain(llm=client, prompt=prompt)
+            result = chain.run(class_name=class_name, class_info=formatted_info)
+
+            parsed = json.loads(result)
+            full_dir = os.path.join(test_output_path, parsed["package_path"])
+            os.makedirs(full_dir, exist_ok=True)
+
+            full_file_path = os.path.join(full_dir, parsed["file_name"])
+            with open(full_file_path, "w", encoding="utf-8") as f:
+                f.write(parsed["code"])
+
+            print(f"[✅] Generated: {full_file_path}")
+
+        except Exception as e:
+            print(f"[⚠️] Failed for class {class_name}: {e}")
+
+    return "[DONE] All test classes processed."
+
+
+# === EXECUTION ===
+if __name__ == "__main__":
+    print("=== CHAIN 1: Java Project Structure Analysis ===")
+    memory1 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+    agent1 = initialize_agent(
+        tools=[Tool(name="AnalyzeJavaProject", func=analyze_java_project, description="Analyze and map Java structure")],
+        llm=get_openai_client(),
+        agent_type="openai-functions",
+        memory=memory1,
+        verbose=True
+    )
+    agent1.invoke("Analyze the Java project and decide what classes need JUnit.")
+
+    print("\n=== CHAIN 2: Generate JUnit Code ===")
+    memory2 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+    agent2 = initialize_agent(
+        tools=[Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Create JUnit test classes for analyzable classes")],
+        llm=get_openai_client(),
+        agent_type="openai-functions",
+        memory=memory2,
+        verbose=True
+    )
+    agent2.invoke("Create JUnit tests and suggest file paths.")
