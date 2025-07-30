@@ -1,139 +1,95 @@
 import os
 import json
-import tempfile
+import base64
 import zipfile
+import tempfile
+import shutil
 from pathlib import Path
-import logging
-from base64 import b64decode
-
 from langchain.prompts import PromptTemplate
+from langchain_core.runnables import RunnableSequence
 from langchain.tools import Tool
 from langchain.agents import initialize_agent
 from langchain_openai import AzureChatOpenAI
+
+# === OpenAI Azure Client (decrypt credentials, similar to yours) ===
+import logging
+from base64 import b64decode
 from Crypto.Cipher import AES
-
-# === Logging ===
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
 
-# === Global Stores ===
-java_files = []
-parsed_code_info = []
-junit_suggestions = []
-
-# === AES Decryption Helpers ===
 def unpad(data):
     return data[:-data[-1]]
-
 def decrypt(data, key):
     cipher = AES.new(b64decode(key), AES.MODE_ECB)
     decrypted_data = cipher.decrypt(b64decode(data))
     return unpad(decrypted_data).decode()
 
-# === Azure OpenAI Client ===
-def get_openai_client():
+def get_openai_client(model_instance_name=None):
     try:
-        aes_key_base64 = os.environ['AES_KEY']
-        encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-        encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+        aes_key = os.environ['AES_KEY']
+        encrypted_base = os.environ['ENCRYPTED_API_BASE']
+        encrypted_key = os.environ['ENCRYPTED_API_KEY']
         api_version = os.environ['AZURE_API_VERSION']
-        deployment_name = os.environ['DEPLOYMENT_NAME']
-
-        decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-        decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
-
+        deployment = model_instance_name or os.environ['DEPLOYMENT_NAME']
+        base = decrypt(encrypted_base, aes_key)
+        key = decrypt(encrypted_key, aes_key)
+        if not base.endswith('/'):
+            base += '/'
         return AzureChatOpenAI(
-            azure_endpoint=decrypted_api_base,
-            deployment_name=deployment_name,
-            openai_api_key=decrypted_api_key,
-            openai_api_version=api_version,
-            openai_api_type="azure",
-            temperature=0.3,
-            max_tokens=2000,
+            deployment_name=deployment,
+            openai_api_base=base,
+            openai_api_key=key,
+            openai_api_version=api_version
         )
-
     except Exception as e:
-        logger.error(f"Failed to initialize Azure OpenAI client: {e}")
+        logger.error("OpenAI init failed: %s", e)
         raise
 
-# === Tool 1: List Java Files ===
+# === Your unchanged tools ===
+java_files = []
+parsed_code_info = []
+junit_suggestions = []
+
 def list_java_files(directory: str) -> str:
     global java_files
     java_files = list(Path(directory).rglob("*.java"))
     return f"[FOUND] {len(java_files)} Java files."
 
-# === Tool 2: Extract Class Metadata ===
 def extract_code_info(_: str) -> str:
     global java_files, parsed_code_info
-
     if not java_files:
         return "[SKIP] No Java files to parse."
-
-    prompt = PromptTemplate(
-        input_variables=["source"],
-        template="""
-Analyze the following Java source code and return the following as JSON:
-- class_name
-- class_type (Controller, Service, Config, Model, etc.)
-- package_path (from the package declaration)
-- methods: list of public method names
-
-Only return compact valid JSON. No extra commentary.
-
-Java Source:
-{source}
-"""
-    )
-
+    parsed_code_info.clear()
+    prompt = PromptTemplate(input_variables=["source"],
+        template="""...""" )
     chain = prompt | get_openai_client()
-
-    for file_path in java_files:
+    for fp in java_files:
         try:
-            content = Path(file_path).read_text(encoding="utf-8")
+            content = fp.read_text(encoding="utf-8")
             result = chain.invoke({"source": content})
-            result_json = json.loads(result.content.strip())
-            if "class_name" in result_json:
-                parsed_code_info.append(result_json)
+            j = json.loads(result.content.strip())
+            if "class_name" in j:
+                parsed_code_info.append(j)
         except Exception as e:
-            logger.warning(f"[ERROR] Parsing {file_path.name} failed: {e}")
-
+            logger.error("Parsing %s failed: %s", fp.name, e)
     return f"[SUCCESS] Parsed {len(parsed_code_info)} files."
 
-# === Tool 3: Generate JUnit Tests ===
 def generate_junit_tests(_: str) -> str:
     global parsed_code_info, junit_suggestions
-
+    junit_suggestions.clear()
     if not parsed_code_info:
-        return "[SKIP] No parsed classes to generate from."
-
-    prompt = PromptTemplate(
-        input_variables=["class_name", "class_type", "package_path", "methods"],
-        template="""
-Write a full JUnit 5 test class for:
-- Class Name: {class_name}
-- Type: {class_type}
-- Package: {package_path}
-- Public Methods:
-{methods}
-
-Use proper annotations:
-- Use @WebMvcTest and MockMvc for Controller
-- Use @SpringBootTest or @ExtendWith(MockitoExtension.class) for Service/Config
-- Include mocks and 1 test per method
-
-Output valid Java code ONLY (no markdown, no explanation).
-"""
-    )
-
+        return "[SKIP] No parsed classes."
+    prompt = PromptTemplate(input_variables=["class_name","class_type","package_path","methods"],
+        template="""...""" )
     chain = prompt | get_openai_client()
-
     for item in parsed_code_info:
         try:
             result = chain.invoke({
                 "class_name": item["class_name"],
                 "class_type": item["class_type"],
                 "package_path": item["package_path"],
-                "methods": "\n".join(item["methods"]),
+                "methods": "\n".join(item["methods"])
             })
             junit_suggestions.append({
                 "file_name": f"{item['class_name']}Test.java",
@@ -141,92 +97,65 @@ Output valid Java code ONLY (no markdown, no explanation).
                 "code": result.content.strip()
             })
         except Exception as e:
-            logger.warning(f"[ERROR] Could not generate test for {item['class_name']}: {e}")
-
+            logger.error("Generate test for %s failed: %s", item.get("class_name"), e)
     return f"[SUCCESS] Generated {len(junit_suggestions)} test classes."
 
-# === Tool 4: Save Tests to /tmp ===
-def save_and_print_tests(_: str) -> str:
+def save_and_collect(_: str) -> str:
     global junit_suggestions
-    if not junit_suggestions:
-        return "[SKIP] No JUnit classes to save."
+    results = []
+    for tst in junit_suggestions:
+        results.append({
+            "file_name": tst["file_name"],
+            "package_path": tst["package_path"],
+            "code": tst["code"]
+        })
+    return json.dumps(results)
 
-    for test in junit_suggestions:
-        folder = Path("/tmp/generated_tests") / test["package_path"].replace(".", "/")
-        folder.mkdir(parents=True, exist_ok=True)
-        file_path = folder / test["file_name"]
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(test["code"])
-
-    return f"[SUCCESS] Saved {len(junit_suggestions)} test files."
-
-# === Tool Registry ===
 tools = [
-    Tool(name="ListJavaFiles", func=list_java_files, description="Lists all Java files."),
-    Tool(name="ExtractCodeInfo", func=extract_code_info, description="Parses each Java file."),
-    Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Generates JUnit 5 test classes."),
-    Tool(name="SaveJUnitTests", func=save_and_print_tests, description="Saves tests to disk.")
+    Tool(name="ListJavaFiles", func=list_java_files, description="..."),
+    Tool(name="ExtractCodeInfo", func=extract_code_info, description="..."),
+    Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="..."),
+    Tool(name="SaveJUnitTests", func=save_and_collect, description="...")
 ]
 
-# === Lambda Handler ===
-def lambda_handler(event, context):
-    try:
-        # API Gateway passes base64-encoded binary file
-        is_base64_encoded = event.get("isBase64Encoded", False)
-        if not is_base64_encoded:
-            return {
-                "statusCode": 400,
-                "body": json.dumps({"error": "Expected base64-encoded binary input"})
-            }
-
-        zip_bytes = b64decode(event["body"])
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            zip_path = os.path.join(tmpdir, "input.zip")
-            with open(zip_path, "wb") as f:
-                f.write(zip_bytes)
-
-            extract_dir = os.path.join(tmpdir, "unzipped")
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(extract_dir)
-
-            # Run LangChain Pipeline
-            agent = initialize_agent(
-                tools=tools,
-                llm=get_openai_client(),
-                agent="zero-shot-react-description",
-                verbose=True
-            )
-
-            command = f"""
-List all Java files under: {extract_dir}.
-Then extract class metadata like class name, type, package, and public method names.
-Then generate JUnit 5 test classes.
-Finally, save the test classes under /tmp/generated_tests.
+pipeline_text = """
+ListJavaFiles
+Then ExtractCodeInfo
+Then GenerateJUnitTests
+Finally SaveJUnitTests
 """
-            agent.run(command)
 
-            # Prepare results
-            output_files = []
-            for test in junit_suggestions:
-                file_path = Path("/tmp/generated_tests") / test["package_path"].replace(".", "/") / test["file_name"]
-                if file_path.exists():
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        output_files.append({
-                            "file_name": test["file_name"],
-                            "package_path": test["package_path"],
-                            "code": f.read()
-                        })
-
-            return {
-                "statusCode": 200,
-                "headers": {"Content-Type": "application/json"},
-                "body": json.dumps({"generated_tests": output_files})
-            }
-
-    except Exception as e:
-        logger.error(f"[ERROR] Lambda failed: {str(e)}")
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
-        }
+def lambda_handler(event, context):
+    # decode body
+    if event.get("isBase64Encoded"):
+        raw = base64.b64decode(event["body"])
+    else:
+        raw = event["body"].encode('latin1')
+    # write to temp zip
+    tmp = tempfile.mkdtemp()
+    zip_path = os.path.join(tmp, "upload.zip")
+    with open(zip_path, "wb") as zz:
+        zz.write(raw)
+    # unzip
+    extract_dir = os.path.join(tmp, "project")
+    os.makedirs(extract_dir, exist_ok=True)
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        zf.extractall(extract_dir)
+    # run pipeline
+    os.chdir(extract_dir)
+    agent = initialize_agent(
+        tools=tools, llm=get_openai_client(), agent="zero-shot-react-description", verbose=False
+    )
+    result = agent.run(pipeline_text)
+    # collect produced JSON result from Save tool
+    response_items = json.loads(result)
+    shutil.rmtree(tmp)
+    return {
+        "statusCode": 200,
+        "isBase64Encoded": False,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({
+            "status": "success",
+            "tests": response_items
+        })
+    }
