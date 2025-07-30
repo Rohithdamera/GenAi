@@ -1,4 +1,3 @@
-
 import os
 import json
 from pathlib import Path
@@ -18,7 +17,7 @@ def get_openai_client():
         openai_api_type="azure",
         temperature=0.3,
         max_tokens=2000,
-         # model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
+        # model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
     )
 
 # === Input Project Path ===
@@ -72,6 +71,55 @@ Java Source:
 
     return f"[SUCCESS] Parsed {len(parsed_code_info)} files."
 
+
+# === New: Build JUnit Prompt Based on Class Type ===
+def build_junit_prompt(class_type):
+    if class_type.lower() == "controller":
+        return PromptTemplate(
+            input_variables=["class_name", "package_path", "methods"],
+            template="""
+You are to write a complete JUnit 5 test class for a Spring Boot REST controller.
+
+Details:
+- Controller Class: {class_name}
+- Package: {package_path}
+- Public Methods:
+{methods}
+
+Instructions:
+- Use `@WebMvcTest({class_name}.class)` on the test class.
+- Autowire `MockMvc` via `@Autowired`.
+- Mock dependent services using `@MockBean`.
+- For each method, create one representative test method using `mockMvc.perform(...)`.
+- Assume common HTTP mappings (GET, POST, PUT, DELETE) unless clearly unusual.
+- Keep test method names descriptive (e.g., `shouldReturnAllItems()`).
+- Return only valid Java code (no markdown or extra commentary).
+"""
+        )
+    else:
+        return PromptTemplate(
+            input_variables=["class_name", "class_type", "package_path", "methods"],
+            template="""
+You are to write a JUnit 5 test class for the following Java class.
+
+Details:
+- Class Name: {class_name}
+- Type: {class_type}
+- Package: {package_path}
+- Public Methods:
+{methods}
+
+Instructions:
+- Use `@SpringBootTest` or `@ExtendWith(MockitoExtension.class)` depending on type.
+- Mock dependencies using `@Mock` or `@MockBean`.
+- Use `@InjectMocks` when needed.
+- Include one test method per public method.
+
+Return only valid Java code.
+"""
+        )
+
+
 # === Tool 3: Generate JUnit Tests ===
 def generate_junit_tests(_: str) -> str:
     global parsed_code_info, junit_suggestions
@@ -79,35 +127,30 @@ def generate_junit_tests(_: str) -> str:
     if not parsed_code_info:
         return "[SKIP] No parsed classes to generate from."
 
-    prompt = PromptTemplate(
-        input_variables=["class_name", "class_type", "package_path", "methods"],
-        template="""
-Write a full JUnit 5 test class for:
-- Class Name: {class_name}
-- Type: {class_type}
-- Package: {package_path}
-- Public Methods:
-{methods}
-
-Use proper annotations:
-- Use @WebMvcTest and MockMvc for Controller
-- Use @SpringBootTest or @ExtendWith(MockitoExtension.class) for Service/Config
-- Include mocks and 1 test per method
-
-Output valid Java code ONLY (no markdown, no explanation).
-"""
-    )
-
-    chain = prompt | get_openai_client()
-
     for item in parsed_code_info:
         try:
-            result = chain.invoke({
-                "class_name": item["class_name"],
-                "class_type": item["class_type"],
-                "package_path": item["package_path"],
-                "methods": "\n".join(item["methods"]),
-            })
+            class_type = item["class_type"]
+            methods_str = "\n".join(item["methods"])
+
+            prompt = build_junit_prompt(class_type)
+            chain = prompt | get_openai_client()
+
+            if class_type.lower() == "controller":
+                inputs = {
+                    "class_name": item["class_name"],
+                    "package_path": item["package_path"],
+                    "methods": methods_str
+                }
+            else:
+                inputs = {
+                    "class_name": item["class_name"],
+                    "class_type": class_type,
+                    "package_path": item["package_path"],
+                    "methods": methods_str
+                }
+
+            result = chain.invoke(inputs)
+
             junit_suggestions.append({
                 "file_name": f"{item['class_name']}Test.java",
                 "package_path": item["package_path"],
@@ -117,6 +160,7 @@ Output valid Java code ONLY (no markdown, no explanation).
             print(f"[ERROR] Could not generate test for {item['class_name']}: {e}")
 
     return f"[SUCCESS] Generated {len(junit_suggestions)} test classes."
+
 
 # === Tool 4: Save to File System AND Print to Console ===
 def save_and_print_tests(_: str) -> str:
@@ -139,6 +183,7 @@ def save_and_print_tests(_: str) -> str:
         print(f"\n=====  End of {test['file_name']} =====\n")
 
     return f"[SUCCESS] Saved & printed {len(junit_suggestions)} test files."
+
 
 # === Define Tools ===
 tools = [
