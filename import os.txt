@@ -1,215 +1,41 @@
 import os
+import logging
 import json
-from pathlib import Path
-from langchain.prompts import PromptTemplate
-from langchain_core.runnables import RunnableSequence
-from langchain.tools import Tool
-from langchain.agents import initialize_agent
-from langchain_openai import AzureChatOpenAI
-
-# === OpenAI Azure Client ===
-def get_openai_client():
+import re
+from base64 import b64decode
+from Crypto.Cipher import AES
+from langchain_community.chat_models import AzureChatOpenAI
+from langchain.schema import HumanMessage
+ 
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+ 
+def unpad(data):
+    padding_length = data[-1]
+    return data[:-padding_length]
+ 
+def decrypt(data, key):
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)
+    decrypted_data = cipher.decrypt(b64decode(data))
+    decrypted_data = unpad(decrypted_data)
+    return decrypted_data.decode()
+ 
+def get_openai_client(model_instance_name):
+    aes_key_base64 = os.environ['AES_KEY']
+    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+    api_version = os.environ['AZURE_API_VERSION']
+ 
+    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+ 
+    if not decrypted_api_base.endswith('/'):
+        decrypted_api_base += '/'
+ 
     return AzureChatOpenAI(
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        deployment_name="Fourth_Chatbot",
-        openai_api_key="", 
-        openai_api_version="2024-08-01-preview",
-        openai_api_type="azure",
-        temperature=0.3,
-        max_tokens=2000,
-        # model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
+        deployment_name=model_instance_name,
+        openai_api_base=decrypted_api_base,
+        openai_api_key=decrypted_api_key,
+        openai_api_version=api_version
     )
-
-# === Input Project Path ===
-project_path = r"C:\Users\rdamera\Downloads\osif-java-cg-candidate"
-
-# === Global Stores ===
-java_files = []
-parsed_code_info = []
-junit_suggestions = []
-
-# === Tool 1: List Java Files ===
-def list_java_files(directory: str) -> str:
-    global java_files
-    java_files = list(Path(directory).rglob("*.java"))
-    return f"[FOUND] {len(java_files)} Java files."
-
-# === Tool 2: Extract Class Metadata ===
-def extract_code_info(_: str) -> str:
-    global java_files, parsed_code_info
-
-    if not java_files:
-        return "[SKIP] No Java files to parse."
-
-    prompt = PromptTemplate(
-        input_variables=["source"],
-        template="""
-Analyze the following Java source code and return the following as JSON:
-- class_name
-- class_type (Controller, Service, Config, Model, etc.)
-- package_path (from the package declaration)
-- methods: list of public method names
-
-Only return compact valid JSON. No extra commentary.
-
-Java Source:
-{source}
-"""
-    )
-
-    chain = prompt | get_openai_client()
-
-    for file_path in java_files:
-        try:
-            content = Path(file_path).read_text(encoding="utf-8")
-            result = chain.invoke({"source": content})
-            result_json = json.loads(result.content.strip())
-            if "class_name" in result_json:
-                parsed_code_info.append(result_json)
-        except Exception as e:
-            print(f"[ERROR] Parsing {file_path.name} failed: {e}")
-
-    return f"[SUCCESS] Parsed {len(parsed_code_info)} files."
-
-
-# === New: Build JUnit Prompt Based on Class Type ===
-def build_junit_prompt(class_type):
-    if class_type.lower() == "controller":
-        return PromptTemplate(
-            input_variables=["class_name", "package_path", "methods"],
-            template="""
-You are to write a complete JUnit 5 test class for a Spring Boot REST controller.
-
-Details:
-- Controller Class: {class_name}
-- Package: {package_path}
-- Public Methods:
-{methods}
-
-Instructions:
-- Use `@WebMvcTest({class_name}.class)` on the test class.
-- Autowire `MockMvc` via `@Autowired`.
-- Mock dependent services using `@MockBean`.
-- For each method, create one representative test method using `mockMvc.perform(...)`.
-- Assume common HTTP mappings (GET, POST, PUT, DELETE) unless clearly unusual.
-- Keep test method names descriptive (e.g., `shouldReturnAllItems()`).
-- Return only valid Java code (no markdown or extra commentary).
-"""
-        )
-    else:
-        return PromptTemplate(
-            input_variables=["class_name", "class_type", "package_path", "methods"],
-            template="""
-You are to write a JUnit 5 test class for the following Java class.
-
-Details:
-- Class Name: {class_name}
-- Type: {class_type}
-- Package: {package_path}
-- Public Methods:
-{methods}
-
-Instructions:
-- Use `@SpringBootTest` or `@ExtendWith(MockitoExtension.class)` depending on type.
-- Mock dependencies using `@Mock` or `@MockBean`.
-- Use `@InjectMocks` when needed.
-- Include one test method per public method.
-
-Return only valid Java code.
-"""
-        )
-
-
-# === Tool 3: Generate JUnit Tests ===
-def generate_junit_tests(_: str) -> str:
-    global parsed_code_info, junit_suggestions
-
-    if not parsed_code_info:
-        return "[SKIP] No parsed classes to generate from."
-
-    for item in parsed_code_info:
-        try:
-            class_type = item["class_type"]
-            methods_str = "\n".join(item["methods"])
-
-            prompt = build_junit_prompt(class_type)
-            chain = prompt | get_openai_client()
-
-            if class_type.lower() == "controller":
-                inputs = {
-                    "class_name": item["class_name"],
-                    "package_path": item["package_path"],
-                    "methods": methods_str
-                }
-            else:
-                inputs = {
-                    "class_name": item["class_name"],
-                    "class_type": class_type,
-                    "package_path": item["package_path"],
-                    "methods": methods_str
-                }
-
-            result = chain.invoke(inputs)
-
-            junit_suggestions.append({
-                "file_name": f"{item['class_name']}Test.java",
-                "package_path": item["package_path"],
-                "code": result.content.strip()
-            })
-        except Exception as e:
-            print(f"[ERROR] Could not generate test for {item['class_name']}: {e}")
-
-    return f"[SUCCESS] Generated {len(junit_suggestions)} test classes."
-
-
-# === Tool 4: Save to File System AND Print to Console ===
-def save_and_print_tests(_: str) -> str:
-    global junit_suggestions
-
-    if not junit_suggestions:
-        return "[SKIP] No JUnit classes to save."
-
-    for test in junit_suggestions:
-        # Save to disk
-        folder = Path("generated_tests") / test["package_path"].replace(".", "/")
-        folder.mkdir(parents=True, exist_ok=True)
-        file_path = folder / test["file_name"]
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(test["code"])
-
-        # === Print to console
-        print(f"\n\n=====  {test['file_name']} =====\n")
-        print(test["code"])
-        print(f"\n=====  End of {test['file_name']} =====\n")
-
-    return f"[SUCCESS] Saved & printed {len(junit_suggestions)} test files."
-
-
-# === Define Tools ===
-tools = [
-    Tool(name="ListJavaFiles", func=list_java_files, description="Lists all Java files."),
-    Tool(name="ExtractCodeInfo", func=extract_code_info, description="Parses each Java file."),
-    Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Generates JUnit 5 test classes."),
-    Tool(name="SaveJUnitTests", func=save_and_print_tests, description="Saves tests to disk and prints them.")
-]
-
-# === Main Pipeline ===
-def run_pipeline():
-    agent = initialize_agent(
-        tools=tools,
-        llm=get_openai_client(),
-        agent="zero-shot-react-description",
-        verbose=True
-    )
-
-    result = agent.run(f"""
-List all Java files under: {project_path}.
-Then extract class metadata like class name, type, package, and public method names.
-Then generate JUnit 5 test classes.
-Finally, print the test classes to the console and save them under `generated_tests` folder.
-""")
-
-    print("\n Final Output:", result)
-
-if __name__ == "__main__":
-    run_pipeline()
+ 
