@@ -1,33 +1,60 @@
-
 import os
 import json
+import tempfile
+import zipfile
 from pathlib import Path
+import logging
+from base64 import b64decode
+
 from langchain.prompts import PromptTemplate
-from langchain_core.runnables import RunnableSequence
 from langchain.tools import Tool
 from langchain.agents import initialize_agent
 from langchain_openai import AzureChatOpenAI
+from Crypto.Cipher import AES
 
-# === OpenAI Azure Client ===
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        deployment_name="Fourth_Chatbot",
-        openai_api_key="", 
-        openai_api_version="2024-08-01-preview",
-        openai_api_type="azure",
-        temperature=0.3,
-        max_tokens=2000,
-         # model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
-    )
-
-# === Input Project Path ===
-project_path = r"C:\Users\rdamera\Downloads\osif-java-cg-candidate"
+# === Logging ===
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 # === Global Stores ===
 java_files = []
 parsed_code_info = []
 junit_suggestions = []
+
+# === AES Decryption Helpers ===
+def unpad(data):
+    return data[:-data[-1]]
+
+def decrypt(data, key):
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)
+    decrypted_data = cipher.decrypt(b64decode(data))
+    return unpad(decrypted_data).decode()
+
+# === Azure OpenAI Client ===
+def get_openai_client():
+    try:
+        aes_key_base64 = os.environ['AES_KEY']
+        encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+        encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+        api_version = os.environ['AZURE_API_VERSION']
+        deployment_name = os.environ['DEPLOYMENT_NAME']
+
+        decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+        decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+
+        return AzureChatOpenAI(
+            azure_endpoint=decrypted_api_base,
+            deployment_name=deployment_name,
+            openai_api_key=decrypted_api_key,
+            openai_api_version=api_version,
+            openai_api_type="azure",
+            temperature=0.3,
+            max_tokens=2000,
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to initialize Azure OpenAI client: {e}")
+        raise
 
 # === Tool 1: List Java Files ===
 def list_java_files(directory: str) -> str:
@@ -68,7 +95,7 @@ Java Source:
             if "class_name" in result_json:
                 parsed_code_info.append(result_json)
         except Exception as e:
-            print(f"[ERROR] Parsing {file_path.name} failed: {e}")
+            logger.warning(f"[ERROR] Parsing {file_path.name} failed: {e}")
 
     return f"[SUCCESS] Parsed {len(parsed_code_info)} files."
 
@@ -114,110 +141,92 @@ Output valid Java code ONLY (no markdown, no explanation).
                 "code": result.content.strip()
             })
         except Exception as e:
-            print(f"[ERROR] Could not generate test for {item['class_name']}: {e}")
+            logger.warning(f"[ERROR] Could not generate test for {item['class_name']}: {e}")
 
     return f"[SUCCESS] Generated {len(junit_suggestions)} test classes."
 
-# === Tool 4: Save to File System AND Print to Console ===
+# === Tool 4: Save Tests to /tmp ===
 def save_and_print_tests(_: str) -> str:
     global junit_suggestions
-
     if not junit_suggestions:
         return "[SKIP] No JUnit classes to save."
 
     for test in junit_suggestions:
-        # Save to disk
-        folder = Path("generated_tests") / test["package_path"].replace(".", "/")
+        folder = Path("/tmp/generated_tests") / test["package_path"].replace(".", "/")
         folder.mkdir(parents=True, exist_ok=True)
         file_path = folder / test["file_name"]
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(test["code"])
 
-        # === Print to console
-        print(f"\n\n=====  {test['file_name']} =====\n")
-        print(test["code"])
-        print(f"\n=====  End of {test['file_name']} =====\n")
+    return f"[SUCCESS] Saved {len(junit_suggestions)} test files."
 
-    return f"[SUCCESS] Saved & printed {len(junit_suggestions)} test files."
-
-# === Define Tools ===
+# === Tool Registry ===
 tools = [
     Tool(name="ListJavaFiles", func=list_java_files, description="Lists all Java files."),
     Tool(name="ExtractCodeInfo", func=extract_code_info, description="Parses each Java file."),
     Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Generates JUnit 5 test classes."),
-    Tool(name="SaveJUnitTests", func=save_and_print_tests, description="Saves tests to disk and prints them.")
+    Tool(name="SaveJUnitTests", func=save_and_print_tests, description="Saves tests to disk.")
 ]
 
-# === Main Pipeline ===
-def run_pipeline():
-    agent = initialize_agent(
-        tools=tools,
-        llm=get_openai_client(),
-        agent="zero-shot-react-description",
-        verbose=True
-    )
+# === Lambda Handler ===
+def lambda_handler(event, context):
+    try:
+        # API Gateway passes base64-encoded binary file
+        is_base64_encoded = event.get("isBase64Encoded", False)
+        if not is_base64_encoded:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "Expected base64-encoded binary input"})
+            }
 
-    result = agent.run(f"""
-List all Java files under: {project_path}.
+        zip_bytes = b64decode(event["body"])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zip_path = os.path.join(tmpdir, "input.zip")
+            with open(zip_path, "wb") as f:
+                f.write(zip_bytes)
+
+            extract_dir = os.path.join(tmpdir, "unzipped")
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+
+            # Run LangChain Pipeline
+            agent = initialize_agent(
+                tools=tools,
+                llm=get_openai_client(),
+                agent="zero-shot-react-description",
+                verbose=True
+            )
+
+            command = f"""
+List all Java files under: {extract_dir}.
 Then extract class metadata like class name, type, package, and public method names.
 Then generate JUnit 5 test classes.
-Finally, print the test classes to the console and save them under `generated_tests` folder.
-""")
+Finally, save the test classes under /tmp/generated_tests.
+"""
+            agent.run(command)
 
-    print("\n Final Output:", result)
+            # Prepare results
+            output_files = []
+            for test in junit_suggestions:
+                file_path = Path("/tmp/generated_tests") / test["package_path"].replace(".", "/") / test["file_name"]
+                if file_path.exists():
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        output_files.append({
+                            "file_name": test["file_name"],
+                            "package_path": test["package_path"],
+                            "code": f.read()
+                        })
 
-if __name__ == "__main__":
-    run_pipeline()
+            return {
+                "statusCode": 200,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"generated_tests": output_files})
+            }
 
-
-
-
-
--------------------------------------------------------------------
-
-
-
-import os
-import json
-import logging
-from base64 import b64decode
-from Crypto.Cipher import AES
-import yaml
-from langchain_community.chat_models import AzureChatOpenAI
-from langchain.schema import HumanMessage
- 
-# Logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
- 
-def unpad(data):
-    return data[:-data[-1]]
- 
-def decrypt(data, key):
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted_data = cipher.decrypt(b64decode(data))
-    return unpad(decrypted_data).decode()
- 
-def get_openai_client(model_instance_name):
-    try:
-        aes_key_base64 = os.environ['AES_KEY']
-        encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-        encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-        api_version = os.environ['AZURE_API_VERSION']
- 
-        decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-        decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
- 
-        if not decrypted_api_base.endswith('/'):
-            decrypted_api_base += '/'
- 
-        return AzureChatOpenAI(
-            deployment_name=model_instance_name,
-            openai_api_base=decrypted_api_base,
-            openai_api_key=decrypted_api_key,
-            openai_api_version=api_version
-        )
- 
     except Exception as e:
-        logger.error(f"Error initializing OpenAI client: {e}")
-        raise ValueError(f"Error initializing OpenAI client: {e}")
+        logger.error(f"[ERROR] Lambda failed: {str(e)}")
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
