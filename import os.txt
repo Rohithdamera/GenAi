@@ -1,4 +1,4 @@
-import logging
+""import logging
 import os
 import json
 import tempfile
@@ -9,8 +9,6 @@ from base64 import b64decode
 from azure.functions import HttpRequest, HttpResponse
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.prompts import PromptTemplate
-from langchain.tools import Tool
-from langchain.agents import initialize_agent
 
 logger = logging.getLogger("azure.functions")
 logger.setLevel(logging.INFO)
@@ -27,23 +25,30 @@ def decrypt(data, key):
     return unpad(decrypted_data).decode()
 
 def get_openai_client(model_instance_name):
-    aes_key_base64 = os.environ["AES_KEY"]
-    encrypted_api_base = os.environ["ENCRYPTED_API_BASE"]
-    encrypted_api_key = os.environ["ENCRYPTED_API_KEY"]
-    api_version = os.environ["AZURE_API_VERSION"]
+    try:
+        aes_key_base64 = os.environ["AES_KEY"]
+        encrypted_api_base = os.environ["ENCRYPTED_API_BASE"]
+        encrypted_api_key = os.environ["ENCRYPTED_API_KEY"]
+        api_version = os.environ["AZURE_API_VERSION"]
 
-    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+        decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+        decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
 
-    if not decrypted_api_base.endswith('/'):
-        decrypted_api_base += '/'
+        if not decrypted_api_base.endswith('/'):
+            decrypted_api_base += '/'
 
-    return AzureChatOpenAI(
-        deployment_name=model_instance_name,
-        openai_api_base=decrypted_api_base,
-        openai_api_key=decrypted_api_key,
-        openai_api_version=api_version
-    )
+        return AzureChatOpenAI(
+            deployment_name=model_instance_name,
+            openai_api_base=decrypted_api_base,
+            openai_api_key=decrypted_api_key,
+            openai_api_version=api_version
+        )
+    except KeyError as e:
+        logger.error(f"[CREDENTIAL ERROR] Missing environment variable: {e}")
+        raise Exception(f"Missing environment variable: {e}")
+    except Exception as e:
+        logger.error(f"[DECRYPTION ERROR] Failed to initialize OpenAI client: {e}")
+        raise Exception(f"Failed to initialize OpenAI client: {e}")
 
 # === Global Stores ===
 java_files = []
@@ -205,29 +210,15 @@ def main(req: HttpRequest) -> HttpResponse:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(tmpdir)
 
-            tools = [
-                Tool(name="ListJavaFiles", func=lambda _: list_java_files(tmpdir), description="List Java files"),
-                Tool(name="ExtractCodeInfo", func=extract_code_info, description="Extract metadata"),
-                Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Generate JUnit tests"),
-                Tool(name="SaveJUnitTests", func=save_and_print_tests, description="Save test files")
+            # === Direct execution ===
+            steps = [
+                list_java_files(tmpdir),
+                extract_code_info(""),
+                generate_junit_tests(""),
+                save_and_print_tests("")
             ]
 
-            agent = initialize_agent(
-                tools=tools,
-                llm=get_openai_client(os.environ["DEPLOYMENT_NAME"]),
-                agent="zero-shot-react-description",
-                verbose=False,
-                max_iterations=3,
-                max_execution_time=300  # seconds
-            )
-
-            task_prompt = f"""
-List all Java files under: {tmpdir}.
-Then extract class metadata like class name, type, package, and public method names.
-Then generate JUnit 5 test classes.
-Finally, save the test classes to a temp folder.
-"""
-            result = agent.run(task_prompt)
+            result = "\n".join(steps)
             logger.info("Pipeline completed.")
             end_time = time.time()
             return HttpResponse(
