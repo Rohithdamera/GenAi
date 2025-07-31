@@ -1,2 +1,232 @@
-{
-    "message": "Could not parse request body into json: Could not parse payload into json: Unrecognized token \'PK
+import logging
+import os
+import json
+import tempfile
+import zipfile
+from pathlib import Path
+from base64 import b64decode
+from azure.functions import HttpRequest, HttpResponse
+from langchain_community.chat_models import AzureChatOpenAI
+from langchain.prompts import PromptTemplate
+from langchain.tools import Tool
+from langchain.agents import initialize_agent
+
+logger = logging.getLogger("azure.functions")
+logger.setLevel(logging.INFO)
+
+# === Credential Handling ===
+def unpad(data):
+    padding_length = data[-1]
+    return data[:-padding_length]
+
+def decrypt(data, key):
+    from Crypto.Cipher import AES
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)
+    decrypted_data = cipher.decrypt(b64decode(data))
+    return unpad(decrypted_data).decode()
+
+def get_openai_client(model_instance_name):
+    aes_key_base64 = os.environ["AES_KEY"]
+    encrypted_api_base = os.environ["ENCRYPTED_API_BASE"]
+    encrypted_api_key = os.environ["ENCRYPTED_API_KEY"]
+    api_version = os.environ["AZURE_API_VERSION"]
+
+    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+
+    if not decrypted_api_base.endswith('/'):
+        decrypted_api_base += '/'
+
+    return AzureChatOpenAI(
+        deployment_name=model_instance_name,
+        openai_api_base=decrypted_api_base,
+        openai_api_key=decrypted_api_key,
+        openai_api_version=api_version
+    )
+
+# === Global Stores ===
+java_files = []
+parsed_code_info = []
+junit_suggestions = []
+
+# === Tool 1 ===
+def list_java_files(directory: str) -> str:
+    global java_files
+    java_files = list(Path(directory).rglob("*.java"))
+    return f"[FOUND] {len(java_files)} Java files."
+
+# === Tool 2 ===
+def extract_code_info(_: str) -> str:
+    global java_files, parsed_code_info
+    if not java_files:
+        return "[SKIP] No Java files to parse."
+
+    prompt = PromptTemplate(
+        input_variables=["source"],
+        template="""
+Analyze the following Java source code and return the following as JSON:
+- class_name
+- class_type (Controller, Service, Config, Model, etc.)
+- package_path (from the package declaration)
+- methods: list of public method names
+
+Only return compact valid JSON. No extra commentary.
+
+Java Source:
+{source}
+"""
+    )
+
+    chain = prompt | get_openai_client(os.environ["DEPLOYMENT_NAME"])
+
+    for file_path in java_files:
+        try:
+            content = Path(file_path).read_text(encoding="utf-8")
+            result = chain.invoke({"source": content})
+            result_json = json.loads(result.content.strip())
+            if "class_name" in result_json:
+                parsed_code_info.append(result_json)
+        except Exception as e:
+            logger.error(f"[ERROR] Parsing {file_path.name} failed: {e}")
+
+    return f"[SUCCESS] Parsed {len(parsed_code_info)} files."
+
+# === Tool 3 ===
+def build_junit_prompt(class_type):
+    if class_type.lower() == "controller":
+        return PromptTemplate(
+            input_variables=["class_name", "package_path", "methods"],
+            template="""
+You are to write a complete JUnit 5 test class for a Spring Boot REST controller.
+
+Details:
+- Controller Class: {class_name}
+- Package: {package_path}
+- Public Methods:
+{methods}
+
+Instructions:
+- Use `@WebMvcTest({class_name}.class)` on the test class.
+- Autowire `MockMvc` via `@Autowired`.
+- Mock dependent services using `@MockBean`.
+- For each method, create one representative test method using `mockMvc.perform(...)`.
+- Assume common HTTP mappings (GET, POST, PUT, DELETE) unless clearly unusual.
+- Keep test method names descriptive (e.g., `shouldReturnAllItems()`).
+- Return only valid Java code (no markdown or extra commentary).
+"""
+        )
+    else:
+        return PromptTemplate(
+            input_variables=["class_name", "class_type", "package_path", "methods"],
+            template="""
+You are to write a JUnit 5 test class for the following Java class.
+
+Details:
+- Class Name: {class_name}
+- Type: {class_type}
+- Package: {package_path}
+- Public Methods:
+{methods}
+
+Instructions:
+- Use `@SpringBootTest` or `@ExtendWith(MockitoExtension.class)` depending on type.
+- Mock dependencies using `@Mock` or `@MockBean`.
+- Use `@InjectMocks` when needed.
+- Include one test method per public method.
+
+Return only valid Java code.
+"""
+        )
+
+# === Tool 4 ===
+def generate_junit_tests(_: str) -> str:
+    global parsed_code_info, junit_suggestions
+    if not parsed_code_info:
+        return "[SKIP] No parsed classes to generate from."
+
+    for item in parsed_code_info:
+        try:
+            class_type = item["class_type"]
+            methods_str = "\n".join(item["methods"])
+            prompt = build_junit_prompt(class_type)
+            chain = prompt | get_openai_client(os.environ["DEPLOYMENT_NAME"])
+
+            inputs = {
+                "class_name": item["class_name"],
+                "package_path": item["package_path"],
+                "methods": methods_str
+            }
+            if class_type.lower() != "controller":
+                inputs["class_type"] = class_type
+
+            result = chain.invoke(inputs)
+            junit_suggestions.append({
+                "file_name": f"{item['class_name']}Test.java",
+                "package_path": item["package_path"],
+                "code": result.content.strip()
+            })
+        except Exception as e:
+            logger.error(f"[ERROR] Could not generate test for {item['class_name']}: {e}")
+
+    return f"[SUCCESS] Generated {len(junit_suggestions)} test classes."
+
+# === Tool 5 ===
+def save_and_print_tests(_: str) -> str:
+    global junit_suggestions
+    base = tempfile.gettempdir()
+    output_dir = Path(base) / "generated_tests"
+    output_dir.mkdir(exist_ok=True)
+
+    for test in junit_suggestions:
+        folder = output_dir / test["package_path"].replace(".", "/")
+        folder.mkdir(parents=True, exist_ok=True)
+        file_path = folder / test["file_name"]
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(test["code"])
+
+    return f"[SUCCESS] Saved {len(junit_suggestions)} test files."
+
+# === Azure Function Entry Point ===
+def main(req: HttpRequest) -> HttpResponse:
+    try:
+        logger.info("Java ZIP processing started.")
+        if not req.files:
+            return HttpResponse("No file uploaded.", status_code=400)
+
+        file = req.files["file"]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zip_path = Path(tmpdir) / "upload.zip"
+            with open(zip_path, "wb") as f:
+                f.write(file.read())
+
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(tmpdir)
+
+            # Define tools
+            tools = [
+                Tool(name="ListJavaFiles", func=lambda _: list_java_files(tmpdir), description="List Java files"),
+                Tool(name="ExtractCodeInfo", func=extract_code_info, description="Extract metadata"),
+                Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Generate JUnit tests"),
+                Tool(name="SaveJUnitTests", func=save_and_print_tests, description="Save test files")
+            ]
+
+            agent = initialize_agent(
+                tools=tools,
+                llm=get_openai_client(os.environ["DEPLOYMENT_NAME"]),
+                agent="zero-shot-react-description",
+                verbose=False
+            )
+
+            task_prompt = f"""
+List all Java files under: {tmpdir}.
+Then extract class metadata like class name, type, package, and public method names.
+Then generate JUnit 5 test classes.
+Finally, save the test classes to a temp folder.
+"""
+            result = agent.run(task_prompt)
+            logger.info("Pipeline completed.")
+            return HttpResponse(json.dumps({"message": "Success", "details": result}), mimetype="application/json")
+
+    except Exception as e:
+        logger.exception("Unhandled exception in function.")
+        return HttpResponse(f"Internal Server Error: {str(e)}", status_code=500)
