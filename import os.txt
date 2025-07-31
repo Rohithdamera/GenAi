@@ -190,19 +190,19 @@ def save_and_print_tests(_: str) -> str:
 def main(req: HttpRequest) -> HttpResponse:
     try:
         logger.info("Java ZIP processing started.")
-        if not req.files:
-            return HttpResponse("No file uploaded.", status_code=400)
+        zip_bytes = req.get_body()
 
-        file = req.files["file"]
+        if not zip_bytes:
+            return HttpResponse("No file content uploaded.", status_code=400)
+
         with tempfile.TemporaryDirectory() as tmpdir:
             zip_path = Path(tmpdir) / "upload.zip"
             with open(zip_path, "wb") as f:
-                f.write(file.read())
+                f.write(zip_bytes)
 
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(tmpdir)
 
-            # Define tools
             tools = [
                 Tool(name="ListJavaFiles", func=lambda _: list_java_files(tmpdir), description="List Java files"),
                 Tool(name="ExtractCodeInfo", func=extract_code_info, description="Extract metadata"),
