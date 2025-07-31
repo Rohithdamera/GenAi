@@ -3,6 +3,7 @@ import os
 import json
 import tempfile
 import zipfile
+import time
 from pathlib import Path
 from base64 import b64decode
 from azure.functions import HttpRequest, HttpResponse
@@ -188,6 +189,7 @@ def save_and_print_tests(_: str) -> str:
 
 # === Azure Function Entry Point ===
 def main(req: HttpRequest) -> HttpResponse:
+    start_time = time.time()
     try:
         logger.info("Java ZIP processing started.")
         zip_bytes = req.get_body()
@@ -214,7 +216,9 @@ def main(req: HttpRequest) -> HttpResponse:
                 tools=tools,
                 llm=get_openai_client(os.environ["DEPLOYMENT_NAME"]),
                 agent="zero-shot-react-description",
-                verbose=False
+                verbose=False,
+                max_iterations=3,
+                max_execution_time=300  # seconds
             )
 
             task_prompt = f"""
@@ -225,7 +229,15 @@ Finally, save the test classes to a temp folder.
 """
             result = agent.run(task_prompt)
             logger.info("Pipeline completed.")
-            return HttpResponse(json.dumps({"message": "Success", "details": result}), mimetype="application/json")
+            end_time = time.time()
+            return HttpResponse(
+                json.dumps({
+                    "message": "Success",
+                    "duration_seconds": round(end_time - start_time, 2),
+                    "details": result
+                }),
+                mimetype="application/json"
+            )
 
     except Exception as e:
         logger.exception("Unhandled exception in function.")
