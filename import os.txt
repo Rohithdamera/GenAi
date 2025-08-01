@@ -46,7 +46,7 @@ def get_openai_client(model_instance_name):
 def col_letter_to_index(letter):
     return column_index_from_string(letter.upper()) - 1
 
-# Updated metadata extractor for {key(value)} pattern
+# Metadata extraction from {key(value)} format
 def extract_metadata(prompt):
     def extract_value(key):
         match = re.search(r'\{' + key + r'\(([^)]+)\)\}', prompt)
@@ -69,21 +69,26 @@ def extract_metadata(prompt):
         "logic_col": col_letter_to_index(logic_col_letter),
     }
 
-def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col):
+# Truncate large Excel input
+def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col, max_rows=50):
     try:
         wb = openpyxl.load_workbook(file_path, data_only=True)
         sheet = wb[sheet_name]
         data = []
+        row_count = 0
         for row in sheet.iter_rows(min_row=2, values_only=True):
             source = row[source_col]
             logic = row[logic_col]
             target = row[target_col]
             if source and target:
                 data.append({
-                    "source": source,
-                    "logic": logic or "",
-                    "target": target
+                    "source": str(source),
+                    "logic": str(logic or ""),
+                    "target": str(target)
                 })
+                row_count += 1
+                if row_count >= max_rows:
+                    break
         return data
     except Exception as e:
         logger.error(f"Failed to extract Excel data: {e}")
@@ -114,19 +119,27 @@ def lambda_handler(event, context):
             temp_file_path = temp_file.name
 
         metadata = extract_metadata(prompt_text)
+
+        # Limit to first 50 rows to avoid prompt bloat
         extracted_data = extract_excel_data(
             temp_file_path,
             metadata["sheet_name"],
             metadata["source_col"],
             metadata["logic_col"],
-            metadata["target_col"]
+            metadata["target_col"],
+            max_rows=50
         )
+
+        if not extracted_data:
+            raise ValueError("No valid data extracted from Excel file.")
 
         formatted_rows = "\n".join(
             f"- Source: {row['source']}, Target: {row['target']}, Logic: {row['logic']}" for row in extracted_data
         )
 
-        full_prompt = f"{instruction.strip()}\n\n{prompt_text.strip()}\n\nExcel Extracted Data:\n{formatted_rows}"
+        full_prompt = f"{instruction.strip()}\n\n{prompt_text.strip()}\n\nExtracted Data (first 50 rows max):\n{formatted_rows}"
+
+        logger.info(f"Full prompt length: {len(full_prompt)} characters")
 
         client = get_openai_client(model_instance)
         response = client.invoke([
