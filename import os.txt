@@ -74,16 +74,19 @@ def lambda_handler(event, context):
         model_instance = headers.get("model_instance_name", "")
         query = event.get("queryStringParameters", {}) or {}
 
-        file_name = query.get("file_name", "uploaded_file.xlsx")
-        sheet_name = query.get("sheet_name")
-        source_col = col_letter_to_index(query.get("source_system_column"))
-        target_col = col_letter_to_index(query.get("target_system_column"))
-        logic_col = col_letter_to_index(query.get("business_logic_column"))
-        instruction = query.get("instruction", "")
-        prompt_text = query.get("prompt", "")
+        # Required query params
+        required_fields = ["sheet_name", "source_system_column", "target_system_column", "business_logic_column", "instruction", "prompt"]
+        missing = [field for field in required_fields if not query.get(field)]
+        if missing:
+            raise ValueError(f"Missing required query parameters: {', '.join(missing)}")
 
-        if not all([sheet_name, instruction, prompt_text]):
-            raise ValueError("Missing required query parameters (sheet_name, instruction, or prompt).")
+        file_name = query.get("file_name", "uploaded_file.xlsx")
+        sheet_name = query["sheet_name"]
+        source_col = col_letter_to_index(query["source_system_column"])
+        target_col = col_letter_to_index(query["target_system_column"])
+        logic_col = col_letter_to_index(query["business_logic_column"])
+        instruction = query["instruction"]
+        prompt_text = query["prompt"]
 
         if not event.get("isBase64Encoded", False):
             raise ValueError("Expected base64-encoded binary file.")
