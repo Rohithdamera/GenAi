@@ -46,7 +46,7 @@ def get_openai_client(model_instance_name):
 def col_letter_to_index(col_letter):
     return column_index_from_string(col_letter.upper()) - 1
 
-# Extract Excel content dynamically
+# Extract Excel content
 def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col):
     try:
         wb = openpyxl.load_workbook(file_path, data_only=True)
@@ -67,46 +67,30 @@ def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col)
         logger.error(f"Failed to extract Excel data: {e}")
         return []
 
-# Build DataWeave prompt
-def build_dataweave_prompt(extracted_data):
-    prompt = (
-        "Write a DataWeave script by referring to the uploaded Excel file named {file_name}, "
-        "specifically the sheet named {sheet_name}.\n"
-        "- Column {source_system_column} contains source field details.\n"
-        "- Column {target_system_column} contains target field details.\n"
-        "- Column {business_logic_column} contains the business logic for DataWeave transformations.\n"
-        "This DataWeave script should be optimized to handle large data sets efficiently. "
-        "Use only functions available in DataWeave as documented here: "
-        "https://docs.mulesoft.com/dataweave/latest/dw-functions#dw_modules.\n"
-    )
-    prompt += "\nHere is the extracted data from the Excel sheet:\n"
-    for row in extracted_data:
-        prompt += f"- Source: {row['source']}, Target: {row['target']}, Logic: {row['logic']}\n"
-    return prompt
-
-# Lambda handler
+# Lambda Handler
 def lambda_handler(event, context):
     try:
         headers = event.get("headers", {}) or {}
         model_instance = headers.get("model_instance_name", "")
         query = event.get("queryStringParameters", {}) or {}
 
-        # Extract parameters from query
         file_name = query.get("file_name", "uploaded_file.xlsx")
         sheet_name = query.get("sheet_name")
         source_col = col_letter_to_index(query.get("source_system_column"))
         target_col = col_letter_to_index(query.get("target_system_column"))
         logic_col = col_letter_to_index(query.get("business_logic_column"))
+        instruction = query.get("instruction", "")
+        prompt_text = query.get("prompt", "")
 
-        if not all([sheet_name, source_col is not None, target_col is not None, logic_col is not None]):
-            raise ValueError("Missing one or more required query parameters.")
+        if not all([sheet_name, instruction, prompt_text]):
+            raise ValueError("Missing required query parameters (sheet_name, instruction, or prompt).")
 
         if not event.get("isBase64Encoded", False):
-            raise ValueError("Expected base64-encoded binary file")
+            raise ValueError("Expected base64-encoded binary file.")
 
         body_b64 = event.get("body", "")
         if not body_b64:
-            raise ValueError("No file content found in the request body")
+            raise ValueError("No file content found in the request body.")
 
         body = b64decode(body_b64)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as temp_file:
@@ -115,16 +99,11 @@ def lambda_handler(event, context):
 
         extracted_data = extract_excel_data(temp_file_path, sheet_name, source_col, logic_col, target_col)
 
-        prompt = build_dataweave_prompt(extracted_data)
-
-        instructions = """
-As a seasoned expert in MuleSoft Integration Services, you specialize in advanced data transformation and integration techniques, focusing on DataWeave transformations, JSON and XML handling, and complex data mappings. 
-You excel in designing and implementing robust data transformation flows that facilitate the integration. 
-This involves not only transforming and mapping data but also ensuring data consistency and integrity throughout the process. 
-You can refer to this URL for DataWeave syntax: https://docs.mulesoft.com/dataweave/latest/dw-functions#dw_modules
-"""
-
-        full_prompt = instructions + "\n" + prompt
+        # Format Excel data into readable text for the prompt
+        formatted_rows = "\n".join(
+            f"- Source: {row['source']}, Target: {row['target']}, Logic: {row['logic']}" for row in extracted_data
+        )
+        full_prompt = f"{instruction.strip()}\n\n{prompt_text.strip()}\n\nExcel Extracted Data:\n{formatted_rows}"
 
         client = get_openai_client(model_instance)
         response = client.invoke([
@@ -132,12 +111,10 @@ You can refer to this URL for DataWeave syntax: https://docs.mulesoft.com/datawe
             HumanMessage(content="Generate the DataWeave script.")
         ])
 
-        final_result = response.content.strip()
-
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "text/plain"},
-            "body": final_result
+            "body": response.content.strip()
         }
 
     except Exception as e:
