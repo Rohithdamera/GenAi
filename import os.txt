@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+import re
 from base64 import b64decode
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
@@ -42,17 +43,32 @@ def get_openai_client(model_instance_name):
         max_tokens=4096
     )
 
-# Convert Excel column letter to zero-based index
-def col_letter_to_index(col_letter):
-    return column_index_from_string(col_letter.upper()) - 1
+def col_letter_to_index(letter):
+    return column_index_from_string(letter.upper()) - 1
 
-# Extract Excel content
+# Extract required metadata from prompt
+def extract_metadata(prompt):
+    sheet_match = re.search(r'sheet\s+name\s+is[:\-]?\s*([^\n\r]+)', prompt, re.IGNORECASE)
+    source_match = re.search(r'source\s+column\s*[:\-]?\s*([A-Z])', prompt, re.IGNORECASE)
+    target_match = re.search(r'target\s+column\s*[:\-]?\s*([A-Z])', prompt, re.IGNORECASE)
+    logic_match = re.search(r'business\s+logic\s+column\s*[:\-]?\s*([A-Z])', prompt, re.IGNORECASE)
+
+    if not (sheet_match and source_match and target_match and logic_match):
+        raise ValueError("Prompt must include sheet name, source column, target column, and business logic column.")
+
+    return {
+        "sheet_name": sheet_match.group(1).strip(),
+        "source_col": col_letter_to_index(source_match.group(1)),
+        "target_col": col_letter_to_index(target_match.group(1)),
+        "logic_col": col_letter_to_index(logic_match.group(1)),
+    }
+
 def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col):
     try:
         wb = openpyxl.load_workbook(file_path, data_only=True)
         sheet = wb[sheet_name]
         data = []
-        for row in sheet.iter_rows(min_row=2, values_only=True):  # Skip header
+        for row in sheet.iter_rows(min_row=2, values_only=True):
             source = row[source_col]
             logic = row[logic_col]
             target = row[target_col]
@@ -67,26 +83,17 @@ def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col)
         logger.error(f"Failed to extract Excel data: {e}")
         return []
 
-# Lambda Handler
 def lambda_handler(event, context):
     try:
         headers = event.get("headers", {}) or {}
         model_instance = headers.get("model_instance_name", "")
         query = event.get("queryStringParameters", {}) or {}
 
-        # Required query params
-        required_fields = ["sheet_name", "source_system_column", "target_system_column", "business_logic_column", "instruction", "prompt"]
-        missing = [field for field in required_fields if not query.get(field)]
-        if missing:
-            raise ValueError(f"Missing required query parameters: {', '.join(missing)}")
+        instruction = query.get("instruction", "")
+        prompt_text = query.get("prompt", "")
 
-        file_name = query.get("file_name", "uploaded_file.xlsx")
-        sheet_name = query["sheet_name"]
-        source_col = col_letter_to_index(query["source_system_column"])
-        target_col = col_letter_to_index(query["target_system_column"])
-        logic_col = col_letter_to_index(query["business_logic_column"])
-        instruction = query["instruction"]
-        prompt_text = query["prompt"]
+        if not instruction or not prompt_text:
+            raise ValueError("Both 'instruction' and 'prompt' query parameters are required.")
 
         if not event.get("isBase64Encoded", False):
             raise ValueError("Expected base64-encoded binary file.")
@@ -100,18 +107,25 @@ def lambda_handler(event, context):
             temp_file.write(body)
             temp_file_path = temp_file.name
 
-        extracted_data = extract_excel_data(temp_file_path, sheet_name, source_col, logic_col, target_col)
+        metadata = extract_metadata(prompt_text)
+        extracted_data = extract_excel_data(
+            temp_file_path,
+            metadata["sheet_name"],
+            metadata["source_col"],
+            metadata["logic_col"],
+            metadata["target_col"]
+        )
 
-        # Format Excel data into readable text for the prompt
         formatted_rows = "\n".join(
             f"- Source: {row['source']}, Target: {row['target']}, Logic: {row['logic']}" for row in extracted_data
         )
+
         full_prompt = f"{instruction.strip()}\n\n{prompt_text.strip()}\n\nExcel Extracted Data:\n{formatted_rows}"
 
         client = get_openai_client(model_instance)
         response = client.invoke([
             HumanMessage(content=full_prompt),
-            HumanMessage(content="Generate the DataWeave script.")
+            HumanMessage(content="Generate the test data based on the uploaded Excel.")
         ])
 
         return {
