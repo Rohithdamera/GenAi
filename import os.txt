@@ -1,158 +1,263 @@
+
+import gradio as gr
+
+from langchain_openai import AzureChatOpenAI
+from langchain_community.agent_toolkits.load_tools import load_tools
+from langchain_core.tools import Tool
+from langgraph.prebuilt import create_react_agent
+from langgraph.graph import StateGraph, END
+from typing import TypedDict, Annotated
+from langchain_core.messages import HumanMessage, AIMessage
+from langgraph.graph import MessagesState
+
+class State(TypedDict):
+    messages: MessagesState
+
+
+# Initialize the LLM
+llm = AzureChatOpenAI(
+    deployment_name="Fourth_Chatbot",
+    azure_endpoint="https://testopenaiassets.openai.azure.com",
+    openai_api_key="",
+    openai_api_version="2024-08-01-preview"
+)
+
+
+
+# Load tools (e.g., calculator)
+tools = load_tools(["llm-math"], llm=llm)
+
+# Add memory to retain conversation context
+#memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+
+agent_node = create_react_agent(llm, tools)
+
+# Now wrap it with the LoggingNode for detailed logging
+#logged_agent_node = LoggingNode(agent_node, "React_Agent")
+
+# Define an interceptor function
+def state_logger(state, config, node_name):
+    print(f"Executing node: {node_name}")
+    print(f"Current state: {state}")
+    return state
+
+
+# Build the graph
+graph = StateGraph(State)
+graph.add_node("react_agent", agent_node)
+graph.set_entry_point("react_agent")
+# Replace the node in your graph:
+graph.add_edge("react_agent", END)
+
+# Apply the interceptor to the graph
+#graph_with_logging = graph.with_interceptor(state_logger)
+
+# Compile the graph
+#agent_executor = graph_with_logging.compile()
+agent_executor = graph.compile()
+
+
+
+
+
+# Define the chatbot function
+def chat_with_agent(message, history):
+    messages = []
+    for user_msg, bot_msg in history:
+        messages.append(HumanMessage(content=user_msg))
+        messages.append(AIMessage(content=bot_msg))
+    messages.append(HumanMessage(content=message))
+
+    # Invoke the agent
+    result = agent_executor.invoke({"messages": messages},verbose=True)
+    return result["messages"][-1].content
+
+
+# Create the Gradio interface
+chatbot_ui = gr.ChatInterface(
+    fn=chat_with_agent,
+    title=" OSIF Co-Developer",
+    description="Your co-developer for OSIF development",
+    theme="default"
+)
+
+# Launch the app
+chatbot_ui.launch()
+
+
+
+
+--------------------------------------------------------------
+
+
+
 import os
-import logging
 import json
-import re
-from base64 import b64decode
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import unpad
-from langchain_community.chat_models import AzureChatOpenAI
-from langchain.schema import HumanMessage
-import tempfile
-import openpyxl
-from openpyxl.utils import column_index_from_string
+from pathlib import Path
+from langchain.prompts import PromptTemplate
+from langchain_core.runnables import RunnableSequence
+from langchain.tools import Tool
+from langchain.agents import initialize_agent
+from langchain_openai import AzureChatOpenAI
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger()
-
-# AES Decryption
-def decrypt(data, key):
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted_data = cipher.decrypt(b64decode(data))
-    decrypted_data = unpad(decrypted_data, AES.block_size)
-    return decrypted_data.decode()
-
-# Azure OpenAI Client
-def get_openai_client(model_instance_name):
-    aes_key_base64 = os.environ['AES_KEY']
-    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-    api_version = os.environ['AZURE_API_VERSION']
-
-    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
-
-    if not decrypted_api_base.endswith('/'):
-        decrypted_api_base += '/'
-
+# === OpenAI Azure Client ===
+def get_openai_client():
     return AzureChatOpenAI(
-        deployment_name=model_instance_name,
-        openai_api_base=decrypted_api_base,
-        openai_api_key=decrypted_api_key,
-        openai_api_version=api_version,
-        temperature=0.4,
-        max_tokens=4096
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        deployment_name="Fourth_Chatbot",
+        openai_api_key="", 
+        openai_api_version="2024-08-01-preview",
+        openai_api_type="azure",
+        temperature=0.3,
+        max_tokens=2000,
+         # model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
     )
 
-def col_letter_to_index(letter):
-    return column_index_from_string(letter.upper()) - 1
+# === Input Project Path ===
+project_path = r"C:\Users\rdamera\Downloads\osif-java-cg-candidate"
 
-# Extract {key(value)} metadata from prompt
-def extract_metadata_from_prompt(prompt):
-    def extract(key):
-        match = re.search(r'\{' + re.escape(key) + r'\(([^)]+)\)\}', prompt)
-        return match.group(1).strip() if match else None
+# === Global Stores ===
+java_files = []
+parsed_code_info = []
+junit_suggestions = []
 
-    sheet_name = extract("sheet_name")
-    source_col = extract("source_system_column")
-    target_col = extract("target_system_column")
-    logic_col = extract("business_logic_column")
+# === Tool 1: List Java Files ===
+def list_java_files(directory: str) -> str:
+    global java_files
+    java_files = list(Path(directory).rglob("*.java"))
+    return f"[FOUND] {len(java_files)} Java files."
 
-    if not all([sheet_name, source_col, target_col, logic_col]):
-        raise ValueError("Prompt must include {sheet_name()}, {source_system_column()}, {target_system_column()}, {business_logic_column()}")
+# === Tool 2: Extract Class Metadata ===
+def extract_code_info(_: str) -> str:
+    global java_files, parsed_code_info
 
-    return {
-        "sheet_name": sheet_name,
-        "source_col": col_letter_to_index(source_col),
-        "target_col": col_letter_to_index(target_col),
-        "logic_col": col_letter_to_index(logic_col)
-    }
+    if not java_files:
+        return "[SKIP] No Java files to parse."
 
-# Extract limited rows from Excel for safe prompt size
-def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col, max_rows=50):
-    try:
-        wb = openpyxl.load_workbook(file_path, data_only=True)
-        sheet = wb[sheet_name]
-        data = []
-        for i, row in enumerate(sheet.iter_rows(min_row=2, values_only=True)):
-            if i >= max_rows:
-                break
-            source = row[source_col]
-            logic = row[logic_col]
-            target = row[target_col]
-            if source and target:
-                data.append({
-                    "source": str(source),
-                    "logic": str(logic or ""),
-                    "target": str(target)
-                })
-        return data
-    except Exception as e:
-        logger.error(f"Excel processing error: {e}")
-        raise
+    prompt = PromptTemplate(
+        input_variables=["source"],
+        template="""
+Analyze the following Java source code and return the following as JSON:
+- class_name
+- class_type (Controller, Service, Config, Model, etc.)
+- package_path (from the package declaration)
+- methods: list of public method names
 
-# Build safe prompt
-def build_prompt(instruction, prompt_intro, extracted_data):
-    prompt = instruction.strip() + "\n\n" + prompt_intro.strip()
-    prompt += "\n\nExtracted Sample Data (first 50 rows):\n"
-    for row in extracted_data:
-        prompt += f"- Source: {row['source']}, Target: {row['target']}, Logic: {row['logic']}\n"
-    return prompt
+Only return compact valid JSON. No extra commentary.
 
-# Lambda handler
-def lambda_handler(event, context):
-    try:
-        headers = event.get("headers", {}) or {}
-        model_instance = headers.get("model_instance_name", "")
-        query = event.get("queryStringParameters", {}) or {}
+Java Source:
+{source}
+"""
+    )
 
-        instruction = query.get("instruction", "")
-        prompt_text = query.get("prompt", "")
+    chain = prompt | get_openai_client()
 
-        if not instruction or not prompt_text:
-            raise ValueError("Missing required query params: instruction or prompt")
+    for file_path in java_files:
+        try:
+            content = Path(file_path).read_text(encoding="utf-8")
+            result = chain.invoke({"source": content})
+            result_json = json.loads(result.content.strip())
+            if "class_name" in result_json:
+                parsed_code_info.append(result_json)
+        except Exception as e:
+            print(f"[ERROR] Parsing {file_path.name} failed: {e}")
 
-        if not event.get("isBase64Encoded", False):
-            raise ValueError("Expected base64-encoded binary file")
+    return f"[SUCCESS] Parsed {len(parsed_code_info)} files."
 
-        file_b64 = event.get("body", "")
-        if not file_b64:
-            raise ValueError("No file body found")
+# === Tool 3: Generate JUnit Tests ===
+def generate_junit_tests(_: str) -> str:
+    global parsed_code_info, junit_suggestions
 
-        # Decode and save uploaded Excel
-        body = b64decode(file_b64)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as temp_file:
-            temp_file.write(body)
-            file_path = temp_file.name
+    if not parsed_code_info:
+        return "[SKIP] No parsed classes to generate from."
 
-        # Extract metadata and Excel data
-        metadata = extract_metadata_from_prompt(prompt_text)
-        extracted_data = extract_excel_data(
-            file_path,
-            metadata["sheet_name"],
-            metadata["source_col"],
-            metadata["logic_col"],
-            metadata["target_col"],
-            max_rows=50
-        )
+    prompt = PromptTemplate(
+        input_variables=["class_name", "class_type", "package_path", "methods"],
+        template="""
+Write a full JUnit 5 test class for:
+- Class Name: {class_name}
+- Type: {class_type}
+- Package: {package_path}
+- Public Methods:
+{methods}
 
-        full_prompt = build_prompt(instruction, prompt_text, extracted_data)
-        logger.info(f"Final prompt size: {len(full_prompt)} characters")
+Use proper annotations:
+- Use @WebMvcTest and MockMvc for Controller
+- Use @SpringBootTest or @ExtendWith(MockitoExtension.class) for Service/Config
+- Include mocks and 1 test per method
 
-        client = get_openai_client(model_instance)
-        response = client.invoke([
-            HumanMessage(content=full_prompt),
-            HumanMessage(content="Generate the DataWeave script.")
-        ])
+Output valid Java code ONLY (no markdown, no explanation).
+"""
+    )
 
-        return {
-            "statusCode": 200,
-            "headers": {"Content-Type": "text/plain"},
-            "body": response.content.strip()
-        }
+    chain = prompt | get_openai_client()
 
-    except Exception as e:
-        logger.error(f"Error occurred: {e}")
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
-        }
+    for item in parsed_code_info:
+        try:
+            result = chain.invoke({
+                "class_name": item["class_name"],
+                "class_type": item["class_type"],
+                "package_path": item["package_path"],
+                "methods": "\n".join(item["methods"]),
+            })
+            junit_suggestions.append({
+                "file_name": f"{item['class_name']}Test.java",
+                "package_path": item["package_path"],
+                "code": result.content.strip()
+            })
+        except Exception as e:
+            print(f"[ERROR] Could not generate test for {item['class_name']}: {e}")
+
+    return f"[SUCCESS] Generated {len(junit_suggestions)} test classes."
+
+# === Tool 4: Save to File System AND Print to Console ===
+def save_and_print_tests(_: str) -> str:
+    global junit_suggestions
+
+    if not junit_suggestions:
+        return "[SKIP] No JUnit classes to save."
+
+    for test in junit_suggestions:
+        # Save to disk
+        folder = Path("generated_tests") / test["package_path"].replace(".", "/")
+        folder.mkdir(parents=True, exist_ok=True)
+        file_path = folder / test["file_name"]
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(test["code"])
+
+        # === Print to console
+        print(f"\n\n=====  {test['file_name']} =====\n")
+        print(test["code"])
+        print(f"\n=====  End of {test['file_name']} =====\n")
+
+    return f"[SUCCESS] Saved & printed {len(junit_suggestions)} test files."
+
+# === Define Tools ===
+tools = [
+    Tool(name="ListJavaFiles", func=list_java_files, description="Lists all Java files."),
+    Tool(name="ExtractCodeInfo", func=extract_code_info, description="Parses each Java file."),
+    Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Generates JUnit 5 test classes."),
+    Tool(name="SaveJUnitTests", func=save_and_print_tests, description="Saves tests to disk and prints them.")
+]
+
+# === Main Pipeline ===
+def run_pipeline():
+    agent = initialize_agent(
+        tools=tools,
+        llm=get_openai_client(),
+        agent="zero-shot-react-description",
+        verbose=True
+    )
+
+    result = agent.run(f"""
+List all Java files under: {project_path}.
+Then extract class metadata like class name, type, package, and public method names.
+Then generate JUnit 5 test classes.
+Finally, print the test classes to the console and save them under `generated_tests` folder.
+""")
+
+    print("\n Final Output:", result)
+
+if __name__ == "__main__":
+    run_pipeline()
+
