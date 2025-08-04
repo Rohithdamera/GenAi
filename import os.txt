@@ -21,7 +21,7 @@ def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="Fourth_Chatbot",
-        openai_api_key="",  # insert your API key
+        openai_api_key="",  # Use environment variable
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
         temperature=0.3,
@@ -40,14 +40,13 @@ last_used_path = None
 def list_java_files_from_prompt(prompt: str) -> str:
     global java_files, last_used_path
 
-    # If the input is just a path
-    if Path(prompt.strip('"\' )).exists():
-        last_used_path = prompt.strip('"\' )
+    cleaned_prompt = prompt.strip('"\'')
+    if Path(cleaned_prompt).exists():
+        last_used_path = cleaned_prompt
     else:
-        # Try to extract path using regex
         match = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", prompt)
         if match:
-            last_used_path = match.group(1).strip('"\' )
+            last_used_path = match.group(1).strip('"\'')
         else:
             return "[ERROR] Could not detect a valid project path from your input."
 
@@ -217,3 +216,25 @@ chatbot_ui = gr.ChatInterface(
 
 if __name__ == "__main__":
     chatbot_ui.launch()
+
+
+
+
+
+ Paste your Java project path like: C:\Users\user\MyProject Then say things like:
+
+Extract class info
+Generate JUnit tests
+Save and print tests
+Chatbot
+generate the junit for this project C:\Users\rdamera\Downloads\osif-java-cg-candidate\osif-java-cg-candidate
+
+It seems that there was an issue with generating JUnit tests because no parsed classes were found in the project. Please ensure that the Java files contain valid classes and try again. If you need further assistance, please let me know!
+
+C:\Users\rdamera\Downloads\osif-java-cg-candidate\osif-java-cg-candidate
+
+It seems that there was an issue with generating JUnit tests because no parsed classes were found in the project. Please ensure that the Java files contain valid classes and try again. If you need further assistance, please let me know!
+
+C:\Users\rdamera\Downloads\osif-java-cg-candidate\osif-java-cg-candidate\osif-java-cg-candidate
+
+JUnit tests have been successfully generated and saved for the project located at C:\Users\rdamera\Downloads\osif-java-cg-candidate\osif-java-cg-candidate\osif-java-cg-candidate. You can now find the test files in the same directory. If you need any more assistance or further modifications, feel free to ask!
