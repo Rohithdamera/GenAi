@@ -1,17 +1,229 @@
- Here are the test classes created for different components of the project:
+import os
+import json
+from pathlib import Path
+from typing import TypedDict
+import gradio as gr
+import re
 
-OsifJavaCgCandidateApplicationTest
-Tests the main application context.
-CandidateConfigTest
-Ensures that the application context loads successfully.
-CandidateControllerTest
-Tests the REST controller for adding, retrieving, and listing candidates.
-CandidateModelTest
-Verifies the equality, inequality, hash code, and string representation of the Candidate model.
-CandidateServiceTest
-Tests the service layer for adding, retrieving, and listing candidates, including interactions with the repository.
-Each test class is structured to cover various scenarios and uses mock objects where necessary to isolate the components being tested. If you need the test files or have any specific requests regarding the tests, let me know!
+from langchain.prompts import PromptTemplate
+from langchain_core.runnables import RunnableSequence
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.tools import Tool
 
+from langchain_openai import AzureChatOpenAI
+from langgraph.graph import StateGraph, END
+from langgraph.graph import MessagesState
+from langgraph.prebuilt import create_react_agent
 
+# === Azure OpenAI Client ===
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        deployment_name="Fourth_Chatbot",
+        openai_api_key="",  # Add your key here or use env variable
+        openai_api_version="2024-08-01-preview",
+        openai_api_type="azure",
+        temperature=0.3,
+        max_tokens=2000,
+    )
 
+llm = get_openai_client()
 
+# === Global Stores ===
+java_files = []
+parsed_code_info = []
+junit_suggestions = []
+last_used_path = None
+
+# === Tool 1: List Java Files from Prompt ===
+def list_java_files_from_prompt(prompt: str) -> str:
+    global java_files, last_used_path
+
+    cleaned_prompt = prompt.strip('"\'')
+    if Path(cleaned_prompt).exists():
+        last_used_path = cleaned_prompt
+    else:
+        match = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", prompt)
+        if match:
+            last_used_path = match.group(1).strip('"\'')
+        else:
+            return "[ERROR] Could not detect a valid project path from your input."
+
+    path_obj = Path(last_used_path)
+    if not path_obj.exists():
+        return f"[ERROR] Path not found: {last_used_path}"
+
+    # Search deeply for Java project structure
+    all_dirs = [p for p in path_obj.rglob("*") if p.is_dir()]
+    project_base = path_obj
+    for d in all_dirs:
+        if any(f.suffix == '.java' for f in d.glob("*.java")):
+            project_base = d
+            break
+
+    java_files.clear()
+    java_files.extend(project_base.rglob("*.java"))
+
+    if not java_files:
+        return f"[INFO] No Java files found in: {last_used_path}"
+    return f"[FOUND] {len(java_files)} Java files in: {project_base}"
+
+# === Tool 2: Extract Class Metadata ===
+def extract_code_info(_: str) -> str:
+    global java_files, parsed_code_info
+
+    if not java_files:
+        return "[SKIP] No Java files to parse."
+
+    parsed_code_info.clear()
+
+    prompt = PromptTemplate(
+        input_variables=["source"],
+        template="""
+Analyze the following Java source code and return the following as JSON:
+- class_name
+- class_type (Controller, Service, Config, Model, etc.)
+- package_path (from the package declaration)
+- methods: list of public method names
+
+Only return compact valid JSON. No extra commentary.
+
+Java Source:
+{source}
+"""
+    )
+
+    chain = prompt | get_openai_client()
+
+    for file_path in java_files:
+        try:
+            content = Path(file_path).read_text(encoding="utf-8")
+            result = chain.invoke({"source": content})
+            result_json = json.loads(result.content.strip())
+            if "class_name" in result_json:
+                parsed_code_info.append(result_json)
+        except Exception as e:
+            print(f"[ERROR] Parsing {file_path.name} failed: {e}")
+
+    return f"[SUCCESS] Parsed {len(parsed_code_info)} files."
+
+# === Tool 3: Generate JUnit Tests ===
+def generate_junit_tests(_: str) -> str:
+    global parsed_code_info, junit_suggestions
+
+    if not parsed_code_info:
+        return "[SKIP] No parsed classes to generate from."
+
+    junit_suggestions.clear()
+
+    prompt = PromptTemplate(
+        input_variables=["class_name", "class_type", "package_path", "methods"],
+        template="""
+Write a full JUnit 5 test class for:
+- Class Name: {class_name}
+- Type: {class_type}
+- Package: {package_path}
+- Public Methods:
+{methods}
+
+Use proper annotations:
+- Use @WebMvcTest and MockMvc for Controller
+- Use @SpringBootTest or @ExtendWith(MockitoExtension.class) for Service/Config
+- Include mocks and 1 test per method
+
+Output valid Java code ONLY (no markdown, no explanation).
+"""
+    )
+
+    chain = prompt | get_openai_client()
+
+    for item in parsed_code_info:
+        try:
+            result = chain.invoke({
+                "class_name": item["class_name"],
+                "class_type": item["class_type"],
+                "package_path": item["package_path"],
+                "methods": "\n".join(item["methods"]),
+            })
+            junit_suggestions.append({
+                "file_name": f"{item['class_name']}Test.java",
+                "package_path": item["package_path"],
+                "code": result.content.strip()
+            })
+        except Exception as e:
+            print(f"[ERROR] Could not generate test for {item['class_name']}: {e}")
+
+    return f"[SUCCESS] Generated {len(junit_suggestions)} test classes."
+
+# === Tool 4: Save and Return JUnit Tests ===
+def save_and_print_tests(_: str) -> str:
+    global junit_suggestions
+
+    if not junit_suggestions:
+        return "[SKIP] No JUnit classes to save."
+
+    output = ""
+    for test in junit_suggestions:
+        folder = Path("generated_tests") / test["package_path"].replace(".", "/")
+        folder.mkdir(parents=True, exist_ok=True)
+        file_path = folder / test["file_name"]
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(test["code"])
+
+        output += f"\n===== {test['file_name']} =====\n"
+        output += test["code"]
+        output += f"\n===== End of {test['file_name']} =====\n"
+
+    return output.strip()
+
+# === Add Tools to Agent ===
+custom_tools = [
+    Tool(name="ListJavaFiles", func=list_java_files_from_prompt, description="Provide project path to list Java files."),
+    Tool(name="ExtractCodeInfo", func=extract_code_info, description="Parses Java class metadata."),
+    Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Creates JUnit 5 test cases."),
+    Tool(name="SaveJUnitTests", func=save_and_print_tests, description="Saves and prints JUnit tests."),
+]
+
+# === LangGraph Setup ===
+class State(TypedDict):
+    messages: MessagesState
+
+agent_node = create_react_agent(llm, custom_tools)
+
+graph = StateGraph(State)
+graph.add_node("react_agent", agent_node)
+graph.set_entry_point("react_agent")
+graph.add_edge("react_agent", END)
+agent_executor = graph.compile()
+
+# === Chat Function for Gradio ===
+def chat_with_agent(message, history):
+    messages = []
+    for user_msg, bot_msg in history:
+        messages.append(HumanMessage(content=user_msg))
+        messages.append(AIMessage(content=bot_msg))
+    messages.append(HumanMessage(content=message))
+
+    result = agent_executor.invoke({"messages": messages}, verbose=True)
+
+    # Extract last message, which includes actual JUnit code now
+    return result["messages"][-1].content
+
+# === Gradio UI ===
+ui_description = (
+    "\U0001F4A1 Paste your Java project path like: `C:\\Users\\user\\MyProject`\n"
+    "Then say things like:\n"
+    "- Extract class info\n"
+    "- Generate JUnit tests\n"
+    "- Save and print tests"
+)
+
+chatbot_ui = gr.ChatInterface(
+    fn=chat_with_agent,
+    title="OSIF Co-Developer",
+    description=ui_description,
+    theme="default"
+)
+
+if __name__ == "__main__":
+    chatbot_ui.launch()
