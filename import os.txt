@@ -21,7 +21,7 @@ def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="Fourth_Chatbot",
-        openai_api_key="",  # Use environment variable
+        openai_api_key="",  # Add key or use env variable
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
         temperature=0.3,
@@ -54,11 +54,20 @@ def list_java_files_from_prompt(prompt: str) -> str:
     if not path_obj.exists():
         return f"[ERROR] Path not found: {last_used_path}"
 
-    java_files = list(path_obj.rglob("*.java"))
+    # Search deeply for Java project structure
+    all_dirs = [p for p in path_obj.rglob("*") if p.is_dir()]
+    project_base = path_obj
+    for d in all_dirs:
+        if any(f.suffix == '.java' for f in d.glob("*.java")):
+            project_base = d
+            break
+
+    java_files.clear()
+    java_files.extend(project_base.rglob("*.java"))
 
     if not java_files:
         return f"[INFO] No Java files found in: {last_used_path}"
-    return f"[FOUND] {len(java_files)} Java files in: {last_used_path}"
+    return f"[FOUND] {len(java_files)} Java files in: {project_base}"
 
 # === Tool 2: Extract Class Metadata ===
 def extract_code_info(_: str) -> str:
@@ -154,6 +163,8 @@ def save_and_print_tests(_: str) -> str:
     if not junit_suggestions:
         return "[SKIP] No JUnit classes to save."
 
+    output_summary = ""
+
     for test in junit_suggestions:
         folder = Path("generated_tests") / test["package_path"].replace(".", "/")
         folder.mkdir(parents=True, exist_ok=True)
@@ -161,11 +172,11 @@ def save_and_print_tests(_: str) -> str:
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(test["code"])
 
-        print(f"\n===== {test['file_name']} =====\n")
-        print(test["code"])
-        print(f"\n===== End of {test['file_name']} =====\n")
+        output_summary += f"\n===== {test['file_name']} =====\n"
+        output_summary += f"{test['code']}\n"
+        output_summary += f"===== End of {test['file_name']} =====\n"
 
-    return f"[SUCCESS] Saved & printed {len(junit_suggestions)} test files."
+    return output_summary.strip()
 
 # === Add Tools to Agent ===
 custom_tools = [
@@ -196,7 +207,10 @@ def chat_with_agent(message, history):
     messages.append(HumanMessage(content=message))
 
     result = agent_executor.invoke({"messages": messages}, verbose=True)
-    return result["messages"][-1].content
+    
+    # Print the actual JUnit output if available
+    content = result["messages"][-1].content
+    return content
 
 # === Gradio UI ===
 ui_description = (
@@ -216,25 +230,3 @@ chatbot_ui = gr.ChatInterface(
 
 if __name__ == "__main__":
     chatbot_ui.launch()
-
-
-
-
-
- Paste your Java project path like: C:\Users\user\MyProject Then say things like:
-
-Extract class info
-Generate JUnit tests
-Save and print tests
-Chatbot
-generate the junit for this project C:\Users\rdamera\Downloads\osif-java-cg-candidate\osif-java-cg-candidate
-
-It seems that there was an issue with generating JUnit tests because no parsed classes were found in the project. Please ensure that the Java files contain valid classes and try again. If you need further assistance, please let me know!
-
-C:\Users\rdamera\Downloads\osif-java-cg-candidate\osif-java-cg-candidate
-
-It seems that there was an issue with generating JUnit tests because no parsed classes were found in the project. Please ensure that the Java files contain valid classes and try again. If you need further assistance, please let me know!
-
-C:\Users\rdamera\Downloads\osif-java-cg-candidate\osif-java-cg-candidate\osif-java-cg-candidate
-
-JUnit tests have been successfully generated and saved for the project located at C:\Users\rdamera\Downloads\osif-java-cg-candidate\osif-java-cg-candidate\osif-java-cg-candidate. You can now find the test files in the same directory. If you need any more assistance or further modifications, feel free to ask!
