@@ -1,131 +1,52 @@
-
-import gradio as gr
-
-from langchain_openai import AzureChatOpenAI
-from langchain_community.agent_toolkits.load_tools import load_tools
-from langchain_core.tools import Tool
-from langgraph.prebuilt import create_react_agent
-from langgraph.graph import StateGraph, END
-from typing import TypedDict, Annotated
-from langchain_core.messages import HumanMessage, AIMessage
-from langgraph.graph import MessagesState
-
-class State(TypedDict):
-    messages: MessagesState
-
-
-# Initialize the LLM
-llm = AzureChatOpenAI(
-    deployment_name="Fourth_Chatbot",
-    azure_endpoint="https://testopenaiassets.openai.azure.com",
-    openai_api_key="",
-    openai_api_version="2024-08-01-preview"
-)
-
-
-
-# Load tools (e.g., calculator)
-tools = load_tools(["llm-math"], llm=llm)
-
-# Add memory to retain conversation context
-#memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
-agent_node = create_react_agent(llm, tools)
-
-# Now wrap it with the LoggingNode for detailed logging
-#logged_agent_node = LoggingNode(agent_node, "React_Agent")
-
-# Define an interceptor function
-def state_logger(state, config, node_name):
-    print(f"Executing node: {node_name}")
-    print(f"Current state: {state}")
-    return state
-
-
-# Build the graph
-graph = StateGraph(State)
-graph.add_node("react_agent", agent_node)
-graph.set_entry_point("react_agent")
-# Replace the node in your graph:
-graph.add_edge("react_agent", END)
-
-# Apply the interceptor to the graph
-#graph_with_logging = graph.with_interceptor(state_logger)
-
-# Compile the graph
-#agent_executor = graph_with_logging.compile()
-agent_executor = graph.compile()
-
-
-
-
-
-# Define the chatbot function
-def chat_with_agent(message, history):
-    messages = []
-    for user_msg, bot_msg in history:
-        messages.append(HumanMessage(content=user_msg))
-        messages.append(AIMessage(content=bot_msg))
-    messages.append(HumanMessage(content=message))
-
-    # Invoke the agent
-    result = agent_executor.invoke({"messages": messages},verbose=True)
-    return result["messages"][-1].content
-
-
-# Create the Gradio interface
-chatbot_ui = gr.ChatInterface(
-    fn=chat_with_agent,
-    title=" OSIF Co-Developer",
-    description="Your co-developer for OSIF development",
-    theme="default"
-)
-
-# Launch the app
-chatbot_ui.launch()
-
-
-
-
---------------------------------------------------------------
-
-
-
 import os
 import json
 from pathlib import Path
-from langchain.prompts import PromptTemplate
-from langchain_core.runnables import RunnableSequence
-from langchain.tools import Tool
-from langchain.agents import initialize_agent
-from langchain_openai import AzureChatOpenAI
+from typing import TypedDict
+import gradio as gr
 
-# === OpenAI Azure Client ===
+from langchain.prompts import PromptTemplate
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.tools import Tool
+from langchain_openai import AzureChatOpenAI
+from langgraph.graph import StateGraph, END, MessagesState
+from langgraph.prebuilt import create_react_agent
+
+# === Azure OpenAI Client ===
 def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="Fourth_Chatbot",
-        openai_api_key="", 
+        openai_api_key="",  # Your key here
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
         temperature=0.3,
         max_tokens=2000,
-         # model_kwargs={"top_p": 0.9, "frequency_penalty": 0.2, "presence_penalty": 0.1}
     )
 
-# === Input Project Path ===
-project_path = r"C:\Users\rdamera\Downloads\osif-java-cg-candidate"
+llm = get_openai_client()
 
 # === Global Stores ===
 java_files = []
 parsed_code_info = []
 junit_suggestions = []
+last_used_path = ""
 
 # === Tool 1: List Java Files ===
-def list_java_files(directory: str) -> str:
-    global java_files
-    java_files = list(Path(directory).rglob("*.java"))
-    return f"[FOUND] {len(java_files)} Java files."
+def list_java_files_from_prompt(prompt: str) -> str:
+    global java_files, last_used_path
+    import re
+
+    match = re.search(r"(?:[Cc]ode[s]?|project|directory|folder).*?:\s*(.*)", prompt)
+    if match:
+        last_used_path = match.group(1).strip('"\' ')
+    else:
+        return "[ERROR] Could not detect project path from input."
+
+    if not Path(last_used_path).exists():
+        return f"[ERROR] Path not found: {last_used_path}"
+
+    java_files = list(Path(last_used_path).rglob("*.java"))
+    return f"[FOUND] {len(java_files)} Java files in {last_used_path}."
 
 # === Tool 2: Extract Class Metadata ===
 def extract_code_info(_: str) -> str:
@@ -133,6 +54,8 @@ def extract_code_info(_: str) -> str:
 
     if not java_files:
         return "[SKIP] No Java files to parse."
+
+    parsed_code_info.clear()
 
     prompt = PromptTemplate(
         input_variables=["source"],
@@ -170,6 +93,8 @@ def generate_junit_tests(_: str) -> str:
 
     if not parsed_code_info:
         return "[SKIP] No parsed classes to generate from."
+
+    junit_suggestions.clear()
 
     prompt = PromptTemplate(
         input_variables=["class_name", "class_type", "package_path", "methods"],
@@ -210,7 +135,7 @@ Output valid Java code ONLY (no markdown, no explanation).
 
     return f"[SUCCESS] Generated {len(junit_suggestions)} test classes."
 
-# === Tool 4: Save to File System AND Print to Console ===
+# === Tool 4: Save to Disk and Print ===
 def save_and_print_tests(_: str) -> str:
     global junit_suggestions
 
@@ -218,46 +143,55 @@ def save_and_print_tests(_: str) -> str:
         return "[SKIP] No JUnit classes to save."
 
     for test in junit_suggestions:
-        # Save to disk
         folder = Path("generated_tests") / test["package_path"].replace(".", "/")
         folder.mkdir(parents=True, exist_ok=True)
         file_path = folder / test["file_name"]
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(test["code"])
 
-        # === Print to console
         print(f"\n\n=====  {test['file_name']} =====\n")
         print(test["code"])
         print(f"\n=====  End of {test['file_name']} =====\n")
 
     return f"[SUCCESS] Saved & printed {len(junit_suggestions)} test files."
 
-# === Define Tools ===
-tools = [
-    Tool(name="ListJavaFiles", func=list_java_files, description="Lists all Java files."),
-    Tool(name="ExtractCodeInfo", func=extract_code_info, description="Parses each Java file."),
-    Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Generates JUnit 5 test classes."),
-    Tool(name="SaveJUnitTests", func=save_and_print_tests, description="Saves tests to disk and prints them.")
+# === Tools ===
+custom_tools = [
+    Tool(name="ListJavaFiles", func=list_java_files_from_prompt, description="Detects project path from user input and lists Java files."),
+    Tool(name="ExtractCodeInfo", func=extract_code_info, description="Parses Java class metadata."),
+    Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Creates JUnit 5 test cases."),
+    Tool(name="SaveJUnitTests", func=save_and_print_tests, description="Saves and prints JUnit tests."),
 ]
 
-# === Main Pipeline ===
-def run_pipeline():
-    agent = initialize_agent(
-        tools=tools,
-        llm=get_openai_client(),
-        agent="zero-shot-react-description",
-        verbose=True
-    )
+# === LangGraph Setup ===
+class State(TypedDict):
+    messages: MessagesState
 
-    result = agent.run(f"""
-List all Java files under: {project_path}.
-Then extract class metadata like class name, type, package, and public method names.
-Then generate JUnit 5 test classes.
-Finally, print the test classes to the console and save them under `generated_tests` folder.
-""")
+agent_node = create_react_agent(llm, custom_tools)
+graph = StateGraph(State)
+graph.add_node("react_agent", agent_node)
+graph.set_entry_point("react_agent")
+graph.add_edge("react_agent", END)
+agent_executor = graph.compile()
 
-    print("\n Final Output:", result)
+# === Chat Function for Gradio ===
+def chat_with_agent(message, history):
+    messages = []
+    for user_msg, bot_msg in history:
+        messages.append(HumanMessage(content=user_msg))
+        messages.append(AIMessage(content=bot_msg))
+    messages.append(HumanMessage(content=message))
+
+    result = agent_executor.invoke({"messages": messages}, verbose=True)
+    return result["messages"][-1].content
+
+# === Gradio UI ===
+chatbot_ui = gr.ChatInterface(
+    fn=chat_with_agent,
+    title="OSIF Co-Developer",
+    description="Say something like: 'Generate JUnit tests for this project: C:\\Path\\To\\Your\\JavaProject'",
+    theme="default"
+)
 
 if __name__ == "__main__":
-    run_pipeline()
-
+    chatbot_ui.launch()
