@@ -1,84 +1,81 @@
-update the below code , i had requirement that i will pass s3 bucket file arn (arn:aws:s3:::osif-files/OSIF_Dependency_req.txt) inside of that it contains details of necessary information of connectors  what i will ask through ui , based on the question from ui i need to give context of that what it will do also need to get the information from s3 buckect, the properties which i mentioned in s3 it need to give as like same with out any change the format need to be like that only  i need to put in application .properties for that connector , update full code and prompt 
-
-
-
-ex : i will ask question  like (can you give what i need to put for sales force connector in application properties)
-
-you need to give like 
-
-(Explanation:
-Username): Your Salesforce username.
-Password (.password): Your Salesforce password.
-Security Token (.securityToken): Your Salesforce security token. This is typically required when accessing Salesforce from an untrusted network.
-Client ID (.clientId): Also known as the Consumer Key in Salesforce, you get this from your Salesforce connected app.
-Client Secret (.clientSecret): Also known as the Consumer Secret, this is also obtained from your Salesforce connected app.
-Login URL (.loginUrl): The URL for the Salesforce login endpoint. This can vary if you are using a sandbox environment (https://test.salesforce.com) or production/developer environment (https://login.salesforce.com).
-Additional Considerations:
-Connected App: Ensure you have a connected app set up in your Salesforce org with OAuth enabled, providing you with the necessary clientId and clientSecret.
-Security: Store sensitive credentials securely. Consider using environment variables or a secure vault especially for passwords and secrets.
-Dependencies: Ensure you have the necessary libraries or dependencies included in your project to work with Salesforce APIs.
-Be sure to replace each value (your_username, your_password, etc.) with actual values from your own Salesforce setup. If you're using a different framework or additional configurations, the specifics might vary.
-
-
-
-)
-
-it need to fetch the data from s3 file , what connecector had and need to reflect like below 
-
- dependency lo sales-force vunte default ga e format ichesthadhi , ok na inka emi iyena change cheyala .?
- 
-core:
-
-  connectors:
-
-    sfdc:
-
-      authUrl: https://login.salesforce.com
-
-      username: your-username
-
-      password: your-password
-
-      client_id: your-client_id
-
-      client_secret: your-client-secret
-
-      grant_type: password
-
-      queryUrl: /
-
-      version: v53.0
-
-
-the same thing i have mentioned from s3 bucket files , ai ned to fetch the data from s3 bucket from give the data properly ormented structure like core->connectors->sfdc(actual data), , 
-Salesforce Customer Secure Login Page. Login to your Salesforce Customer Account.
- 
-
-
-
-AWS_ACCESS_KEY_ID=
-AWS_SECRET_ACCESS_KEY=N3+
-AWS_DEFAULT_REGION=us-east-1
-
-
-
 
 import gradio as gr
-
+import boto3
+import json
+import yaml
+import re
 from langchain_openai import AzureChatOpenAI
 from langchain_community.agent_toolkits.load_tools import load_tools
-from langchain_core.tools import Tool
 from langgraph.prebuilt import create_react_agent
 from langgraph.graph import StateGraph, END
-from typing import TypedDict, Annotated
+from typing import TypedDict
 from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.graph import MessagesState
 
+
+# -------------------------
+# AWS S3 Utility
+# -------------------------
+def fetch_s3_file_content(arn: str) -> str:
+    """
+    Given an S3 file ARN, fetch and return its content as a string.
+    Example ARN: arn:aws:s3:::my-bucket-name/path/to/file.txt
+    """
+    # Parse ARN to bucket and key
+    match = re.match(r"^arn:aws:s3:::(.+?)/(.*)$", arn)
+    if not match:
+        raise ValueError("Invalid S3 ARN format")
+
+    bucket, key = match.groups()
+
+    s3 = boto3.client("s3",
+                      aws_access_key_id="YOUR_AWS_ACCESS_KEY_ID",
+                      aws_secret_access_key="YOUR_AWS_SECRET_ACCESS_KEY",
+                      region_name="us-east-1")
+
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    return obj["Body"].read().decode("utf-8")
+
+
+def extract_connector_info(file_content: str, connector_name: str):
+    """
+    Extracts connector block from the S3 file and returns explanation + exact config.
+    """
+    # Assuming YAML format in S3 file
+    try:
+        data = yaml.safe_load(file_content)
+    except yaml.YAMLError:
+        # If it's JSON
+        data = json.loads(file_content)
+
+    # Normalize connector name search
+    connector_key = connector_name.lower().replace(" ", "-")
+
+    # Traverse structure to find the matching connector
+    connectors_data = data.get("core", {}).get("connectors", {})
+    if connector_key not in connectors_data:
+        return None, None
+
+    connector_config = connectors_data[connector_key]
+
+    # Build explanation dynamically
+    explanation_lines = []
+    for key, value in connector_config.items():
+        explanation_lines.append(f"**{key}**: This is the `{key}` parameter for the {connector_name} connector.")
+
+    explanation_text = "\n".join(explanation_lines)
+
+    # Return explanation + exact YAML block
+    return explanation_text, yaml.dump({"core": {"connectors": {connector_key: connector_config}}}, sort_keys=False)
+
+
+# -------------------------
+# LangChain + Graph Setup
+# -------------------------
 class State(TypedDict):
     messages: MessagesState
 
 
-# Initialize the LLM
 llm = AzureChatOpenAI(
     deployment_name="Fourth_Chatbot",
     azure_endpoint="https://testopenaiassets.openai.azure.com",
@@ -86,67 +83,53 @@ llm = AzureChatOpenAI(
     openai_api_version="2024-08-01-preview"
 )
 
-
-
-# Load tools (e.g., calculator)
 tools = load_tools(["llm-math"], llm=llm)
-
-# Add memory to retain conversation context
-#memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
 agent_node = create_react_agent(llm, tools)
 
-# Now wrap it with the LoggingNode for detailed logging
-#logged_agent_node = LoggingNode(agent_node, "React_Agent")
-
-# Define an interceptor function
-def state_logger(state, config, node_name):
-    print(f"Executing node: {node_name}")
-    print(f"Current state: {state}")
-    return state
-
-
-# Build the graph
 graph = StateGraph(State)
 graph.add_node("react_agent", agent_node)
 graph.set_entry_point("react_agent")
-# Replace the node in your graph:
 graph.add_edge("react_agent", END)
-
-# Apply the interceptor to the graph
-#graph_with_logging = graph.with_interceptor(state_logger)
-
-# Compile the graph
-#agent_executor = graph_with_logging.compile()
 agent_executor = graph.compile()
 
 
+# -------------------------
+# Chatbot Handler
+# -------------------------
+S3_ARN = "arn:aws:s3:::osif-files/OSIF_Dependency_req.txt"  # Your file ARN
 
-
-
-# Define the chatbot function
 def chat_with_agent(message, history):
+    # First, detect connector name from question
+    connector_match = re.search(r"(sales[- ]?force|snowflake|sfdc)", message, re.IGNORECASE)
+    if connector_match:
+        connector_name = connector_match.group(1)
+        file_content = fetch_s3_file_content(S3_ARN)
+        explanation, config_yaml = extract_connector_info(file_content, connector_name)
+        if explanation and config_yaml:
+            return f"**Explanation:**\n{explanation}\n\n**Configuration:**\n```yaml\n{config_yaml}\n```"
+
+    # Otherwise, fallback to normal agent
     messages = []
     for user_msg, bot_msg in history:
         messages.append(HumanMessage(content=user_msg))
         messages.append(AIMessage(content=bot_msg))
     messages.append(HumanMessage(content=message))
-
-    # Invoke the agent
-    result = agent_executor.invoke({"messages": messages},verbose=True)
+    result = agent_executor.invoke({"messages": messages}, verbose=True)
     return result["messages"][-1].content
 
 
-# Create the Gradio interface
+# -------------------------
+# Gradio UI
+# -------------------------
 chatbot_ui = gr.ChatInterface(
     fn=chat_with_agent,
-    title=" OSIF Co-Developer",
+    title="OSIF Co-Developer",
     description="Your co-developer for OSIF development",
     theme="default"
 )
 
-# Launch the app
-chatbot_ui.launch()
+if __name__ == "__main__":
+    chatbot_ui.launch()
 
 
 
