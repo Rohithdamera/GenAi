@@ -1,135 +1,150 @@
-
-import gradio as gr
-import boto3
+import os
+import logging
 import json
-import yaml
-import re
-from langchain_openai import AzureChatOpenAI
-from langchain_community.agent_toolkits.load_tools import load_tools
-from langgraph.prebuilt import create_react_agent
-from langgraph.graph import StateGraph, END
-from typing import TypedDict
-from langchain_core.messages import HumanMessage, AIMessage
-from langgraph.graph import MessagesState
+import tempfile
+import openpyxl
+from base64 import b64decode
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
+from langchain_community.chat_models import AzureChatOpenAI
+from langchain.schema import HumanMessage
+from openpyxl.utils import column_index_from_string
+import azure.functions as func
 
+logger = logging.getLogger(__name__)
 
-# -------------------------
-# AWS S3 Utility
-# -------------------------
-def fetch_s3_file_content(arn: str) -> str:
-    """
-    Given an S3 file ARN, fetch and return its content as a string.
-    Example ARN: arn:aws:s3:::my-bucket-name/path/to/file.txt
-    """
-    # Parse ARN to bucket and key
-    match = re.match(r"^arn:aws:s3:::(.+?)/(.*)$", arn)
-    if not match:
-        raise ValueError("Invalid S3 ARN format")
+# AES Decryption
+def decrypt(data, key):
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)
+    decrypted_data = cipher.decrypt(b64decode(data))
+    decrypted_data = unpad(decrypted_data, AES.block_size)
+    return decrypted_data.decode()
 
-    bucket, key = match.groups()
+# LangChain OpenAI Client
+def get_openai_client(model_instance_name):
+    aes_key_base64 = os.environ['AES_KEY']
+    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+    api_version = os.environ['AZURE_API_VERSION']
 
-    s3 = boto3.client("s3",
-                      aws_access_key_id="YOUR_AWS_ACCESS_KEY_ID",
-                      aws_secret_access_key="YOUR_AWS_SECRET_ACCESS_KEY",
-                      region_name="us-east-1")
+    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
 
-    obj = s3.get_object(Bucket=bucket, Key=key)
-    return obj["Body"].read().decode("utf-8")
+    if not decrypted_api_base.endswith('/'):
+        decrypted_api_base += '/'
 
+    return AzureChatOpenAI(
+        deployment_name=model_instance_name,
+        openai_api_base=decrypted_api_base,
+        openai_api_key=decrypted_api_key,
+        openai_api_version=api_version,
+        temperature=0.4,
+        max_tokens=4096
+    )
 
-def extract_connector_info(file_content: str, connector_name: str):
-    """
-    Extracts connector block from the S3 file and returns explanation + exact config.
-    """
-    # Assuming YAML format in S3 file
+def col_letter_to_index(col_letter):
     try:
-        data = yaml.safe_load(file_content)
-    except yaml.YAMLError:
-        # If it's JSON
-        data = json.loads(file_content)
+        return column_index_from_string(col_letter.upper()) - 1
+    except Exception as e:
+        logger.error(f"Invalid column letter: {col_letter} - {str(e)}")
+        return None
 
-    # Normalize connector name search
-    connector_key = connector_name.lower().replace(" ", "-")
+def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col):
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True)
+        sheet = wb[sheet_name]
+        data = []
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            source = row[source_col] if source_col < len(row) else None
+            logic = row[logic_col] if logic_col < len(row) else None
+            target = row[target_col] if target_col < len(row) else None
+            if source and target:
+                data.append({
+                    "source": source,
+                    "logic": logic or "",
+                    "target": target
+                })
+        return data
+    except Exception as e:
+        logger.error(f"Failed to extract Excel data: {e}")
+        return []
 
-    # Traverse structure to find the matching connector
-    connectors_data = data.get("core", {}).get("connectors", {})
-    if connector_key not in connectors_data:
-        return None, None
+def build_dataweave_prompt(data, file_name, sheet_name, source_col, target_col, logic_col):
+    prompt = (
+        f"Write a DataWeave script referring to the uploaded Excel file named {file_name}, "
+        f"specifically the sheet named {sheet_name}.\n"
+        f"- Column {source_col} contains source field details.\n"
+        f"- Column {target_col} contains target field details.\n"
+        f"- Column {logic_col} contains business logic for transformations.\n"
+        "Use only functions from: https://docs.mulesoft.com/dataweave/latest/dw-functions#dw_modules\n\n"
+        "Here is the extracted data:\n"
+    )
+    for row in data:
+        prompt += f"- Source: {row['source']}, Target: {row['target']}, Logic: {row['logic']}\n"
+    return prompt
 
-    connector_config = connectors_data[connector_key]
+def main(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        logger.info("DataWeave function triggered.")
 
-    # Build explanation dynamically
-    explanation_lines = []
-    for key, value in connector_config.items():
-        explanation_lines.append(f"**{key}**: This is the `{key}` parameter for the {connector_name} connector.")
+        model_instance = req.headers.get("model_instance_name", "")
+        if not model_instance:
+            return func.HttpResponse("Missing 'model_instance_name' in headers.", status_code=400)
 
-    explanation_text = "\n".join(explanation_lines)
+        file_name = req.params.get("file_name", "uploaded_file.xlsx")
+        sheet_name = req.params.get("sheet_name")
+        src_col = req.params.get("source_system_column")
+        tgt_col = req.params.get("target_system_column")
+        logic_col = req.params.get("business_logic_column")
 
-    # Return explanation + exact YAML block
-    return explanation_text, yaml.dump({"core": {"connectors": {connector_key: connector_config}}}, sort_keys=False)
+        logger.info(f"Parameters: file={file_name}, sheet={sheet_name}, src={src_col}, tgt={tgt_col}, logic={logic_col}")
 
+        # Validate all required query parameters
+        if not all([sheet_name, src_col, tgt_col, logic_col]):
+            return func.HttpResponse("Missing one or more required query parameters.", status_code=400)
 
-# -------------------------
-# LangChain + Graph Setup
-# -------------------------
-class State(TypedDict):
-    messages: MessagesState
+        # Convert Excel column letters to index
+        source_col_idx = col_letter_to_index(src_col)
+        target_col_idx = col_letter_to_index(tgt_col)
+        logic_col_idx = col_letter_to_index(logic_col)
 
+        if None in [source_col_idx, target_col_idx, logic_col_idx]:
+            return func.HttpResponse("Invalid column letters provided.", status_code=400)
 
-llm = AzureChatOpenAI(
-    deployment_name="Fourth_Chatbot",
-    azure_endpoint="https://testopenaiassets.openai.azure.com",
-    openai_api_key="",
-    openai_api_version="2024-08-01-preview"
-)
+        # Handle binary body (uploaded .xlsx file)
+        body = req.get_body()
+        if not body:
+            return func.HttpResponse("No file content found in body.", status_code=400)
 
-tools = load_tools(["llm-math"], llm=llm)
-agent_node = create_react_agent(llm, tools)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as temp_file:
+            temp_file.write(body)
+            temp_file_path = temp_file.name
 
-graph = StateGraph(State)
-graph.add_node("react_agent", agent_node)
-graph.set_entry_point("react_agent")
-graph.add_edge("react_agent", END)
-agent_executor = graph.compile()
+        extracted_data = extract_excel_data(temp_file_path, sheet_name, source_col_idx, logic_col_idx, target_col_idx)
 
+        if not extracted_data:
+            return func.HttpResponse("No data extracted from Excel file.", status_code=400)
 
-# -------------------------
-# Chatbot Handler
-# -------------------------
-S3_ARN = "arn:aws:s3:::osif-files/OSIF_Dependency_req.txt"  # Your file ARN
+        prompt = build_dataweave_prompt(
+            extracted_data,
+            file_name, sheet_name, src_col, tgt_col, logic_col
+        )
 
-def chat_with_agent(message, history):
-    # First, detect connector name from question
-    connector_match = re.search(r"(sales[- ]?force|snowflake|sfdc)", message, re.IGNORECASE)
-    if connector_match:
-        connector_name = connector_match.group(1)
-        file_content = fetch_s3_file_content(S3_ARN)
-        explanation, config_yaml = extract_connector_info(file_content, connector_name)
-        if explanation and config_yaml:
-            return f"**Explanation:**\n{explanation}\n\n**Configuration:**\n```yaml\n{config_yaml}\n```"
+        instructions = """
+As a seasoned expert in MuleSoft Integration Services, specialize in DataWeave transformations and advanced integration techniques.
+Refer to this documentation for syntax: https://docs.mulesoft.com/dataweave/latest/dw-functions#dw_modules
+"""
 
-    # Otherwise, fallback to normal agent
-    messages = []
-    for user_msg, bot_msg in history:
-        messages.append(HumanMessage(content=user_msg))
-        messages.append(AIMessage(content=bot_msg))
-    messages.append(HumanMessage(content=message))
-    result = agent_executor.invoke({"messages": messages}, verbose=True)
-    return result["messages"][-1].content
+        full_prompt = instructions + "\n" + prompt
 
+        client = get_openai_client(model_instance)
+        response = client.invoke([
+            HumanMessage(content=full_prompt),
+            HumanMessage(content="Generate the DataWeave script.")
+        ])
 
-# -------------------------
-# Gradio UI
-# -------------------------
-chatbot_ui = gr.ChatInterface(
-    fn=chat_with_agent,
-    title="OSIF Co-Developer",
-    description="Your co-developer for OSIF development",
-    theme="default"
-)
+        return func.HttpResponse(response.content.strip(), status_code=200, mimetype="text/plain")
 
-if __name__ == "__main__":
-    chatbot_ui.launch()
-
-
-
+    except Exception as e:
+        logger.error(f"Unhandled error: {str(e)}", exc_info=True)
+        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
