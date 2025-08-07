@@ -1,159 +1,45 @@
-import os
-import logging
-import tempfile
-import openpyxl
-from base64 import b64decode
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import unpad
-from langchain_community.chat_models import AzureChatOpenAI
-from langchain.schema import HumanMessage
-from langchain.callbacks import get_openai_callback
-from openpyxl.utils import column_index_from_string
-import azure.functions as func
-
-logger = logging.getLogger(__name__)
-
-# AES Decryption
-def decrypt(data, key):
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted_data = cipher.decrypt(b64decode(data))
-    decrypted_data = unpad(decrypted_data, AES.block_size)
-    return decrypted_data.decode()
-
-# LangChain OpenAI Client (using env for deployment name)
-def get_openai_client():
-    aes_key_base64 = os.environ['AES_KEY']
-    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-    api_version = os.environ['AZURE_API_VERSION']
-    deployment_name = os.environ['DEFAULT_DEPLOYMENT_NAME']
-
-    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
-
-    if not decrypted_api_base.endswith('/'):
-        decrypted_api_base += '/'
-
-    return AzureChatOpenAI(
-        deployment_name=deployment_name,
-        openai_api_base=decrypted_api_base,
-        openai_api_key=decrypted_api_key,
-        openai_api_version=api_version,
-        temperature=0.4,
-        max_tokens=4096
-    )
-
-def col_letter_to_index(col_letter):
-    try:
-        return column_index_from_string(col_letter.upper()) - 1
-    except Exception as e:
-        logger.error(f"Invalid column letter: {col_letter} - {str(e)}")
-        return None
-
-def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col):
-    try:
-        wb = openpyxl.load_workbook(file_path, data_only=True)
-        sheet = wb[sheet_name]
-        data = []
-        for row in sheet.iter_rows(min_row=2, values_only=True):
-            source = row[source_col] if source_col < len(row) else None
-            logic = row[logic_col] if logic_col < len(row) else None
-            target = row[target_col] if target_col < len(row) else None
-            if source and target:
-                data.append({
-                    "source": source,
-                    "logic": logic or "",
-                    "target": target
-                })
-        return data
-    except Exception as e:
-        logger.error(f"Failed to extract Excel data: {e}")
-        return []
-
-def build_dataweave_prompt(data, file_name, sheet_name, source_col, target_col, logic_col):
-    prompt = (
-        f"Write a DataWeave script referring to the uploaded Excel file named {file_name}, "
-        f"specifically the sheet named {sheet_name}.\n"
-        f"- Column {source_col} contains source field details.\n"
-        f"- Column {target_col} contains target field details.\n"
-        f"- Column {logic_col} contains business logic for transformations.\n"
-        "Use only functions from: https://docs.mulesoft.com/dataweave/latest/dw-functions#dw_modules\n\n"
-        "Here is the extracted data:\n"
-    )
-    for row in data:
-        prompt += f"- Source: {row['source']}, Target: {row['target']}, Logic: {row['logic']}\n"
-    return prompt
-
-# Chat with OpenAI and track token usage and cost
-def chat_with_agent(prompt, client):
-    messages = [
-        HumanMessage(content="""
-As a seasoned expert in MuleSoft Integration Services, specialize in DataWeave transformations and advanced integration techniques.
-Refer to this documentation for syntax: https://docs.mulesoft.com/dataweave/latest/dw-functions#dw_modules
-        """),
-        HumanMessage(content=prompt),
-        HumanMessage(content="Generate the DataWeave script.")
-    ]
-
-    try:
-        with get_openai_callback() as cb:
-            result = client.invoke(messages)
-            final_response = result.content.strip()
-            final_response += "\n\n--- Token Usage ---"
-            final_response += f"\nTotal Tokens: {cb.total_tokens}"
-            final_response += f"\nPrompt Tokens: {cb.prompt_tokens}"
-            final_response += f"\nCompletion Tokens: {cb.completion_tokens}"
-            final_response += f"\nTotal Cost (USD): ${format(cb.total_cost, '.6f')}"
-            return final_response
-    except Exception as e:
-        logger.error(f"Error during model invocation: {e}")
-        raise
-
-# Azure Function main handler
-def main(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        logger.info("DataWeave function triggered.")
-
-        file_name = req.params.get("file_name", "uploaded_file.xlsx")
-        sheet_name = req.params.get("sheet_name")
-        src_col = req.params.get("source_system_column")
-        tgt_col = req.params.get("target_system_column")
-        logic_col = req.params.get("business_logic_column")
-
-        logger.info(f"Parameters: file={file_name}, sheet={sheet_name}, src={src_col}, tgt={tgt_col}, logic={logic_col}")
-
-        if not all([sheet_name, src_col, tgt_col, logic_col]):
-            return func.HttpResponse("Missing one or more required query parameters.", status_code=400)
-
-        source_col_idx = col_letter_to_index(src_col)
-        target_col_idx = col_letter_to_index(tgt_col)
-        logic_col_idx = col_letter_to_index(logic_col)
-
-        if None in [source_col_idx, target_col_idx, logic_col_idx]:
-            return func.HttpResponse("Invalid column letters provided.", status_code=400)
-
-        body = req.get_body()
-        if not body:
-            return func.HttpResponse("No file content found in body.", status_code=400)
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as temp_file:
-            temp_file.write(body)
-            temp_file_path = temp_file.name
-
-        extracted_data = extract_excel_data(temp_file_path, sheet_name, source_col_idx, logic_col_idx, target_col_idx)
-        if not extracted_data:
-            return func.HttpResponse("No data extracted from Excel file.", status_code=400)
-
-        prompt = build_dataweave_prompt(
-            extracted_data,
-            file_name, sheet_name, src_col, tgt_col, logic_col
-        )
-
-        client = get_openai_client()
-        result = chat_with_agent(prompt, client)
-
-        return func.HttpResponse(result, status_code=200, mimetype="text/plain")
-
-    except Exception as e:
-        logger.error(f"Unhandled error: {str(e)}", exc_info=True)
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
+   warnings.warn(
+[2025-08-07T11:16:52.863Z] HTTP Request: POST https://testopenaiassets.openai.azure.com/openai/deployments/o4-mini-mulesoft/chat/completions?api-version=2025-04-16 "HTTP/1.1 404 Resource Not Found"
+[2025-08-07T11:16:52.865Z] Error during model invocation: Error code: 404 - {'error': {'code': '404', 'message': 'Resource not found'}}
+[2025-08-07T11:16:52.873Z] Unhandled error: Error code: 404 - {'error': {'code': '404', 'message': 'Resource not found'}}
+Traceback (most recent call last):
+  File "C:\Users\rdamera\OneDrive - Capgemini\Desktop\Azure\AZURE_local\Data_Weave_base__V2\Mappingsheet_to_Dataweave_v2\__init__.py", line 153, in main
+    result = chat_with_agent(prompt, client)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Desktop\Azure\AZURE_local\Data_Weave_base__V2\Mappingsheet_to_Dataweave_v2\__init__.py", line 100, in chat_with_agent
+    result = client.invoke(messages)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\Downloads\my-function-app\.venv\Lib\site-packages\langchain_core\language_models\chat_models.py", line 372, in invoke
+    self.generate_prompt(
+  File "C:\Users\rdamera\Downloads\my-function-app\.venv\Lib\site-packages\langchain_core\language_models\chat_models.py", line 957, in generate_prompt
+    return self.generate(prompt_messages, stop=stop, callbacks=callbacks, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\Downloads\my-function-app\.venv\Lib\site-packages\langchain_core\language_models\chat_models.py", line 776, in generate
+    self._generate_with_cache(
+  File "C:\Users\rdamera\Downloads\my-function-app\.venv\Lib\site-packages\langchain_core\language_models\chat_models.py", line 1022, in _generate_with_cache
+    result = self._generate(
+             ^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\Downloads\my-function-app\.venv\Lib\site-packages\langchain_community\chat_models\openai.py", line 476, in _generate
+    response = self.completion_with_retry(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\Downloads\my-function-app\.venv\Lib\site-packages\langchain_community\chat_models\openai.py", line 387, in completion_with_retry
+    return self.client.create(**kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\Downloads\my-function-app\.venv\Lib\site-packages\openai\_utils\_utils.py", line 287, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\Downloads\my-function-app\.venv\Lib\site-packages\openai\resources\chat\completions\completions.py", line 925, in create
+    return self._post(
+           ^^^^^^^^^^^
+  File "C:\Users\rdamera\Downloads\my-function-app\.venv\Lib\site-packages\openai\_base_client.py", line 1242, in post
+    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\Downloads\my-function-app\.venv\Lib\site-packages\openai\_base_client.py", line 1037, in request
+    raise self._make_status_error_from_response(err.response) from None
+openai.NotFoundError: Error code: 404 - {'error': {'code': '404', 'message': 'Resource not found'}}
+[2025-08-07T11:16:52.936Z] Executed 'Functions.Mappingsheet_to_Dataweave_v2' (Succeeded, Id=004a3644-b58f-4992-80a5-9c7ea8a887ed, Duration=4921ms)
+[2025-08-07T11:16:52.958Z] Executed HTTP request: {
+[2025-08-07T11:16:52.959Z]   "requestId": "da4a8dfe-2a5a-4b3a-b8c1-0b99f21ef108",
+[2025-08-07T11:16:52.960Z]   "identities": "(WebJobsAuthLevel:Admin)",
+[2025-08-07T11:16:52.961Z]   "status": "500",
+[2025-08-07T11:16:52.962Z]   "duration": "5149"
