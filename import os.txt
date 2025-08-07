@@ -1,159 +1,48 @@
-import os
-import logging
-import tempfile
-import openpyxl
-from base64 import b64decode
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import unpad
-from langchain_community.chat_models import AzureChatOpenAI
-from langchain.schema import HumanMessage, AIMessage
-from langchain.callbacks import get_openai_callback, ConsoleCallbackHandler
-from openpyxl.utils import column_index_from_string
-import azure.functions as func
+ 
+function_project/
+│
+├── Mappingsheet_to_Dataweave_v2/
+│   ├── __init__.py                  <-- Your full function code here
+│   └── function.json
+│
+├── host.json
+├── requirements.txt
+└── .funcignore    
+|__ local.setting.json (credientails )
 
-logger = logging.getLogger(__name__)
+i am getting below error also  Mappingsheet_to_Dataweave_v2: [POST] http://localhost:7071/api/employee
 
-# AES Decryption
-def decrypt(data, key):
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted_data = cipher.decrypt(b64decode(data))
-    decrypted_data = unpad(decrypted_data, AES.block_size)
-    return decrypted_data.decode()
+the url which it is generating it is wrong it need to be Mappingsheet_to_Dataweave_v2: [POST] http://localhost:7071/api/Mappingsheet_to_Dataweave_v2
+like this but i got beleow kind what i need to do 
 
-# LangChain OpenAI Client (single deployment)
-def get_openai_client():
-    aes_key_base64 = os.environ['AES_KEY']
-    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-    api_version = os.environ['AZURE_API_VERSION']
-    deployment_name = os.environ['DEFAULT_DEPLOYMENT_NAME']
+Functions:
 
-    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+        Mappingsheet_to_Dataweave_v2: [POST] http://localhost:7071/api/employee
 
-    if not decrypted_api_base.endswith('/'):
-        decrypted_api_base += '/'
+For detailed output, run func with --verbose flag.
+[2025-08-07T11:00:07.441Z] C:\Users\rdamera\OneDrive - Capgemini\Desktop\Azure\AZURE_local\Data_Weave_base__V2\Mappingsheet_to_Dataweave_v2\__init__.py:10: LangChainDeprecationWarning: Importing get_openai_callback from C:\Users\rdamera\Downloads\my-function-app\.venv\Lib\site-packages\langchain\callbacks\__init__.py is deprecated. Please replace deprecated imports:
+[2025-08-07T11:00:07.444Z] >> from C:\Users\rdamera\Downloads\my-function-app\.venv\Lib\site-packages\langchain\callbacks\__init__.py import get_openai_callback
+[2025-08-07T11:00:07.447Z]  ERROR: Error: cannot import name 'ConsoleCallbackHandler' from 'langchain.callbacks' (C:\Users\rdamera\Downloads\my-function-app\.venv\Lib\site-packages\langchain\callbacks\__init__.py), Cannot find module. Please check the requirements.txt file for the missing module. For more info, please refer the troubleshooting guide: https://aka.ms/functions-modulenotfound. Current sys.path: ['C:\\Users\\rdamera\\AppData\\Roaming\\npm\\node_modules\\azure-functions-core-tools\\bin\\workers\\python\\3.11\\WINDOWS\\X64', 'C:\\Users\\rdamera\\AppData\\Roaming\\npm\\node_modules\\azure-functions-core-tools\\bin\\workers\\python\\3.11\\WINDOWS\\X64', 'C:\\Program Files\\Python311\\python311.zip', 'C:\\Program Files\\Python311\\DLLs', 'C:\\Program Files\\Python311\\Lib', 'C:\\Program Files\\Python311', 'C:\\Users\\rdamera\\Downloads\\my-function-app\\.venv', 'C:\\Users\\rdamera\\Downloads\\my-function-app\\.venv\\Lib\\site-packages', 'C:\\Users\\rdamera\\OneDrive - Capgemini\\Desktop\\Azure\\AZURE_local\\Data_Weave_base__V2']
+[2025-08-07T11:00:07.447Z] with new imports of:
 
-    return AzureChatOpenAI(
-        deployment_name=deployment_name,
-        openai_api_base=decrypted_api_base,
-        openai_api_key=decrypted_api_key,
-        openai_api_version=api_version,
-        temperature=0.4,
-        max_tokens=4096
-    )
 
-def col_letter_to_index(col_letter):
-    try:
-        return column_index_from_string(col_letter.upper()) - 1
-    except Exception as e:
-        logger.error(f"Invalid column letter: {col_letter} - {str(e)}")
-        return None
 
-def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col):
-    try:
-        wb = openpyxl.load_workbook(file_path, data_only=True)
-        sheet = wb[sheet_name]
-        data = []
-        for row in sheet.iter_rows(min_row=2, values_only=True):
-            source = row[source_col] if source_col < len(row) else None
-            logic = row[logic_col] if logic_col < len(row) else None
-            target = row[target_col] if target_col < len(row) else None
-            if source and target:
-                data.append({
-                    "source": source,
-                    "logic": logic or "",
-                    "target": target
-                })
-        return data
-    except Exception as e:
-        logger.error(f"Failed to extract Excel data: {e}")
-        return []
-
-def build_dataweave_prompt(data, file_name, sheet_name, source_col, target_col, logic_col):
-    prompt = (
-        f"Write a DataWeave script referring to the uploaded Excel file named {file_name}, "
-        f"specifically the sheet named {sheet_name}.\n"
-        f"- Column {source_col} contains source field details.\n"
-        f"- Column {target_col} contains target field details.\n"
-        f"- Column {logic_col} contains business logic for transformations.\n"
-        "Use only functions from: https://docs.mulesoft.com/dataweave/latest/dw-functions#dw_modules\n\n"
-        "Here is the extracted data:\n"
-    )
-    for row in data:
-        prompt += f"- Source: {row['source']}, Target: {row['target']}, Logic: {row['logic']}\n"
-    return prompt
-
-# Chat with callback and token usage tracking
-def chat_with_agent(prompt, client):
-    messages = [
-        HumanMessage(content="""
-As a seasoned expert in MuleSoft Integration Services, specialize in DataWeave transformations and advanced integration techniques.
-Refer to this documentation for syntax: https://docs.mulesoft.com/dataweave/latest/dw-functions#dw_modules
-        """),
-        HumanMessage(content=prompt),
-        HumanMessage(content="Generate the DataWeave script.")
-    ]
-
-    try:
-        with get_openai_callback() as cb:
-            result = client.invoke(messages, config={"callbacks": [ConsoleCallbackHandler()]})
-            final_response = result.content.strip()
-            final_response += "\n\n--- Token Usage ---"
-            final_response += f"\nTotal Tokens: {cb.total_tokens}"
-            final_response += f"\nPrompt Tokens: {cb.prompt_tokens}"
-            final_response += f"\nCompletion Tokens: {cb.completion_tokens}"
-            final_response += f"\nTotal Cost (USD): ${format(cb.total_cost, '.6f')}"
-            return final_response
-    except Exception as e:
-        logger.error(f"Error during model invocation: {e}")
-        raise
-
-# Azure Function main handler
-def main(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        logger.info("DataWeave function triggered.")
-
-        file_name = req.params.get("file_name", "uploaded_file.xlsx")
-        sheet_name = req.params.get("sheet_name")
-        src_col = req.params.get("source_system_column")
-        tgt_col = req.params.get("target_system_column")
-        logic_col = req.params.get("business_logic_column")
-
-        logger.info(f"Parameters: file={file_name}, sheet={sheet_name}, src={src_col}, tgt={tgt_col}, logic={logic_col}")
-
-        if not all([sheet_name, src_col, tgt_col, logic_col]):
-            return func.HttpResponse("Missing one or more required query parameters.", status_code=400)
-
-        source_col_idx = col_letter_to_index(src_col)
-        target_col_idx = col_letter_to_index(tgt_col)
-        logic_col_idx = col_letter_to_index(logic_col)
-
-        if None in [source_col_idx, target_col_idx, logic_col_idx]:
-            return func.HttpResponse("Invalid column letters provided.", status_code=400)
-
-        body = req.get_body()
-        if not body:
-            return func.HttpResponse("No file content found in body.", status_code=400)
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as temp_file:
-            temp_file.write(body)
-            temp_file_path = temp_file.name
-
-        extracted_data = extract_excel_data(temp_file_path, sheet_name, source_col_idx, logic_col_idx, target_col_idx)
-        if not extracted_data:
-            return func.HttpResponse("No data extracted from Excel file.", status_code=400)
-
-        prompt = build_dataweave_prompt(
-            extracted_data,
-            file_name, sheet_name, src_col, tgt_col, logic_col
-        )
-
-        client = get_openai_client()
-        result = chat_with_agent(prompt, client)
-
-        return func.HttpResponse(result, status_code=200, mimetype="text/plain")
-
-    except Exception as e:
-        logger.error(f"Unhandled error: {str(e)}", exc_info=True)
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
+[2025-08-07T11:00:07.462Z] Traceback (most recent call last):
+[2025-08-07T11:00:07.466Z]   File "C:\Users\rdamera\AppData\Roaming\npm\node_modules\azure-functions-core-tools\bin\workers\python\3.11\WINDOWS\X64\azure_functions_worker\utils\wrappers.py", line 44, in call
+[2025-08-07T11:00:07.467Z]     return func(*args, **kwargs)
+[2025-08-07T11:00:07.468Z]            ^^^^^^^^^^^^^^^^^^^^^
+[2025-08-07T11:00:07.469Z]   File "C:\Users\rdamera\AppData\Roaming\npm\node_modules\azure-functions-core-tools\bin\workers\python\3.11\WINDOWS\X64\azure_functions_worker\loader.py", line 220, in load_function
+[2025-08-07T11:00:07.471Z]     mod = importlib.import_module(fullmodname)
+[2025-08-07T11:00:07.472Z]           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2025-08-07T11:00:07.473Z]   File "C:\Program Files\Python311\Lib\importlib\__init__.py", line 126, in import_module
+[2025-08-07T11:00:07.474Z]     return _bootstrap._gcd_import(name[level:], package, level)
+[2025-08-07T11:00:07.476Z]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2025-08-07T11:00:07.477Z]   File "<frozen importlib._bootstrap>", line 1204, in _gcd_import
+[2025-08-07T11:00:07.478Z]   File "<frozen importlib._bootstrap>", line 1176, in _find_and_load
+[2025-08-07T11:00:07.479Z]   File "<frozen importlib._bootstrap>", line 1147, in _find_and_load_unlocked
+[2025-08-07T11:00:07.480Z]   File "<frozen importlib._bootstrap>", line 690, in _load_unlocked
+[2025-08-07T11:00:07.481Z]   File "<frozen importlib._bootstrap_external>", line 940, in exec_module
+[2025-08-07T11:00:07.483Z]   File "<frozen importlib._bootstrap>", line 241, in _call_with_frames_removed
+[2025-08-07T11:00:07.484Z]   File "C:\Users\rdamera\OneDrive - Capgemini\Desktop\Azure\AZURE_local\Data_Weave_base__V2\Mappingsheet_to_Dataweave_v2\__init__.py", line 10, in <module>
+[2025-08-07T11:00:07.485Z]     from langchain.callbacks import get_openai_callback, ConsoleCallbackHandler
+[2025-08-07T11:00:07.487Z] ImportError: cannot import name 'ConsoleCallbackHandler' from 'langchain.callbacks' (C:\Users\rdamera\Downloads\my-function-app\.venv\Lib\site-packages\langchain\callbacks\__init__.py)
