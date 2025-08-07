@@ -1,6 +1,5 @@
 import os
 import logging
-import json
 import tempfile
 import openpyxl
 from base64 import b64decode
@@ -20,12 +19,13 @@ def decrypt(data, key):
     decrypted_data = unpad(decrypted_data, AES.block_size)
     return decrypted_data.decode()
 
-# LangChain OpenAI Client
-def get_openai_client(model_instance_name):
+# LangChain OpenAI Client using AZURE_DEPLOYMENT from environment
+def get_openai_client():
     aes_key_base64 = os.environ['AES_KEY']
     encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
     encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
     api_version = os.environ['AZURE_API_VERSION']
+    deployment_name = os.environ['AZURE_DEPLOYMENT']
 
     decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
     decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
@@ -34,11 +34,10 @@ def get_openai_client(model_instance_name):
         decrypted_api_base += '/'
 
     return AzureChatOpenAI(
-        deployment_name=model_instance_name,
+        deployment_name=deployment_name,
         openai_api_base=decrypted_api_base,
         openai_api_key=decrypted_api_key,
         openai_api_version=api_version,
-        temperature=0.4,
         max_tokens=4096
     )
 
@@ -87,10 +86,6 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     try:
         logger.info("DataWeave function triggered.")
 
-        model_instance = req.headers.get("model_instance_name", "")
-        if not model_instance:
-            return func.HttpResponse("Missing 'model_instance_name' in headers.", status_code=400)
-
         file_name = req.params.get("file_name", "uploaded_file.xlsx")
         sheet_name = req.params.get("sheet_name")
         src_col = req.params.get("source_system_column")
@@ -99,7 +94,6 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         logger.info(f"Parameters: file={file_name}, sheet={sheet_name}, src={src_col}, tgt={tgt_col}, logic={logic_col}")
 
-        # Validate all required query parameters
         if not all([sheet_name, src_col, tgt_col, logic_col]):
             return func.HttpResponse("Missing one or more required query parameters.", status_code=400)
 
@@ -111,7 +105,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         if None in [source_col_idx, target_col_idx, logic_col_idx]:
             return func.HttpResponse("Invalid column letters provided.", status_code=400)
 
-        # Handle binary body (uploaded .xlsx file)
+        # Read Excel binary body
         body = req.get_body()
         if not body:
             return func.HttpResponse("No file content found in body.", status_code=400)
@@ -137,7 +131,7 @@ Refer to this documentation for syntax: https://docs.mulesoft.com/dataweave/late
 
         full_prompt = instructions + "\n" + prompt
 
-        client = get_openai_client(model_instance)
+        client = get_openai_client()
         response = client.invoke([
             HumanMessage(content=full_prompt),
             HumanMessage(content="Generate the DataWeave script.")
