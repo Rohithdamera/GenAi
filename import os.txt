@@ -1,144 +1,25 @@
-import os
-import logging
-import tempfile
-import openpyxl
-from base64 import b64decode
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import unpad
-from langchain_community.chat_models import AzureChatOpenAI
-from langchain.schema import HumanMessage
-from openpyxl.utils import column_index_from_string
-import azure.functions as func
+def chat_with_agent(message, history):
+    messages = []
+    for user_msg, bot_msg in history:
+        messages.append(HumanMessage(content=user_msg))
+        messages.append(AIMessage(content=bot_msg))
+    messages.append(HumanMessage(content=message))
 
-logger = logging.getLogger(__name__)
-
-# AES Decryption
-def decrypt(data, key):
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted_data = cipher.decrypt(b64decode(data))
-    decrypted_data = unpad(decrypted_data, AES.block_size)
-    return decrypted_data.decode()
-
-# LangChain OpenAI Client using AZURE_DEPLOYMENT from environment
-def get_openai_client():
-    aes_key_base64 = os.environ['AES_KEY']
-    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-    api_version = os.environ['AZURE_API_VERSION']
-    deployment_name = os.environ['AZURE_DEPLOYMENT']
-
-    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
-
-    if not decrypted_api_base.endswith('/'):
-        decrypted_api_base += '/'
-
-    return AzureChatOpenAI(
-        deployment_name=deployment_name,
-        openai_api_base=decrypted_api_base,
-        openai_api_key=decrypted_api_key,
-        openai_api_version=api_version,
-        max_tokens=4096
-    )
-
-def col_letter_to_index(col_letter):
     try:
-        return column_index_from_string(col_letter.upper()) - 1
-    except Exception as e:
-        logger.error(f"Invalid column letter: {col_letter} - {str(e)}")
-        return None
+        with get_openai_callback() as cb: # Use the callback context manager
+            result = agent.invoke(
+                {"messages": messages},
+                config={"callbacks": [ConsoleCallbackHandler()]}
+            )
+            final_response = result["messages"][-1].content
+            # Append the token usage and cost information to the final_response
+            final_response += "\n\n--- Token Usage ---"
+            final_response += f"\nTotal Tokens: {cb.total_tokens}"
+            final_response += f"\nPrompt Tokens: {cb.prompt_tokens}"
+            final_response += f"\nCompletion Tokens: {cb.completion_tokens}"
+            final_response += f"\nTotal Cost (USD): ${format(cb.total_cost, '.6f')}"
+    finally:
+         print("+++")
 
-def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col):
-    try:
-        wb = openpyxl.load_workbook(file_path, data_only=True)
-        sheet = wb[sheet_name]
-        data = []
-        for row in sheet.iter_rows(min_row=2, values_only=True):
-            source = row[source_col] if source_col < len(row) else None
-            logic = row[logic_col] if logic_col < len(row) else None
-            target = row[target_col] if target_col < len(row) else None
-            if source and target:
-                data.append({
-                    "source": source,
-                    "logic": logic or "",
-                    "target": target
-                })
-        return data
-    except Exception as e:
-        logger.error(f"Failed to extract Excel data: {e}")
-        return []
-
-def build_dataweave_prompt(data, file_name, sheet_name, source_col, target_col, logic_col):
-    prompt = (
-        f"Write a DataWeave script referring to the uploaded Excel file named {file_name}, "
-        f"specifically the sheet named {sheet_name}.\n"
-        f"- Column {source_col} contains source field details.\n"
-        f"- Column {target_col} contains target field details.\n"
-        f"- Column {logic_col} contains business logic for transformations.\n"
-        "Use only functions from: https://docs.mulesoft.com/dataweave/latest/dw-functions#dw_modules\n\n"
-        "Here is the extracted data:\n"
-    )
-    for row in data:
-        prompt += f"- Source: {row['source']}, Target: {row['target']}, Logic: {row['logic']}\n"
-    return prompt
-
-def main(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        logger.info("DataWeave function triggered.")
-
-        file_name = req.params.get("file_name", "uploaded_file.xlsx")
-        sheet_name = req.params.get("sheet_name")
-        src_col = req.params.get("source_system_column")
-        tgt_col = req.params.get("target_system_column")
-        logic_col = req.params.get("business_logic_column")
-
-        logger.info(f"Parameters: file={file_name}, sheet={sheet_name}, src={src_col}, tgt={tgt_col}, logic={logic_col}")
-
-        if not all([sheet_name, src_col, tgt_col, logic_col]):
-            return func.HttpResponse("Missing one or more required query parameters.", status_code=400)
-
-        # Convert Excel column letters to index
-        source_col_idx = col_letter_to_index(src_col)
-        target_col_idx = col_letter_to_index(tgt_col)
-        logic_col_idx = col_letter_to_index(logic_col)
-
-        if None in [source_col_idx, target_col_idx, logic_col_idx]:
-            return func.HttpResponse("Invalid column letters provided.", status_code=400)
-
-        # Read Excel binary body
-        body = req.get_body()
-        if not body:
-            return func.HttpResponse("No file content found in body.", status_code=400)
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as temp_file:
-            temp_file.write(body)
-            temp_file_path = temp_file.name
-
-        extracted_data = extract_excel_data(temp_file_path, sheet_name, source_col_idx, logic_col_idx, target_col_idx)
-
-        if not extracted_data:
-            return func.HttpResponse("No data extracted from Excel file.", status_code=400)
-
-        prompt = build_dataweave_prompt(
-            extracted_data,
-            file_name, sheet_name, src_col, tgt_col, logic_col
-        )
-
-        instructions = """
-As a seasoned expert in MuleSoft Integration Services, specialize in DataWeave transformations and advanced integration techniques.
-Refer to this documentation for syntax: https://docs.mulesoft.com/dataweave/latest/dw-functions#dw_modules
-"""
-
-        full_prompt = instructions + "\n" + prompt
-
-        client = get_openai_client()
-        response = client.invoke([
-            HumanMessage(content=full_prompt),
-            HumanMessage(content="Generate the DataWeave script.")
-        ])
-
-        return func.HttpResponse(response.content.strip(), status_code=200, mimetype="text/plain")
-
-    except Exception as e:
-        logger.error(f"Unhandled error: {str(e)}", exc_info=True)
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
+  
+    return final_response
