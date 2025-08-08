@@ -13,6 +13,9 @@ import azure.functions as func
 
 logger = logging.getLogger(__name__)
 
+# Limit the number of rows processed
+max_rows = 500
+
 # AES Decryption
 def decrypt(data, key):
     cipher = AES.new(b64decode(key), AES.MODE_ECB)
@@ -40,7 +43,7 @@ def get_openai_client():
         openai_api_key=decrypted_api_key,
         openai_api_version=api_version,
         temperature=1,
-        # max_tokens=4096
+        # max_tokens not supported for o4-mini
     )
 
 def col_letter_to_index(col_letter):
@@ -65,6 +68,8 @@ def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col)
                     "logic": logic or "",
                     "target": target
                 })
+            if len(data) >= max_rows:
+                break
         return data
     except Exception as e:
         logger.error(f"Failed to extract Excel data: {e}")
@@ -77,7 +82,6 @@ def build_dataweave_prompt(data, file_name, sheet_name, source_col, target_col, 
         f"- Column {source_col} contains source field details.\n"
         f"- Column {target_col} contains target field details.\n"
         f"- Column {logic_col} contains business logic for transformations.\n"
-       
     )
     for row in data:
         prompt += f"- Source: {row['source']}, Target: {row['target']}, Logic: {row['logic']}\n"
@@ -94,7 +98,6 @@ Use the following rules:
 - Start your script with output application/json or output application/xml — this sets the tone.
 - Use map, filter, pluck, groupBy — these are DataWeave functions.
 - Strictly follow Dataweave inbuilt functions syntax.
-
         """),
         HumanMessage(content=prompt),
         HumanMessage(content="Generate the DataWeave script.")
