@@ -1,106 +1,203 @@
-expected :
+import os
+import json
+import re
+from pathlib import Path
+from typing import List, Dict, Set
 
+import gradio as gr
 
-package com.example.osif_java_cg_candidate.service;
- 
-import com.example.osif_java_cg_candidate.model.Candidate;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
- 
-import java.util.List;
- 
-import static org.junit.jupiter.api.Assertions.*;
- 
-public class CandidateServiceTest {
- 
-    private CandidateService candidateService;
-    private Candidate candidate;
- 
-    @BeforeEach
-    void setUp() {
-        candidateService = new CandidateService();
-        candidate = new Candidate();
-        candidate.setCandidateId("1");
-        candidate.setCandidateName("John Doe");
-        candidate.setCandidateSkills("Java");
-        candidate.setCandAvailability("2025-07-25T10:00:00");
-    }
- 
-    @Test
-    void testAddCandidate() {
-        Candidate savedCandidate = candidateService.addCandidate(candidate);
-        assertNotNull(savedCandidate);
-        assertEquals("John Doe", savedCandidate.getCandidateName());
-    }
- 
-    @Test
-    void testGetCandidate() {
-        candidateService.addCandidate(candidate);
-        Candidate foundCandidate = candidateService.getCandidate(candidate.getCandidateId());
- 
-        assertNotNull(foundCandidate);
-        assertEquals("John Doe", foundCandidate.getCandidateName());
-    }
- 
-    @Test
-    void testGetAllCandidates() {
-        candidateService.addCandidate(candidate);
-        List<Candidate> foundCandidates = candidateService.getAllCandidates();
-        assertFalse(foundCandidates.isEmpty());
-        assertEquals(1, foundCandidates.size());
-        assertEquals("John Doe", foundCandidates.get(0).getCandidateName());
-    }
+from langchain.prompts import PromptTemplate
+from langchain_openai import AzureChatOpenAI
+from langchain.callbacks.openai import get_openai_callback
+
+# === Azure OpenAI Client ===
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", "https://testopenaiassets.openai.azure.com"),
+        deployment_name=os.getenv("AZURE_OPENAI_DEPLOYMENT", "Fourth_Chatbot"),
+        openai_api_key=os.getenv("AZURE_OPENAI_KEY", ""),
+        openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
+        openai_api_type="azure",
+        temperature=0.3,
+        max_tokens=2000,
+    )
+
+llm = get_openai_client()
+
+aggregated_token_usage = {
+    "total_tokens": 0,
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_cost": 0.0
 }
 
+def accumulate_usage(cb):
+    aggregated_token_usage["total_tokens"] += getattr(cb, "total_tokens", 0)
+    aggregated_token_usage["prompt_tokens"] += getattr(cb, "prompt_tokens", 0)
+    aggregated_token_usage["completion_tokens"] += getattr(cb, "completion_tokens", 0)
+    aggregated_token_usage["total_cost"] += float(getattr(cb, "total_cost", 0.0))
 
-actual generated:
+# === Step 1: Find Java Files ===
+def find_java_files(path: str) -> List[Path]:
+    base_path = Path(path)
+    if not base_path.exists():
+        raise FileNotFoundError(f"Path not found: {path}")
+    return list(base_path.rglob("*.java"))
 
+# === Step 2: Find existing repositories in project ===
+def find_repository_classes(java_paths: List[Path]) -> Set[str]:
+    repo_names = set()
+    for path in java_paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+            if "interface" in text and "Repository" in text:
+                class_match = re.search(r"interface\s+(\w+Repository)\b", text)
+                if class_match:
+                    repo_names.add(class_match.group(1))
+        except Exception:
+            pass
+    return repo_names
 
+# === Heuristic Exclusion ===
+EXCLUDE_TYPES = {"Model", "Entity", "DTO", "Repository", "Config", "TestData", "Data", "Dto", "EntityClass"}
 
-package com.example.osif_java_cg_candidate.service;
+def is_excluded(file_path: Path, source: str, parsed_class_type: str = None, class_name: str = None) -> bool:
+    if parsed_class_type and any(x.lower() in parsed_class_type.lower() for x in EXCLUDE_TYPES):
+        return True
+    if class_name and any(suffix.lower() in class_name.lower() for suffix in ["entity", "dto", "repository", "repo", "config", "testdata", "data"]):
+        return True
+    fname = file_path.name.lower()
+    if any(term in fname for term in ["entity", "dto", "repository", "repo", "config", "testdata", "data"]):
+        return True
+    if "@Entity" in source or "extends JpaRepository" in source:
+        return True
+    return False
 
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
+# === Step 3: Extract class metadata ===
+def extract_class_metadata(java_paths: List[Path]) -> List[Dict]:
+    prompt = PromptTemplate(
+        input_variables=["source"],
+        template="""
+Analyze the Java class and return JSON:
+- class_name
+- class_type (Controller, Service, etc.)
+- package_path
+- methods: list of public method names
 
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.times;
+Return only valid JSON. No commentary.
+Java Source:
+{source}
+"""
+    )
+    chain = prompt | llm
+    parsed = []
+    for file_path in java_paths:
+        try:
+            source = file_path.read_text(encoding="utf-8")
+            with get_openai_callback() as cb:
+                response = chain.invoke({"source": source})
+                accumulate_usage(cb)
+            data = json.loads(response.content.strip())
+            excluded = is_excluded(file_path, source, data.get("class_type"), data.get("class_name"))
+            parsed.append({
+                "file_path": str(file_path),
+                "class_name": data.get("class_name", file_path.stem),
+                "class_type": data.get("class_type", ""),
+                "package_path": data.get("package_path", ""),
+                "methods": data.get("methods", []),
+                "_excluded": excluded
+            })
+        except Exception as e:
+            print(f"[WARN] Failed to parse {file_path}: {e}")
+    return parsed
 
-@ExtendWith(MockitoExtension.class)
-public class CandidateServiceTest {
+# === Step 4: Generate JUnit tests ===
+def generate_junit_tests(parsed_info: List[Dict], repo_names: Set[str]) -> List[Dict]:
+    prompt = PromptTemplate(
+        input_variables=["class_name", "class_type", "package_path", "methods", "existing_repos"],
+        template="""
+Write a JUnit 5 test class for:
+- Class: {class_name}
+- Type: {class_type}
+- Package: {package_path}
+- Public Methods:
+{methods}
 
-    @Mock
-    private CandidateRepository candidateRepository;
+Rules:
+1. If {class_type} is "Service" and it uses a repository that is NOT in the list {existing_repos}, do NOT inject or mock it — instead instantiate the service directly.
+2. Populate domain objects in tests with ALL their fields (e.g., id, name, skills, availability, etc.) with sample values.
+3. For Controller: use @WebMvcTest and MockMvc; for Service without repository: no mocks, direct instance.
+4. Output only valid Java code.
+"""
+    )
+    chain = prompt | llm
+    tests = []
+    for item in parsed_info:
+        if item["_excluded"] or not item["methods"]:
+            continue
+        with get_openai_callback() as cb:
+            result = chain.invoke({
+                "class_name": item["class_name"],
+                "class_type": item["class_type"],
+                "package_path": item["package_path"],
+                "methods": "\n".join(item["methods"]),
+                "existing_repos": ", ".join(repo_names) if repo_names else "None"
+            })
+            accumulate_usage(cb)
+        tests.append({
+            "file_name": f"{item['class_name']}Test.java",
+            "package_path": item["package_path"],
+            "code": result.content.strip(),
+            "source_file": item["file_path"]
+        })
+    return tests
 
-    @InjectMocks
-    private CandidateService candidateService;
+# === Step 5: Save tests ===
+def save_and_format_output(junit_tests: List[Dict]) -> str:
+    output = ""
+    for test in junit_tests:
+        folder = Path("generated_tests") / test["package_path"].replace(".", "/")
+        folder.mkdir(parents=True, exist_ok=True)
+        file_path = folder / test["file_name"]
+        file_path.write_text(test["code"], encoding="utf-8")
+        output += f"\n===== {test['file_name']} =====\n{test['code']}\n===== End =====\n"
+    return output.strip()
 
-    @BeforeEach
-    void setUp() {
-    }
+# === Main ===
+def process_java_project(prompt: str, history):
+    global aggregated_token_usage
+    aggregated_token_usage = {k: 0 for k in aggregated_token_usage}
+    path_match = re.search(r"([A-Za-z]:[\\\/][\w\-. \\\/]+)|((?:/|~)[\w\-.\\/]+)", prompt)
+    if not path_match:
+        return "[ERROR] Please provide a valid path."
+    project_path = os.path.expanduser(path_match.group(0).strip())
+    java_paths = find_java_files(project_path)
+    if not java_paths:
+        return "[INFO] No Java files found."
+    repo_names = find_repository_classes(java_paths)
+    parsed_info = extract_class_metadata(java_paths)
+    allowed = [p for p in parsed_info if not p["_excluded"]]
+    if not allowed:
+        return "[INFO] All classes excluded."
+    tests = generate_junit_tests(allowed, repo_names)
+    if not tests:
+        return "[INFO] No tests generated."
+    output = save_and_format_output(tests)
+    usage = (
+        f"\n\n--- Token Usage ---\n"
+        f"Total Tokens: {aggregated_token_usage['total_tokens']}\n"
+        f"Prompt Tokens: {aggregated_token_usage['prompt_tokens']}\n"
+        f"Completion Tokens: {aggregated_token_usage['completion_tokens']}\n"
+        f"Total Cost (USD): ${aggregated_token_usage['total_cost']:.6f}"
+    )
+    return output + usage
 
-    @Test
-    void testAddCandidate() {
-        Candidate candidate = new Candidate();
-        candidateService.addCandidate(candidate);
-        verify(candidateRepository, times(1)).save(candidate);
-    }
+chatbot_ui = gr.ChatInterface(
+    fn=process_java_project,
+    title="OSIF Co-Developer - Smart JUnit",
+    description="Generates JUnit tests skipping phantom repos and populating all object fields.",
+    theme="default"
+)
 
-    @Test
-    void testGetCandidate() {
-        Long id = 1L;
-        candidateService.getCandidate(id);
-        verify(candidateRepository, times(1)).findById(id);
-    }
-
-    @Test
-    void testGetAllCandidates() {
-        candidateService.getAllCandidates();
-        verify(candidateRepository, times(1)).findAll();
-    }
-}
-
- 
+if __name__ == "__main__":
+    chatbot_ui.launch()
