@@ -1,323 +1,106 @@
-# updated_osif_coder.py
-import os
-import json
-import re
-from pathlib import Path
-from typing import List, Dict
+expected :
 
-import gradio as gr
 
-from langchain.prompts import PromptTemplate
-from langchain_openai import AzureChatOpenAI
-from langchain.callbacks.openai import get_openai_callback
-
-# === Azure OpenAI Client ===
-def get_openai_client():
-    """
-    Update these parameters to match your Azure OpenAI deployment / key.
-    You can also pull the key from env vars instead of writing it here.
-    """
-    return AzureChatOpenAI(
-        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", "https://testopenaiassets.openai.azure.com"),
-        deployment_name=os.getenv("AZURE_OPENAI_DEPLOYMENT", "Fourth_Chatbot"),
-        openai_api_key=os.getenv("AZURE_OPENAI_KEY", ""),  # set env var AZURE_OPENAI_KEY
-        openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
-        openai_api_type="azure",
-        temperature=0.3,
-        max_tokens=2000,
-    )
-
-llm = get_openai_client()
-
-# === Global Stores ===
-# Keep track of token usage across calls
-aggregated_token_usage = {
-    "total_tokens": 0,
-    "prompt_tokens": 0,
-    "completion_tokens": 0,
-    "total_cost": 0.0
+package com.example.osif_java_cg_candidate.service;
+ 
+import com.example.osif_java_cg_candidate.model.Candidate;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+ 
+import java.util.List;
+ 
+import static org.junit.jupiter.api.Assertions.*;
+ 
+public class CandidateServiceTest {
+ 
+    private CandidateService candidateService;
+    private Candidate candidate;
+ 
+    @BeforeEach
+    void setUp() {
+        candidateService = new CandidateService();
+        candidate = new Candidate();
+        candidate.setCandidateId("1");
+        candidate.setCandidateName("John Doe");
+        candidate.setCandidateSkills("Java");
+        candidate.setCandAvailability("2025-07-25T10:00:00");
+    }
+ 
+    @Test
+    void testAddCandidate() {
+        Candidate savedCandidate = candidateService.addCandidate(candidate);
+        assertNotNull(savedCandidate);
+        assertEquals("John Doe", savedCandidate.getCandidateName());
+    }
+ 
+    @Test
+    void testGetCandidate() {
+        candidateService.addCandidate(candidate);
+        Candidate foundCandidate = candidateService.getCandidate(candidate.getCandidateId());
+ 
+        assertNotNull(foundCandidate);
+        assertEquals("John Doe", foundCandidate.getCandidateName());
+    }
+ 
+    @Test
+    void testGetAllCandidates() {
+        candidateService.addCandidate(candidate);
+        List<Candidate> foundCandidates = candidateService.getAllCandidates();
+        assertFalse(foundCandidates.isEmpty());
+        assertEquals(1, foundCandidates.size());
+        assertEquals("John Doe", foundCandidates.get(0).getCandidateName());
+    }
 }
 
-# === Helper: update aggregated token usage ===
-def accumulate_usage(cb):
-    try:
-        aggregated_token_usage["total_tokens"] += getattr(cb, "total_tokens", 0)
-        aggregated_token_usage["prompt_tokens"] += getattr(cb, "prompt_tokens", 0)
-        aggregated_token_usage["completion_tokens"] += getattr(cb, "completion_tokens", 0)
-        aggregated_token_usage["total_cost"] += float(getattr(cb, "total_cost", 0.0))
-    except Exception:
-        # If some attribute is missing, ignore and continue
-        pass
 
-# === Step 1: Find Java Files Recursively ===
-def find_java_files(path: str) -> List[Path]:
-    base_path = Path(path)
-    if not base_path.exists():
-        raise FileNotFoundError(f"Path not found: {path}")
-    all_java_files = list(base_path.rglob("*.java"))
-    return all_java_files
+actual generated:
 
-# === Heuristic: Should we exclude this file (model/dto/repo/config/testdata)? ===
-EXCLUDE_TYPES = {"Model", "Entity", "DTO", "Repository", "Config", "TestData", "Data", "Dto", "EntityClass"}
 
-def is_excluded_by_heuristic(file_path: Path, source: str, parsed_class_type: str = None, class_name: str = None) -> bool:
-    # 1) If parsed class type indicates excluded type
-    if parsed_class_type:
-        normalized = parsed_class_type.strip().lower()
-        if any(x.lower() in normalized for x in EXCLUDE_TYPES):
-            return True
 
-    # 2) File / class name patterns
-    if class_name:
-        if any(suffix.lower() in class_name.lower() for suffix in ["entity", "dto", "repository", "repo", "config", "testdata", "data"]):
-            return True
+package com.example.osif_java_cg_candidate.service;
 
-    fname = file_path.name.lower()
-    if any(term in fname for term in ["entity", "dto", "repository", "repo", "config", "testdata", "data"]):
-        return True
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
 
-    # 3) Source-based heuristics
-    if "@Entity" in source or "extends JpaRepository" in source or "extends CrudRepository" in source:
-        return True
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
 
-    # 4) Common imports indicating model/dto/repo/config
-    if "import javax.persistence" in source or "import jakarta.persistence" in source:
-        return True
+@ExtendWith(MockitoExtension.class)
+public class CandidateServiceTest {
 
-    return False
+    @Mock
+    private CandidateRepository candidateRepository;
 
-# === Step 2: Extract Metadata from Java Files ===
-def extract_class_metadata(java_paths: List[Path]) -> List[Dict]:
-    """
-    Uses the LLM to parse each Java source file and return a compact JSON containing:
-    - class_name
-    - class_type
-    - package_path
-    - methods (list)
-    We also apply heuristics to exclude Model/DTO/Repository/Config classes from further processing.
-    """
-    prompt = PromptTemplate(
-        input_variables=["source"],
-        template="""
-Analyze the following Java source code and return the following as compact JSON (no commentary):
+    @InjectMocks
+    private CandidateService candidateService;
 
-- class_name
-- class_type (Controller, Service, Config, Model, Repository, DTO, etc.)
-- package_path (from the package declaration)
-- methods: list of public method names
-
-Important constraints for the model's output:
-- DO NOT produce DTOs, models, repositories, configs, or test data.
-- Only output a single valid JSON object per file, nothing else.
-
-Java Source:
-{source}
-"""
-    )
-
-    chain = prompt | llm
-    parsed = []
-
-    for file_path in java_paths:
-        try:
-            source = file_path.read_text(encoding="utf-8")
-            # call the LLM while capturing token usage
-            with get_openai_callback() as cb:
-                response = chain.invoke({"source": source})
-                accumulate_usage(cb)
-
-            raw = response.content.strip()
-            # Ensure only JSON is extracted: try to load
-            data = json.loads(raw)
-            # safety: add filename/classname if missing
-            if "class_name" not in data or not data["class_name"]:
-                # try to infer class name from file name
-                data["class_name"] = file_path.stem
-
-            # Apply heuristics to exclude certain classes (models, dtos, repos, configs, testdata)
-            excluded = is_excluded_by_heuristic(file_path, source, parsed_class_type=data.get("class_type"), class_name=data.get("class_name"))
-            data["_excluded_by_heuristic"] = excluded
-
-            parsed.append({
-                "file_path": str(file_path),
-                "class_name": data.get("class_name"),
-                "class_type": data.get("class_type"),
-                "package_path": data.get("package_path", ""),
-                "methods": data.get("methods", []),
-                "_raw": data,
-                "_excluded": excluded
-            })
-
-        except json.JSONDecodeError:
-            print(f"[WARN] JSON parse failed for {file_path}. Skipping.")
-        except Exception as e:
-            print(f"[WARN] Failed to parse {file_path}: {e}")
-    return parsed
-
-# === Step 3: Generate JUnit Tests ===
-def generate_junit_tests_from_metadata(parsed_info: List[Dict]) -> List[Dict]:
-    """
-    For each parsed class that is NOT excluded, generate JUnit 5 tests.
-    The prompt explicitly instructs the model NOT to generate DTOs, entities, repositories, configs, or test-data classes.
-    Each invocation is captured with get_openai_callback() and aggregated.
-    """
-    prompt = PromptTemplate(
-        input_variables=["class_name", "class_type", "package_path", "methods"],
-        template="""
-You are asked to write a JUnit 5 test class for the following Java class metadata.
-
-Constraints:
-- DO NOT generate any DTOs, entities, repository classes, config classes, or test-data files.
-- If the class is a Controller: use @WebMvcTest and MockMvc; mock dependencies and write one test per public method.
-- If the class is a Service: use @ExtendWith(MockitoExtension.class) and mock dependencies; write one test per public method.
-- If the class is a plain utility class: write plain JUnit tests without Spring context.
-- Do not create or write any domain model classes, DTOs, repositories, configs or test-data fixtures.
-- Output only valid Java source code for the test class (no markdown, no explanation).
-- Include package declaration matching the original package path for tests (under test package).
-
-Class metadata:
-- Class Name: {class_name}
-- Type: {class_type}
-- Package: {package_path}
-- Public Methods (one per line):
-{methods}
-
-Write a complete, compilable JUnit 5 test class source as the model's output.
-"""
-    )
-    chain = prompt | llm
-    test_classes = []
-
-    for item in parsed_info:
-        # skip excluded items
-        if item.get("_excluded") or (item.get("class_type") and any(t.lower() in (item.get("class_type") or "").lower() for t in EXCLUDE_TYPES)):
-            print(f"[INFO] Skipping generation for excluded class: {item.get('class_name')} ({item.get('file_path')})")
-            continue
-
-        # skip if no public methods to test
-        methods = item.get("methods") or []
-        if not methods:
-            print(f"[INFO] No public methods for {item.get('class_name')}, skipping test generation.")
-            continue
-
-        methods_block = "\n".join(methods)
-        try:
-            # Use get_openai_callback to capture token usage as requested
-            with get_openai_callback() as cb:
-                result = chain.invoke({
-                    "class_name": item["class_name"],
-                    "class_type": item.get("class_type", ""),
-                    "package_path": item.get("package_path", ""),
-                    "methods": methods_block,
-                })
-                accumulate_usage(cb)
-
-            java_code = result.content.strip()
-            # Ensure we have a reasonable file name
-            file_name = f"{item['class_name']}Test.java"
-            test_classes.append({
-                "file_name": file_name,
-                "package_path": item.get("package_path", ""),
-                "code": java_code,
-                "source_file": item.get("file_path")
-            })
-        except Exception as e:
-            print(f"[WARN] Could not generate test for {item.get('class_name')}: {e}")
-
-    return test_classes
-
-# === Step 4: Save Files & Return Code to UI ===
-def save_and_format_output(junit_tests: List[Dict]) -> str:
-    output = ""
-    for test in junit_tests:
-        # prefer creating under generated_tests/<package_path>
-        folder = Path("generated_tests") / (test["package_path"].replace(".", "/") if test["package_path"] else "")
-        folder.mkdir(parents=True, exist_ok=True)
-        file_path = folder / test["file_name"]
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(test["code"])
-        output += f"\n===== {test['file_name']} (for {test.get('source_file')}) =====\n"
-        output += test["code"]
-        output += f"\n===== End of {test['file_name']} =====\n"
-    return output.strip()
-
-# === Main Function Called by UI ===
-def process_java_project(prompt: str, history):
-    """
-    Expected prompt to contain a Windows path like:
-    'generate the junit for this project C:\\Users\\you\\Downloads\\my-java-project'
-    This function will:
-      - extract the path
-      - scan for .java files
-      - parse metadata via LLM (excluding models, dtos, repos, configs)
-      - generate JUnit tests only for allowed types
-      - save tests under generated_tests and return the code
-      - append aggregated token usage summary
-    """
-    # reset aggregated usage per run
-    global aggregated_token_usage
-    aggregated_token_usage = {
-        "total_tokens": 0,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_cost": 0.0
+    @BeforeEach
+    void setUp() {
     }
 
-    try:
-        # robust path extraction (supports both Windows and Unix paths)
-        # first try to find absolute or relative path in the prompt
-        path_match = re.search(r"([A-Za-z]:[\\\/][\w\-. \\\/]+)|((?:/|~)[\w\-.\\/]+)", prompt)
-        if not path_match:
-            return "[ERROR] Please provide a valid file path in your prompt (absolute or starting with / or drive letter)."
+    @Test
+    void testAddCandidate() {
+        Candidate candidate = new Candidate();
+        candidateService.addCandidate(candidate);
+        verify(candidateRepository, times(1)).save(candidate);
+    }
 
-        project_path = path_match.group(0).strip()
-        # expand user and normalize
-        project_path = os.path.expanduser(project_path)
+    @Test
+    void testGetCandidate() {
+        Long id = 1L;
+        candidateService.getCandidate(id);
+        verify(candidateRepository, times(1)).findById(id);
+    }
 
-        java_paths = find_java_files(project_path)
-        if not java_paths:
-            return "[INFO] No Java files found."
+    @Test
+    void testGetAllCandidates() {
+        candidateService.getAllCandidates();
+        verify(candidateRepository, times(1)).findAll();
+    }
+}
 
-        parsed_info = extract_class_metadata(java_paths)
-        if not parsed_info:
-            return "[INFO] No parsable Java classes found."
-
-        # filter out excluded items entirely before generation
-        allowed_to_generate = [p for p in parsed_info if not p.get("_excluded")]
-
-        if not allowed_to_generate:
-            return "[INFO] All discovered classes are excluded (models/repositories/dtos/configs/testdata). No tests will be generated."
-
-        test_classes = generate_junit_tests_from_metadata(parsed_info)
-        if not test_classes:
-            return "[INFO] No JUnit tests could be generated."
-
-        output_code = save_and_format_output(test_classes)
-
-        # Append aggregated token usage summary as requested
-        usage_summary = "\n\n--- Token Usage ---"
-        usage_summary += f"\nTotal Tokens: {aggregated_token_usage.get('total_tokens', 0)}"
-        usage_summary += f"\nPrompt Tokens: {aggregated_token_usage.get('prompt_tokens', 0)}"
-        usage_summary += f"\nCompletion Tokens: {aggregated_token_usage.get('completion_tokens', 0)}"
-        usage_summary += f"\nTotal Cost (USD): ${format(aggregated_token_usage.get('total_cost', 0.0), '.6f')}"
-
-        return output_code + usage_summary
-
-    except Exception as e:
-        return f"[ERROR] {str(e)}"
-
-# === Gradio UI ===
-chatbot_ui = gr.ChatInterface(
-    fn=process_java_project,
-    title="OSIF Co-Developer (Safe mode — no models/repos/dtos/configs)",
-    description=(
-        "Paste a prompt like:\n"
-        "`generate the junit for this project C:\\Users\\you\\Downloads\\my-java-project`\n\n"
-        "This tool will scan Java files, skip entities/models/DTOs/repositories/configs/test-data, "
-        "and return JUnit 5 test classes for allowed classes. Token usage is reported at the end."
-    ),
-    theme="default"
-)
-
-if __name__ == "__main__":
-    chatbot_ui.launch()
+ 
