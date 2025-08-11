@@ -24,7 +24,6 @@ def get_openai_client():
 
 llm = get_openai_client()
 
-# Track token usage
 aggregated_token_usage = {
     "total_tokens": 0,
     "prompt_tokens": 0,
@@ -45,7 +44,7 @@ def find_java_files(path: str) -> List[Path]:
         raise FileNotFoundError(f"Path not found: {path}")
     return list(base_path.rglob("*.java"))
 
-# === Step 2: Find Repository Classes ===
+# === Step 2: Find existing repositories in project ===
 def find_repository_classes(java_paths: List[Path]) -> Set[str]:
     repo_names = set()
     for path in java_paths:
@@ -59,27 +58,7 @@ def find_repository_classes(java_paths: List[Path]) -> Set[str]:
             pass
     return repo_names
 
-# === Step 3: Extract Entity Fields ===
-def extract_entity_fields(java_paths: List[Path]) -> Dict[str, List[str]]:
-    """
-    Returns a dict mapping entity/model class name to a list of its private variable names.
-    """
-    entity_fields = {}
-    for path in java_paths:
-        try:
-            text = path.read_text(encoding="utf-8")
-            if "@Entity" in text or "class" in text and "{" in text:
-                class_match = re.search(r"class\s+(\w+)", text)
-                if class_match:
-                    class_name = class_match.group(1)
-                    fields = re.findall(r"private\s+\S+\s+(\w+)\s*;", text)
-                    if fields:
-                        entity_fields[class_name] = fields
-        except Exception:
-            pass
-    return entity_fields
-
-# === Exclusion Heuristic ===
+# === Heuristic Exclusion ===
 EXCLUDE_TYPES = {"Model", "Entity", "DTO", "Repository", "Config", "TestData", "Data", "Dto", "EntityClass"}
 
 def is_excluded(file_path: Path, source: str, parsed_class_type: str = None, class_name: str = None) -> bool:
@@ -94,7 +73,7 @@ def is_excluded(file_path: Path, source: str, parsed_class_type: str = None, cla
         return True
     return False
 
-# === Step 4: Extract Class Metadata ===
+# === Step 3: Extract class metadata ===
 def extract_class_metadata(java_paths: List[Path]) -> List[Dict]:
     prompt = PromptTemplate(
         input_variables=["source"],
@@ -132,10 +111,10 @@ Java Source:
             print(f"[WARN] Failed to parse {file_path}: {e}")
     return parsed
 
-# === Step 5: Generate JUnit Tests ===
-def generate_junit_tests(parsed_info: List[Dict], repo_names: Set[str], entity_fields: Dict[str, List[str]]) -> List[Dict]:
+# === Step 4: Generate JUnit tests ===
+def generate_junit_tests(parsed_info: List[Dict], repo_names: Set[str]) -> List[Dict]:
     prompt = PromptTemplate(
-        input_variables=["class_name", "class_type", "package_path", "methods", "existing_repos", "entity_fields"],
+        input_variables=["class_name", "class_type", "package_path", "methods", "existing_repos"],
         template="""
 Write a JUnit 5 test class for:
 - Class: {class_name}
@@ -145,11 +124,8 @@ Write a JUnit 5 test class for:
 {methods}
 
 Rules:
-1. If {class_type} is "Service" and it uses a repository that is NOT in {existing_repos}, do NOT inject or mock it — instantiate the service directly.
-2. For any entity/domain object used in tests, use EXACTLY these fields when creating test instances:
-{entity_fields}
-   - Use the setter methods for each field (no constructor).
-   - Assign realistic sample values for each field.
+1. If {class_type} is "Service" and it uses a repository that is NOT in the list {existing_repos}, do NOT inject or mock it — instead instantiate the service directly.
+2. Populate domain objects in tests with ALL their fields (e.g., id, name, skills, availability, etc.) with sample values.
 3. For Controller: use @WebMvcTest and MockMvc; for Service without repository: no mocks, direct instance.
 4. Output only valid Java code.
 """
@@ -159,27 +135,15 @@ Rules:
     for item in parsed_info:
         if item["_excluded"] or not item["methods"]:
             continue
-
-        # Match entity fields if service name suggests it handles a certain entity
-        entity_info = ""
-        for entity, fields in entity_fields.items():
-            if entity.lower() in item["class_name"].lower():
-                entity_info = f"{entity}: {', '.join(fields)}"
-                break
-        if not entity_info:
-            entity_info = "None"
-
         with get_openai_callback() as cb:
             result = chain.invoke({
                 "class_name": item["class_name"],
                 "class_type": item["class_type"],
                 "package_path": item["package_path"],
                 "methods": "\n".join(item["methods"]),
-                "existing_repos": ", ".join(repo_names) if repo_names else "None",
-                "entity_fields": entity_info
+                "existing_repos": ", ".join(repo_names) if repo_names else "None"
             })
             accumulate_usage(cb)
-
         tests.append({
             "file_name": f"{item['class_name']}Test.java",
             "package_path": item["package_path"],
@@ -188,13 +152,14 @@ Rules:
         })
     return tests
 
-# === Step 6: Save & Return Output ===
+# === Step 5: Save tests ===
 def save_and_format_output(junit_tests: List[Dict]) -> str:
     output = ""
     for test in junit_tests:
         folder = Path("generated_tests") / test["package_path"].replace(".", "/")
         folder.mkdir(parents=True, exist_ok=True)
-        (folder / test["file_name"]).write_text(test["code"], encoding="utf-8")
+        file_path = folder / test["file_name"]
+        file_path.write_text(test["code"], encoding="utf-8")
         output += f"\n===== {test['file_name']} =====\n{test['code']}\n===== End =====\n"
     return output.strip()
 
@@ -206,23 +171,17 @@ def process_java_project(prompt: str, history):
     if not path_match:
         return "[ERROR] Please provide a valid path."
     project_path = os.path.expanduser(path_match.group(0).strip())
-
     java_paths = find_java_files(project_path)
     if not java_paths:
         return "[INFO] No Java files found."
-
     repo_names = find_repository_classes(java_paths)
-    entity_fields = extract_entity_fields(java_paths)
     parsed_info = extract_class_metadata(java_paths)
-
     allowed = [p for p in parsed_info if not p["_excluded"]]
     if not allowed:
         return "[INFO] All classes excluded."
-
-    tests = generate_junit_tests(allowed, repo_names, entity_fields)
+    tests = generate_junit_tests(allowed, repo_names)
     if not tests:
         return "[INFO] No tests generated."
-
     output = save_and_format_output(tests)
     usage = (
         f"\n\n--- Token Usage ---\n"
@@ -233,11 +192,10 @@ def process_java_project(prompt: str, history):
     )
     return output + usage
 
-# === Gradio UI ===
 chatbot_ui = gr.ChatInterface(
     fn=process_java_project,
-    title="OSIF Co-Developer - Entity-Aware JUnit",
-    description="Generates JUnit tests that populate all fields from actual entity definitions, skipping phantom repos.",
+    title="OSIF Co-Developer - Smart JUnit",
+    description="Generates JUnit tests skipping phantom repos and populating all object fields.",
     theme="default"
 )
 
