@@ -1,202 +1,153 @@
 import os
-import json
-from pathlib import Path
-import gradio as gr
 import re
-from typing import List, Dict
-from langchain.prompts import PromptTemplate
+import yaml
+import gradio as gr
+import boto3
+from typing import TypedDict, Optional, List, Tuple
+from difflib import get_close_matches
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_openai import AzureChatOpenAI
-from langchain.callbacks import get_openai_callback
-
-# === Azure OpenAI Client ===
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        deployment_name="Fourth_Chatbot",
-        openai_api_key="",  # Use your actual key or env var
-        openai_api_version="2024-08-01-preview",
-        openai_api_type="azure",
-        temperature=0.3,
-        max_tokens=2000,
-    )
-
-llm = get_openai_client()
-
-# === Step 1: Find Java Files Recursively ===
-def find_java_files(path: str) -> List[Path]:
-    base_path = Path(path)
-    if not base_path.exists():
-        raise FileNotFoundError(f"Path not found: {path}")
-    return list(base_path.rglob("*.java"))
-
-# === Step 2: Extract Metadata from Java Files ===
-def extract_class_metadata(java_paths: List[Path]) -> List[Dict]:
-    """
-    Also determines if a Service uses a Repository
-    and extracts all entity fields for later test generation.
-    """
-    prompt = PromptTemplate(
-        input_variables=["source"],
-        template="""
-Analyze the following Java source code and return JSON with:
-class_name
-class_type (Controller, Service, Repository, Config, Entity, DTO, Main, etc.)
-package_path
-methods: list of public method names
-uses_repository: true if this class has any field or constructor parameter whose type name ends with 'Repository'
-if class_type == "Entity", also include:
-    entity_fields: list of objects with {{"name": fieldName, "type": fieldType}}
-
-Only return compact valid JSON. No explanation.
-
-Java Source:
-{source}
-"""
-    )
-    chain = prompt | llm
-    parsed = []
-
-    for file_path in java_paths:
-        try:
-            source = file_path.read_text(encoding="utf-8")
-            response = chain.invoke({"source": source})
-            data = json.loads(response.content.strip())
-            parsed.append(data)
-        except Exception as e:
-            print(f"[WARN] Failed to parse {file_path}: {e}")
-    return parsed
-
-# === Step 3: Generate JUnit Tests (only for Controller & Service) ===
-def generate_junit_tests_from_metadata(parsed_info: List[Dict]) -> List[Dict]:
-    ALLOWED_TYPES = {"Controller", "Service"}  # Only generate for these types
-
-    # Build a dictionary of entity fields so that when we see them in Service/Controller params, we can populate them
-    entity_map = {
-        item["class_name"]: item.get("entity_fields", [])
-        for item in parsed_info
-        if item.get("class_type") == "Entity"
-    }
-
-    prompt = PromptTemplate(
-        input_variables=["class_name", "class_type", "package_path", "methods", "uses_repository", "entity_map"],
-        template="""
-Write a full JUnit 5 test class for:
-Class Name: {class_name}
-Type: {class_type}
-Package: {package_path}
-Public Methods:
-{methods}
-uses_repository: {uses_repository}
-
-Also, you have access to the following Entity definitions with their fields:
-{entity_map}
-
-Rules:
-- For Controller: use @WebMvcTest + MockMvc.
-- For Service: use @ExtendWith(MockitoExtension.class).
-- If uses_repository is false, do NOT include any repository mocks, imports, or related injections.
-- If uses_repository is true, mock the repository and inject it properly.
-- In test setup, if any method takes or returns an Entity, create and fully populate it with ALL its fields using realistic dummy values based on field type.
-- Do NOT hardcode unrelated values — base them on field type (String, Long, int, boolean, LocalDateTime, etc.).
-- Include mocks, proper setup, and one test per public method.
-
-Output valid Java code ONLY.
-"""
-    )
-    chain = prompt | llm
-
-    test_classes = []
-    for item in parsed_info:
-        if item["class_type"] not in ALLOWED_TYPES:
-            print(f"[SKIP] Skipping {item['class_name']} ({item['class_type']})")
-            continue
-        try:
-            result = chain.invoke({
-                "class_name": item["class_name"],
-                "class_type": item["class_type"],
-                "package_path": item["package_path"],
-                "methods": "\n".join(item["methods"]),
-                "uses_repository": str(item.get("uses_repository", False)).lower(),
-                "entity_map": json.dumps(entity_map, indent=2)
-            })
-            test_classes.append({
-                "file_name": f"{item['class_name']}Test.java",
-                "package_path": item["package_path"],
-                "code": result.content.strip()
-            })
-        except Exception as e:
-            print(f"[WARN] Could not generate test for {item['class_name']}: {e}")
-    return test_classes
-
-# === Step 4: Save Files ===
-def save_and_format_output(junit_tests: List[Dict]) -> str:
-    output = ""
-    for test in junit_tests:
-        folder = Path("generated_tests") / test["package_path"].replace(".", "/")
-        folder.mkdir(parents=True, exist_ok=True)
-        file_path = folder / test["file_name"]
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(test["code"])
-        output += f"\n===== {test['file_name']} =====\n{test['code']}\n===== End of {test['file_name']} =====\n"
-    return output.strip()
-
-# === Main Function ===
-def process_java_project(prompt: str, history):
-    aggregated_token_usage = {
-        "total_tokens": 0,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_cost": 0.0
-    }
-
+from langchain_community.agent_toolkits.load_tools import load_tools
+from langgraph.prebuilt import create_react_agent
+from langgraph.graph import StateGraph, END
+from langgraph.graph import MessagesState
+ 
+# -------------------------
+# AWS S3 Utility
+# -------------------------
+def fetch_s3_file_content(arn: str) -> str:
+    print("Fetching S3 file content...")
+    match = re.match(r"^arn:aws:s3:::(.+?)/(.*)$", arn)
+    if not match:
+        raise ValueError("Invalid S3 ARN format")
+ 
+    bucket, key = match.groups()
+ 
+    s3 = boto3.client("s3",
+                      aws_access_key_id="AKIA6ODVATHCN52UKSR",
+                      aws_secret_access_key="N3+vw0XS4ZcdzqM0Zk6qflR7UbNy0ztQgdwWoiu",
+                      region_name="us-east-1")
+ 
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    content = obj["Body"].read().decode("utf-8")
+ 
+    if not content.strip():
+        raise ValueError("S3 file is empty or unreadable.")
+ 
+    print("S3 content fetched successfully.")
+    return content
+ 
+def get_connector_data_from_s3():
+    S3_ARN = "arn:aws:s3:::osif-files/OSIF_Dependency_req.txt"
     try:
-        path_match = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", prompt)
-        if not path_match:
-            return "[ERROR] Please provide a valid Windows file path."
-
-        project_path = path_match.group(1).strip()
-        java_paths = find_java_files(project_path)
-        if not java_paths:
-            return "[INFO] No Java files found."
-
-        with get_openai_callback() as cb:
-            parsed_info = extract_class_metadata(java_paths)
-            if not parsed_info:
-                return "[INFO] No parsable Java classes found."
-
-            test_classes = generate_junit_tests_from_metadata(parsed_info)
-            if not test_classes:
-                return "[INFO] No JUnit tests could be generated for allowed types."
-
-            output_code = save_and_format_output(test_classes)
-
-            aggregated_token_usage["total_tokens"] += cb.total_tokens
-            aggregated_token_usage["prompt_tokens"] += cb.prompt_tokens
-            aggregated_token_usage["completion_tokens"] += cb.completion_tokens
-            aggregated_token_usage["total_cost"] += cb.total_cost
-
-        usage_summary = "\n\n--- Token Usage ---"
-        usage_summary += f"\nTotal Tokens: {aggregated_token_usage['total_tokens']}"
-        usage_summary += f"\nPrompt Tokens: {aggregated_token_usage['prompt_tokens']}"
-        usage_summary += f"\nCompletion Tokens: {aggregated_token_usage['completion_tokens']}"
-        usage_summary += f"\nTotal Cost (USD): ${format(aggregated_token_usage['total_cost'], '.6f')}"
-
-        return output_code + usage_summary
-
+        file_content = fetch_s3_file_content(S3_ARN)
+        parsed_yaml = yaml.safe_load(file_content)
+        connectors = parsed_yaml.get("core", {}).get("connectors", {})
+ 
+        # Build title-to-key mapping
+        title_to_key = {}
+        for key, value in connectors.items():
+            title = value.get("title", key)  # fallback to key if no title
+            title_to_key[title.lower()] = key
+ 
+        print("Connectors found:", list(connectors.keys()))
+        return connectors, file_content, title_to_key
     except Exception as e:
-        return f"[ERROR] {str(e)}"
-
-# === Gradio UI ===
-chatbot_ui = gr.ChatInterface(
-    fn=process_java_project,
-    title="JUnit Test Generator (Controllers & Services only)",
-    description=(
-        "Paste a prompt like:\n"
-        "`generate the junit for this project C:\\Users\\you\\Downloads\\my-java-project`\n\n"
-        "Only Controller & Service classes will be tested."
-    ),
-    theme="default"
+        print(f"Failed to load connector data: {e}")
+        return {}, "", {}
+ 
+# -------------------------
+# LangChain + Graph Setup
+# -------------------------
+class State(TypedDict):
+    messages: MessagesState
+ 
+llm = AzureChatOpenAI(
+    deployment_name="Fourth_Chatbot",
+    azure_endpoint="https://testopenaiassets.openai.azure.com",
+    openai_api_key="",
+    openai_api_version="2024-08-01-preview"
 )
-
+ 
+tools = load_tools(["llm-math"], llm=llm)
+agent_node = create_react_agent(llm, tools)
+ 
+graph = StateGraph(State)
+graph.add_node("react_agent", agent_node)
+graph.set_entry_point("react_agent")
+graph.add_edge("react_agent", END)
+agent_executor = graph.compile()
+ 
+# -------------------------
+# Chatbot Handler
+# -------------------------
+def chat_with_agent(message: str, history: Optional[List[Tuple[str, str]]] = None) -> str:
+    print("Received message:", message)
+ 
+    if history is None:
+        history = []
+ 
+    connector_data, file_content, title_to_key = get_connector_data_from_s3()
+    message_lower = message.lower()
+ 
+    if "property" in message_lower or "configuration" in message_lower:
+        all_possible_names = list(connector_data.keys()) + list(title_to_key.keys())
+        matched_keys = get_close_matches(message_lower, all_possible_names, n=1, cutoff=0.4)
+ 
+        if matched_keys:
+            matched = matched_keys[0]
+            connector_key = title_to_key.get(matched, matched)  # resolve title to key if needed
+            print(f"Matched connector: {matched} → key: {connector_key}")
+ 
+            lines = file_content.splitlines()
+            start_index = None
+            for i, line in enumerate(lines):
+                if re.match(rf"^{connector_key}:\s*$", line.strip()):
+                    start_index = i
+                    break
+ 
+            if start_index is not None:
+                block_lines = [lines[start_index]]
+                base_indent = len(lines[start_index]) - len(lines[start_index].lstrip())
+ 
+                for j in range(start_index + 1, len(lines)):
+                    current_line = lines[j]
+                    current_indent = len(current_line) - len(current_line.lstrip())
+                    if current_line.strip() == "":
+                        block_lines.append(current_line)
+                    elif current_indent > base_indent:
+                        block_lines.append(current_line)
+                    else:
+                        break
+ 
+                exact_block = "\n".join(block_lines)
+                response = f"**Exact configuration for `{connector_key}` connector:**\n```yaml\n{exact_block}\n```"
+                return response
+            else:
+                return f"Connector `{connector_key}` found, but exact formatting could not be extracted."
+ 
+        return "No matching connector found in the S3 file."
+ 
+    # Fallback to LangChain agent for general queries
+    messages = []
+    for user_msg, bot_msg in history:
+        messages.append(HumanMessage(content=user_msg))
+        messages.append(AIMessage(content=bot_msg))
+    messages.append(HumanMessage(content=message))
+ 
+    result = agent_executor.invoke({"messages": messages}, verbose=True)
+    return result["messages"][-1].content
+ 
+# -------------------------
+# Main Entry Point
+# -------------------------
 if __name__ == "__main__":
-    chatbot_ui.launch()
+    print("Launching Gradio interface...")
+    gr.Interface(
+        fn=chat_with_agent,
+        inputs="text",
+        outputs="text",
+        title="OSIF Agent Chat",
+        description="Ask about connector configurations or general queries."
+    ).launch()
+ 
