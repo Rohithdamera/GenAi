@@ -2,52 +2,58 @@ import re
 import boto3
 import yaml
 
+# -------------------------
+# AWS S3 Utility
+# -------------------------
 def fetch_s3_file_content(arn: str) -> str:
-    """Fetch raw file content from S3 using its ARN."""
+    print("Fetching S3 file content...")
     match = re.match(r"^arn:aws:s3:::(.+?)/(.*)$", arn)
     if not match:
         raise ValueError("Invalid S3 ARN format")
-    
+
     bucket, key = match.groups()
-    s3 = boto3.client("s3")  # Use default AWS creds from environment/role
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id="AKIA6ODVATHCN52UKSR",
+        aws_secret_access_key="N3+vw0XS4ZcdzqM0Zk6qflR7UbNy0ztQgdwWoiu",
+        region_name="us-east-1"
+    )
     obj = s3.get_object(Bucket=bucket, Key=key)
     content = obj["Body"].read().decode("utf-8")
-    
+
     if not content.strip():
         raise ValueError("S3 file is empty or unreadable.")
-    
+
+    print("S3 content fetched successfully.")
     return content
 
+# -------------------------
+# Extract connector block
+# -------------------------
 def extract_connector_block(file_content: str, connector_name: str) -> str:
     """
-    Given YAML content and connector name, find and return only that connector's block.
+    Finds the exact configuration block for the given connector.
+    Works for YAML or properties-style structured files.
     """
-    parsed_yaml = yaml.safe_load(file_content)
-    connectors = parsed_yaml.get("core", {}).get("connectors", {})
-
-    # Normalize and search
-    name_lower = connector_name.lower()
-    matched_key = None
-    for key, value in connectors.items():
-        title = value.get("title", key)
-        if name_lower in (title.lower(), key.lower()):
-            matched_key = key
-            break
-    
-    if not matched_key:
-        raise ValueError(f"Connector '{connector_name}' not found in S3 file.")
-
-    # Extract raw block from the original file for exact formatting
     lines = file_content.splitlines()
+    connector_name = connector_name.strip()
+
+    # Find the connector definition in YAML format
     start_index = None
     for i, line in enumerate(lines):
-        if re.match(rf"^{matched_key}:\s*$", line.strip()):
+        if re.match(rf"^{re.escape(connector_name)}\s*:\s*$", line.strip()):
             start_index = i
             break
 
     if start_index is None:
-        raise ValueError(f"Connector '{matched_key}' found in YAML but block not located in file.")
+        # Try properties style: connectorName.property=value
+        pattern = re.compile(rf"^{re.escape(connector_name)}\.", re.IGNORECASE)
+        matched_lines = [line for line in lines if pattern.match(line)]
+        if matched_lines:
+            return "\n".join(matched_lines)
+        return f"No configuration found for connector '{connector_name}'."
 
+    # Extract YAML block
     block_lines = [lines[start_index]]
     base_indent = len(lines[start_index]) - len(lines[start_index].lstrip())
 
@@ -63,12 +69,18 @@ def extract_connector_block(file_content: str, connector_name: str) -> str:
 
     return "\n".join(block_lines)
 
+# -------------------------
+# Main execution
+# -------------------------
 if __name__ == "__main__":
-    # Example usage
+    # Example: Change S3 ARN and connector name as needed
     S3_ARN = "arn:aws:s3:::osif-files/OSIF_Dependency_req.txt"
-    connector_to_fetch = "salesforce"  # Example: input from user or API
+    connector_name = input("Enter connector name: ")
 
-    file_content = fetch_s3_file_content(S3_ARN)
-    connector_block = extract_connector_block(file_content, connector_to_fetch)
-
-    print(connector_block)
+    try:
+        file_content = fetch_s3_file_content(S3_ARN)
+        result = extract_connector_block(file_content, connector_name)
+        print("\n=== Exact Connector Configuration ===\n")
+        print(result)
+    except Exception as e:
+        print(f"Error: {e}")
