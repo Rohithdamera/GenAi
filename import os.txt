@@ -1,6 +1,84 @@
-prompt = PromptTemplate(
-    input_variables=["class_name", "class_type", "package_path", "methods", "uses_repository", "entity_map"],
-    template="""
+import os
+import json
+from pathlib import Path
+import gradio as gr
+import re
+from typing import List, Dict
+from langchain.prompts import PromptTemplate
+from langchain_openai import AzureChatOpenAI
+from langchain.callbacks import get_openai_callback
+
+# === Azure OpenAI Client ===
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        deployment_name="Fourth_Chatbot",
+        openai_api_key="",  # Use your actual key or env var
+        openai_api_version="2024-08-01-preview",
+        openai_api_type="azure",
+        temperature=0.3,
+        max_tokens=2000,
+    )
+
+llm = get_openai_client()
+
+# === Step 1: Find Java Files Recursively ===
+def find_java_files(path: str) -> List[Path]:
+    base_path = Path(path)
+    if not base_path.exists():
+        raise FileNotFoundError(f"Path not found: {path}")
+    return list(base_path.rglob("*.java"))
+
+# === Step 2: Extract Metadata from Java Files ===
+def extract_class_metadata(java_paths: List[Path]) -> List[Dict]:
+    """
+    Also determines if a Service uses a Repository
+    and extracts all entity fields for later test generation.
+    """
+    prompt = PromptTemplate(
+        input_variables=["source"],
+        template="""
+Analyze the following Java source code and return JSON with:
+class_name
+class_type (Controller, Service, Repository, Config, Entity, DTO, Main, etc.)
+package_path
+methods: list of public method names
+uses_repository: true if this class has any field or constructor parameter whose type name ends with 'Repository'
+if class_type == "Entity", also include:
+    entity_fields: list of objects with {{"name": fieldName, "type": fieldType}}
+
+Only return compact valid JSON. No explanation.
+
+Java Source:
+{source}
+"""
+    )
+    chain = prompt | llm
+    parsed = []
+
+    for file_path in java_paths:
+        try:
+            source = file_path.read_text(encoding="utf-8")
+            response = chain.invoke({"source": source})
+            data = json.loads(response.content.strip())
+            parsed.append(data)
+        except Exception as e:
+            print(f"[WARN] Failed to parse {file_path}: {e}")
+    return parsed
+
+# === Step 3: Generate JUnit Tests (only for Controller & Service) ===
+def generate_junit_tests_from_metadata(parsed_info: List[Dict]) -> List[Dict]:
+    ALLOWED_TYPES = {"Controller", "Service"}
+
+    entity_map = {
+        item["class_name"]: item.get("entity_fields", [])
+        for item in parsed_info
+        if item.get("class_type") == "Entity"
+    }
+
+    prompt = PromptTemplate(
+        input_variables=["class_name", "class_type", "package_path", "methods", "uses_repository", "entity_map"],
+        template="""
 Write a full JUnit 5 test class for:
 Class Name: {class_name}
 Type: {class_type}
@@ -15,45 +93,131 @@ You also have access to the following Entity definitions with their fields:
 /*
 Rules:
 GENERAL:
-- Use the real entity class name exactly as in metadata, no hardcoded "Model" suffix.
-- Populate ALL fields in entity objects with realistic dummy values based on field type:
-  - String → "John Doe" or descriptive string
-  - UUID → UUID.randomUUID().toString()
-  - Long → 1L
-  - int → 123
-  - boolean → true
-  - LocalDateTime → "2025-07-25T10:00:00"
-  - Lists → Arrays.asList(...)
-- JSON property names in tests must match entity field names exactly in case.
+- Use the exact entity class name from metadata (no hardcoded Model suffix).
+- Populate ALL fields for entities with realistic dummy values based on type:
+  String → "John Doe" or descriptive string
+  UUID → UUID.randomUUID().toString()
+  Long → 1L
+  int → 123
+  boolean → true
+  LocalDateTime → "2025-07-25T10:00:00"
+  Lists → Arrays.asList(...)
+- Match JSON property names exactly as entity field names (case-sensitive).
 
 CONTROLLER TESTS:
-- Annotate class with @WebMvcTest({class_name}.class).
+- Annotate with @WebMvcTest({class_name}.class)
 - Inject:
   @Autowired MockMvc mockMvc
-  @MockBean {service_name} (service layer)
+  @MockBean ServiceClass
   @Autowired ObjectMapper objectMapper
-- Use org.mockito.Mockito.when(...) and static import of org.mockito.ArgumentMatchers.any().
-- Use post(...), get(...), etc. from MockMvcRequestBuilders.
-- Serialize request bodies using objectMapper.writeValueAsString(entityInstance).
-- Validate response with jsonPath checks matching field names exactly.
-- One @Test per public method.
-- No @ExtendWith in controller tests — @WebMvcTest is enough.
+- Use Mockito.when(...) with ArgumentMatchers.any()
+- Use post(...), get(...), etc. from MockMvcRequestBuilders
+- Serialize with objectMapper.writeValueAsString()
+- Validate responses with jsonPath using correct field names
+- One @Test per public method
 
 SERVICE TESTS:
-- Do NOT use mocks unless the class uses a repository.
-- If no repository: instantiate service directly with `new`.
-- Use AssertJ assertions (assertThat) instead of JUnit assertEquals.
-- If repository is used: annotate with @ExtendWith(MockitoExtension.class), @InjectMocks service, @Mock repository.
-- Add extra tests for edge cases if meaningful (e.g., adding without id generates id).
-- Populate entity fully before using.
-- Ensure at least one test checks the returned value equals the saved entity.
+- If uses_repository == false: no mocks, instantiate service directly
+- If uses_repository == true: use @ExtendWith(MockitoExtension.class), @InjectMocks service, @Mock repository
+- Use AssertJ (assertThat) for assertions
+- Add test for "add without id generates id" if applicable
 
 IMPORTS:
-- Include all necessary imports, do not include unused ones.
-- For dates: use string ISO format as per entity field.
-- For lists: use Arrays.asList.
-
-Output ONLY the complete valid Java code. No explanation.
+- Include all required imports, no unused imports
+- Output only valid Java code, no explanation
 */
 """
+    )
+    chain = prompt | llm
+
+    test_classes = []
+    for item in parsed_info:
+        if item["class_type"] not in ALLOWED_TYPES:
+            print(f"[SKIP] Skipping {item['class_name']} ({item['class_type']})")
+            continue
+        try:
+            result = chain.invoke({
+                "class_name": item["class_name"],
+                "class_type": item["class_type"],
+                "package_path": item["package_path"],
+                "methods": "\n".join(item["methods"]),
+                "uses_repository": str(item.get("uses_repository", False)).lower(),
+                "entity_map": json.dumps(entity_map, indent=2)
+            })
+            test_classes.append({
+                "file_name": f"{item['class_name']}Test.java",
+                "package_path": item["package_path"],
+                "code": result.content.strip()
+            })
+        except Exception as e:
+            print(f"[WARN] Could not generate test for {item['class_name']}: {e}")
+    return test_classes
+
+# === Step 4: Save Files ===
+def save_and_format_output(junit_tests: List[Dict]) -> str:
+    output = ""
+    for test in junit_tests:
+        folder = Path("generated_tests") / test["package_path"].replace(".", "/")
+        folder.mkdir(parents=True, exist_ok=True)
+        file_path = folder / test["file_name"]
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(test["code"])
+        output += f"\n===== {test['file_name']} =====\n{test['code']}\n===== End of {test['file_name']} =====\n"
+    return output.strip()
+
+# === Main Function ===
+def process_java_project(prompt: str, history):
+    aggregated_token_usage = {
+        "total_tokens": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_cost": 0.0
+    }
+
+    try:
+        path_match = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", prompt)
+        if not path_match:
+            return "[ERROR] Please provide a valid Windows file path."
+
+        project_path = path_match.group(1).strip()
+        java_paths = find_java_files(project_path)
+        if not java_paths:
+            return "[INFO] No Java files found."
+
+        with get_openai_callback() as cb:
+            parsed_info = extract_class_metadata(java_paths)
+            if not parsed_info:
+                return "[INFO] No parsable Java classes found."
+
+            test_classes = generate_junit_tests_from_metadata(parsed_info)
+            if not test_classes:
+                return "[INFO] No JUnit tests could be generated for allowed types."
+
+            output_code = save_and_format_output(test_classes)
+
+            aggregated_token_usage["total_tokens"] += cb.total_tokens
+            aggregated_token_usage["prompt_tokens"] += cb.prompt_tokens
+            aggregated_token_usage["completion_tokens"] += cb.completion_tokens
+            aggregated_token_usage["total_cost"] += cb.total_cost
+
+        usage_summary = "\n\n--- Token Usage ---"
+        usage_summary += f"\nTotal Tokens: {aggregated_token_usage['total_tokens']}"
+        usage_summary += f"\nPrompt Tokens: {aggregated_token_usage['prompt_tokens']}"
+        usage_summary += f"\nCompletion Tokens: {aggregated_token_usage['completion_tokens']}"
+        usage_summary += f"\nTotal Cost (USD): ${format(aggregated_token_usage['total_cost'], '.6f')}"
+
+        return output_code + usage_summary
+
+    except Exception as e:
+        return f"[ERROR] {str(e)}"
+
+# === Gradio UI ===
+chatbot_ui = gr.ChatInterface(
+    fn=process_java_project,
+    title="JUnit Test Generator ",
+    description="Give me a path to generate junit",
+    theme="default"
 )
+
+if __name__ == "__main__":
+    chatbot_ui.launch()
