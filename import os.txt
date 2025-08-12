@@ -1,10 +1,10 @@
+
 import os
 import json
-import re
 from pathlib import Path
-from typing import List, Dict
-
 import gradio as gr
+import re
+from typing import List, Dict
 
 from langchain.prompts import PromptTemplate
 from langchain_openai import AzureChatOpenAI
@@ -12,12 +12,11 @@ from langchain.callbacks import get_openai_callback
 
 # === Azure OpenAI Client ===
 def get_openai_client():
-    """Return Azure OpenAI client instance."""
     return AzureChatOpenAI(
-        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", "https://testopenaiassets.openai.azure.com"),
-        deployment_name=os.getenv("AZURE_OPENAI_DEPLOYMENT", "Fourth_Chatbot"),
-        openai_api_key=os.getenv("AZURE_OPENAI_KEY", ""),  # set env var
-        openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        deployment_name="Fourth_Chatbot",
+        openai_api_key="",  # Use your actual key or env var
+        openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
         temperature=0.3,
         max_tokens=2000,
@@ -26,77 +25,31 @@ def get_openai_client():
 llm = get_openai_client()
 
 # === Global Stores ===
-aggregated_token_usage = {
-    "total_tokens": 0,
-    "prompt_tokens": 0,
-    "completion_tokens": 0,
-    "total_cost": 0.0
-}
-
-# === Helper: update aggregated token usage ===
-def accumulate_usage(cb):
-    try:
-        aggregated_token_usage["total_tokens"] += getattr(cb, "total_tokens", 0)
-        aggregated_token_usage["prompt_tokens"] += getattr(cb, "prompt_tokens", 0)
-        aggregated_token_usage["completion_tokens"] += getattr(cb, "completion_tokens", 0)
-        aggregated_token_usage["total_cost"] += float(getattr(cb, "total_cost", 0.0))
-    except Exception:
-        pass
-
-# === Exclusion Config ===
-EXCLUDE_PATTERNS = [
-    "entity", "dto", "repository", "repo", "config", "testdata", "data"
-]
-EXCLUDE_ANNOTATIONS = [
-    "@Entity", "@SpringBootApplication"
-]
+java_files: List[Path] = []
+parsed_code_info: List[Dict] = []
+junit_suggestions: List[Dict] = []
 
 # === Step 1: Find Java Files Recursively ===
 def find_java_files(path: str) -> List[Path]:
     base_path = Path(path)
     if not base_path.exists():
         raise FileNotFoundError(f"Path not found: {path}")
-    return list(base_path.rglob("*.java"))
+    all_java_files = list(base_path.rglob("*.java"))
+    return all_java_files
 
-# === Step 2: Exclusion Heuristics ===
-def is_excluded(file_path: Path, source: str, class_name: str = "", class_type: str = "") -> bool:
-    name_lower = class_name.lower()
-    type_lower = class_type.lower()
-
-    # Name/type patterns
-    if any(p in name_lower for p in EXCLUDE_PATTERNS):
-        return True
-    if any(p in type_lower for p in EXCLUDE_PATTERNS):
-        return True
-
-    # File name patterns
-    if any(p in file_path.name.lower() for p in EXCLUDE_PATTERNS):
-        return True
-
-    # Annotation-based exclusions
-    if any(ann in source for ann in EXCLUDE_ANNOTATIONS):
-        return True
-
-    # JPA imports or repository inheritance
-    if "import javax.persistence" in source or "import jakarta.persistence" in source:
-        return True
-    if "extends JpaRepository" in source or "extends CrudRepository" in source:
-        return True
-
-    return False
-
-# === Step 3: Extract Metadata from Java Files ===
+# === Step 2: Extract Metadata from Java Files ===
 def extract_class_metadata(java_paths: List[Path]) -> List[Dict]:
     prompt = PromptTemplate(
         input_variables=["source"],
         template="""
-Analyze the following Java source code and return compact JSON:
+Analyze the following Java source code and return the following as JSON:
 - class_name
-- class_type (Controller, Service, etc.)
-- package_path
-- methods: list of public method names (exclude 'main')
+- class_type (Controller, Service, Config, Model, etc.)
+- package_path (from the package declaration)
+- methods: list of public method names
 
-Only output one valid JSON object.  
+Only return compact valid JSON. No extra commentary.
+
 Java Source:
 {source}
 """
@@ -107,149 +60,115 @@ Java Source:
     for file_path in java_paths:
         try:
             source = file_path.read_text(encoding="utf-8")
-
-            with get_openai_callback() as cb:
-                response = chain.invoke({"source": source})
-                accumulate_usage(cb)
-
-            raw = response.content.strip()
-            data = json.loads(raw)
-            if "class_name" not in data or not data["class_name"]:
-                data["class_name"] = file_path.stem
-
-            excluded = is_excluded(file_path, source, data.get("class_name", ""), data.get("class_type", ""))
-            parsed.append({
-                "file_path": str(file_path),
-                "class_name": data.get("class_name"),
-                "class_type": data.get("class_type"),
-                "package_path": data.get("package_path", ""),
-                "methods": [m for m in data.get("methods", []) if m != "main"],
-                "_excluded": excluded
-            })
-
-        except json.JSONDecodeError:
-            print(f"[WARN] JSON parse failed for {file_path}. Skipping.")
+            response = chain.invoke({"source": source})
+            data = json.loads(response.content.strip())
+            parsed.append(data)
         except Exception as e:
             print(f"[WARN] Failed to parse {file_path}: {e}")
-
     return parsed
 
-# === Step 4: Generate JUnit Tests ===
-def generate_junit_tests(parsed_info: List[Dict]) -> List[Dict]:
+# === Step 3: Generate JUnit Tests ===
+def generate_junit_tests_from_metadata(parsed_info: List[Dict]) -> List[Dict]:
     prompt = PromptTemplate(
         input_variables=["class_name", "class_type", "package_path", "methods"],
         template="""
-Write a JUnit 5 test class for the Java class below.
-
-Rules:
-- Skip DTOs, entities, repositories, configs, test-data.
-- If Controller: use @WebMvcTest and MockMvc; mock dependencies; one test per public method.
-- If Service: use @ExtendWith(MockitoExtension.class) and mocks; one test per public method.
-- If utility: plain JUnit without Spring context.
-- Exclude 'main' method from tests.
-- Output only valid Java source (no markdown).
-
-Class metadata:
-Name: {class_name}
-Type: {class_type}
-Package: {package_path}
-Public Methods:
+Write a full JUnit 5 test class for:
+- Class Name: {class_name}
+- Type: {class_type}
+- Package: {package_path}
+- Public Methods:
 {methods}
+
+Use proper annotations:
+- Use @WebMvcTest and MockMvc for Controller
+- Use @SpringBootTest or @ExtendWith(MockitoExtension.class) for Service/Config
+- Include mocks and 1 test per method
+
+Output valid Java code ONLY (no markdown, no explanation).
 """
     )
     chain = prompt | llm
-    tests = []
+    test_classes = []
 
     for item in parsed_info:
-        if item["_excluded"]:
-            print(f"[INFO] Skipping excluded class: {item['class_name']}")
-            continue
-        if not item.get("methods"):
-            print(f"[INFO] No public methods for {item['class_name']}, skipping.")
-            continue
-
-        methods_block = "\n".join(item["methods"])
         try:
-            with get_openai_callback() as cb:
-                result = chain.invoke({
-                    "class_name": item["class_name"],
-                    "class_type": item.get("class_type", ""),
-                    "package_path": item.get("package_path", ""),
-                    "methods": methods_block
-                })
-                accumulate_usage(cb)
-
-            java_code = result.content.strip()
-            tests.append({
+            result = chain.invoke({
+                "class_name": item["class_name"],
+                "class_type": item["class_type"],
+                "package_path": item["package_path"],
+                "methods": "\n".join(item["methods"]),
+            })
+            test_classes.append({
                 "file_name": f"{item['class_name']}Test.java",
-                "package_path": item.get("package_path", ""),
-                "code": java_code,
-                "source_file": item["file_path"]
+                "package_path": item["package_path"],
+                "code": result.content.strip()
             })
         except Exception as e:
             print(f"[WARN] Could not generate test for {item['class_name']}: {e}")
+    return test_classes
 
-    return tests
-
-# === Step 5: Save Output ===
+# === Step 4: Save Files & Return Code to UI ===
 def save_and_format_output(junit_tests: List[Dict]) -> str:
     output = ""
     for test in junit_tests:
-        folder = Path("generated_tests") / (test["package_path"].replace(".", "/") if test["package_path"] else "")
+        folder = Path("generated_tests") / test["package_path"].replace(".", "/")
         folder.mkdir(parents=True, exist_ok=True)
         file_path = folder / test["file_name"]
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(test["code"])
-        output += f"\n===== {test['file_name']} (for {test['source_file']}) =====\n"
+        output += f"\n===== {test['file_name']} =====\n"
         output += test["code"]
         output += f"\n===== End of {test['file_name']} =====\n"
     return output.strip()
 
-# === Main ===
+# === Main Function Called by UI ===
 def process_java_project(prompt: str, history):
-    global aggregated_token_usage
-    aggregated_token_usage = {k: 0.0 if k == "total_cost" else 0 for k in aggregated_token_usage}
-
     try:
-        path_match = re.search(r"([A-Za-z]:[\\\/][\w\-. \\\/]+)|((?:/|~)[\w\-.\\/]+)", prompt)
+        path_match = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", prompt)
         if not path_match:
-            return "[ERROR] Please provide a valid path."
-        project_path = os.path.expanduser(path_match.group(0).strip())
+            return "[ERROR] Please provide a valid Windows file path."
 
+        project_path = path_match.group(1).strip()
         java_paths = find_java_files(project_path)
         if not java_paths:
             return "[INFO] No Java files found."
 
         parsed_info = extract_class_metadata(java_paths)
-        allowed_classes = [p for p in parsed_info if not p["_excluded"]]
+        if not parsed_info:
+            return "[INFO] No parsable Java classes found."
 
-        if not allowed_classes:
-            return "[INFO] All classes are excluded."
+        test_classes = generate_junit_tests_from_metadata(parsed_info)
+        if not test_classes:
+            return "[INFO] No JUnit tests could be generated."
 
-        junit_tests = generate_junit_tests(allowed_classes)
-        if not junit_tests:
-            return "[INFO] No JUnit tests generated."
-
-        output_code = save_and_format_output(junit_tests)
-        usage_summary = (
-            "\n\n--- Token Usage ---"
-            f"\nTotal Tokens: {aggregated_token_usage['total_tokens']}"
-            f"\nPrompt Tokens: {aggregated_token_usage['prompt_tokens']}"
-            f"\nCompletion Tokens: {aggregated_token_usage['completion_tokens']}"
-            f"\nTotal Cost (USD): ${aggregated_token_usage['total_cost']:.6f}"
-        )
-        return output_code + usage_summary
+        return save_and_format_output(test_classes)
 
     except Exception as e:
-        return f"[ERROR] {e}"
+        return f"[ERROR] {str(e)}"
 
 # === Gradio UI ===
 chatbot_ui = gr.ChatInterface(
     fn=process_java_project,
-    title="JUnit Generator (No main method, skips @SpringBootApplication)",
-    description="Generate JUnit 5 tests for Controllers, Services, etc. Skips DTOs, models, repos, configs, test data, and any @SpringBootApplication classes.",
+    title="OSIF Co-Developer",
+    description=(
+        " Paste a prompt like:\n"
+        "`generate the junit for this project C:\\Users\\you\\Downloads\\my-java-project`\n\n"
+        "I will scan, extract class info, and return full JUnit 5 test classes right here."
+    ),
     theme="default"
 )
 
 if __name__ == "__main__":
     chatbot_ui.launch()
+
+
+
+
+
+    usage_summary = "\n\n--- Token Usage ---"
+        usage_summary += f"\nTotal Tokens: {aggregated_token_usage.get('total_tokens', 0)}"
+        usage_summary += f"\nPrompt Tokens: {aggregated_token_usage.get('prompt_tokens', 0)}"
+        usage_summary += f"\nCompletion Tokens: {aggregated_token_usage.get('completion_tokens', 0)}"
+        usage_summary += f"\nTotal Cost (USD): ${format(aggregated_token_usage.get('total_cost', 0.0), '.6f')}"
+ 
+        return output_code + usage_summary
