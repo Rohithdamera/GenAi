@@ -32,6 +32,9 @@ def find_java_files(path: str) -> List[Path]:
 
 # === Step 2: Extract Metadata from Java Files ===
 def extract_class_metadata(java_paths: List[Path]) -> List[Dict]:
+    """
+    Also determines if a Service uses a Repository.
+    """
     prompt = PromptTemplate(
         input_variables=["source"],
         template="""
@@ -40,6 +43,7 @@ Analyze the following Java source code and return JSON with:
 - class_type (Controller, Service, Repository, Config, Entity, DTO, Main, etc.)
 - package_path
 - methods: list of public method names
+- uses_repository: true if this class has any field or constructor parameter whose type name ends with 'Repository'
 
 Only return compact valid JSON. No explanation.
 
@@ -65,7 +69,7 @@ def generate_junit_tests_from_metadata(parsed_info: List[Dict]) -> List[Dict]:
     ALLOWED_TYPES = {"Controller", "Service"}  # Only generate for these types
 
     prompt = PromptTemplate(
-        input_variables=["class_name", "class_type", "package_path", "methods"],
+        input_variables=["class_name", "class_type", "package_path", "methods", "uses_repository"],
         template="""
 Write a full JUnit 5 test class for:
 - Class Name: {class_name}
@@ -73,11 +77,14 @@ Write a full JUnit 5 test class for:
 - Package: {package_path}
 - Public Methods:
 {methods}
+- uses_repository: {uses_repository}
 
 Rules:
 - For Controller: use @WebMvcTest + MockMvc
 - For Service: use @ExtendWith(MockitoExtension.class)
-- Include mocks, proper setup, and one test per public method
+- If uses_repository is false, do NOT include any repository mocks, imports, or related injections.
+- If uses_repository is true, mock the repository and inject it properly.
+- Include mocks, proper setup, and one test per public method.
 
 Output valid Java code ONLY.
 """
@@ -95,6 +102,7 @@ Output valid Java code ONLY.
                 "class_type": item["class_type"],
                 "package_path": item["package_path"],
                 "methods": "\n".join(item["methods"]),
+                "uses_repository": str(item.get("uses_repository", False)).lower(),
             })
             test_classes.append({
                 "file_name": f"{item['class_name']}Test.java",
