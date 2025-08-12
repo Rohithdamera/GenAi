@@ -1,4 +1,4 @@
-# updated_osif_coder.py
+
 import os
 import json
 import re
@@ -9,7 +9,7 @@ import gradio as gr
 
 from langchain.prompts import PromptTemplate
 from langchain_openai import AzureChatOpenAI
-from langchain.callbacks.openai import get_openai_callback
+from langchain.callbacks import get_openai_callback
 
 # === Azure OpenAI Client ===
 def get_openai_client():
