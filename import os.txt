@@ -4,7 +4,6 @@ from pathlib import Path
 import gradio as gr
 import re
 from typing import List, Dict
-
 from langchain.prompts import PromptTemplate
 from langchain_openai import AzureChatOpenAI
 from langchain.callbacks import get_openai_callback
@@ -33,17 +32,20 @@ def find_java_files(path: str) -> List[Path]:
 # === Step 2: Extract Metadata from Java Files ===
 def extract_class_metadata(java_paths: List[Path]) -> List[Dict]:
     """
-    Also determines if a Service uses a Repository.
+    Also determines if a Service uses a Repository
+    and extracts all entity fields for later test generation.
     """
     prompt = PromptTemplate(
         input_variables=["source"],
         template="""
 Analyze the following Java source code and return JSON with:
-- class_name
-- class_type (Controller, Service, Repository, Config, Entity, DTO, Main, etc.)
-- package_path
-- methods: list of public method names
-- uses_repository: true if this class has any field or constructor parameter whose type name ends with 'Repository'
+class_name
+class_type (Controller, Service, Repository, Config, Entity, DTO, Main, etc.)
+package_path
+methods: list of public method names
+uses_repository: true if this class has any field or constructor parameter whose type name ends with 'Repository'
+if class_type == "Entity", also include:
+    entity_fields: list of objects with {{"name": fieldName, "type": fieldType}}
 
 Only return compact valid JSON. No explanation.
 
@@ -68,30 +70,42 @@ Java Source:
 def generate_junit_tests_from_metadata(parsed_info: List[Dict]) -> List[Dict]:
     ALLOWED_TYPES = {"Controller", "Service"}  # Only generate for these types
 
+    # Build a dictionary of entity fields so that when we see them in Service/Controller params, we can populate them
+    entity_map = {
+        item["class_name"]: item.get("entity_fields", [])
+        for item in parsed_info
+        if item.get("class_type") == "Entity"
+    }
+
     prompt = PromptTemplate(
-        input_variables=["class_name", "class_type", "package_path", "methods", "uses_repository"],
+        input_variables=["class_name", "class_type", "package_path", "methods", "uses_repository", "entity_map"],
         template="""
 Write a full JUnit 5 test class for:
-- Class Name: {class_name}
-- Type: {class_type}
-- Package: {package_path}
-- Public Methods:
+Class Name: {class_name}
+Type: {class_type}
+Package: {package_path}
+Public Methods:
 {methods}
-- uses_repository: {uses_repository}
+uses_repository: {uses_repository}
+
+Also, you have access to the following Entity definitions with their fields:
+{entity_map}
 
 Rules:
-- For Controller: use @WebMvcTest + MockMvc
-- For Service: use @ExtendWith(MockitoExtension.class)
+- For Controller: use @WebMvcTest + MockMvc.
+- For Service: use @ExtendWith(MockitoExtension.class).
 - If uses_repository is false, do NOT include any repository mocks, imports, or related injections.
 - If uses_repository is true, mock the repository and inject it properly.
+- In test setup, if any method takes or returns an Entity, create and fully populate it with ALL its fields using realistic dummy values based on field type.
+- Do NOT hardcode unrelated values — base them on field type (String, Long, int, boolean, LocalDateTime, etc.).
 - Include mocks, proper setup, and one test per public method.
 
 Output valid Java code ONLY.
 """
     )
     chain = prompt | llm
-    test_classes = []
 
+    test_classes = []
     for item in parsed_info:
         if item["class_type"] not in ALLOWED_TYPES:
             print(f"[SKIP] Skipping {item['class_name']} ({item['class_type']})")
@@ -103,6 +117,7 @@ Output valid Java code ONLY.
                 "package_path": item["package_path"],
                 "methods": "\n".join(item["methods"]),
                 "uses_repository": str(item.get("uses_repository", False)).lower(),
+                "entity_map": json.dumps(entity_map, indent=2)
             })
             test_classes.append({
                 "file_name": f"{item['class_name']}Test.java",
