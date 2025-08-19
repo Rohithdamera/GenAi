@@ -1,4 +1,3 @@
-
 import os
 import json
 import re
@@ -10,12 +9,12 @@ from langchain.prompts import PromptTemplate
 from langchain_openai import AzureChatOpenAI
 from langchain.callbacks import get_openai_callback
 
-# === Azure OpenAI Client ===
+# ================== Azure OpenAI Client ==================
 def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="gpt-4_complex_conversions",
-        openai_api_key="",  # put your key here or set env var
+        openai_api_key="",  # TODO: put your key here or set via env var
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
         temperature=0.3,
@@ -24,21 +23,21 @@ def get_openai_client():
 
 llm = get_openai_client()
 
-# === Step 1: Find Java Files Recursively ===
+# ================== Step 1: Find Java Files ==================
 def find_java_files(path: str) -> List[Path]:
     base_path = Path(path)
     if not base_path.exists():
         raise FileNotFoundError(f"Path not found: {path}")
     return list(base_path.rglob("*.java"))
 
-# === Step 2: Extract Metadata ===
+# ================== Step 2: Extract Metadata ==================
 def extract_class_metadata(java_paths: List[Path]) -> List[Dict]:
     prompt = PromptTemplate(
         input_variables=["source"],
         template="""
 Analyze the following Java source code and return JSON with:
 - class_name
-- class_type: one of exactly ["Controller", "Service", "Repository", "Config", "Entity", "DTO", "Main"]
+- class_type: one of exactly ["Controller", "Service", "Repository", "Config", "Entity", "DTO", "Main"].
   Mapping:
     - @RestController/@Controller => "Controller"
     - @Service => "Service"
@@ -51,17 +50,19 @@ Analyze the following Java source code and return JSON with:
 - uses_repository: true if this class has any field or constructor parameter whose type ends with 'Repository'
 
 If class_type is "Entity" or "DTO", also include:
-- entity_fields: list of {{"name": fieldName, "type": fieldType}}
+- entity_fields: list of {"name": fieldName, "type": fieldType}
 
- Always extract ALL fields from entities/DTOs.
-Return compact valid JSON only.
+⚠️ Always extract ALL fields from entities/DTOs.
+⚠️ Always normalize class_type to exactly one of the allowed values above.
+Return compact valid JSON only. No explanation.
+
 Java Source:
 {source}
 """
     )
     chain = prompt | llm
-
     parsed = []
+
     for file_path in java_paths:
         try:
             source = file_path.read_text(encoding="utf-8")
@@ -72,7 +73,7 @@ Java Source:
             print(f"[WARN] Failed to parse {file_path}: {e}")
     return parsed
 
-# === Step 3: Generate JUnit Tests ===
+# ================== Step 3: Generate JUnit Tests ==================
 rules_text = """    
 1. General    
 - Always output valid compilable Java code.    
@@ -98,7 +99,7 @@ rules_text = """
 """
 
 prompt = PromptTemplate(    
-    input_variables=["class_name", "class_type", "package_path", "methods", "uses_repository", "entity_map"],    
+    input_variables=["class_name", "class_type", "package_path", "methods", "uses_repository", "entity_map", "rules_text"],    
     template="""    
 Write a complete JUnit 5 test class for:    
 
@@ -149,7 +150,7 @@ def generate_junit_tests_from_metadata(parsed_info: List[Dict]) -> List[Dict]:
             print(f"[WARN] Could not generate test for {item['class_name']}: {e}")
     return test_classes
 
-# === Step 4: Save Files ===
+# ================== Step 4: Save Files ==================
 def save_and_format_output(junit_tests: List[Dict]) -> str:
     output = ""
     for test in junit_tests:
@@ -161,7 +162,14 @@ def save_and_format_output(junit_tests: List[Dict]) -> str:
         output += f"\n===== {test['file_name']} =====\n{test['code']}\n===== End of {test['file_name']} =====\n"
     return output.strip()
 
-# === Main ===
+# ================== Step 5: Main Process ==================
+aggregated_token_usage = {
+    "total_tokens": 0,
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_cost": 0.0
+}
+
 def process_java_project(prompt_text: str, history):
     try:
         path_match = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", prompt_text)
@@ -184,10 +192,24 @@ def process_java_project(prompt_text: str, history):
 
             output_code = save_and_format_output(test_classes)
 
-        return output_code
+            # Track token usage
+            aggregated_token_usage["total_tokens"] += cb.total_tokens
+            aggregated_token_usage["prompt_tokens"] += cb.prompt_tokens
+            aggregated_token_usage["completion_tokens"] += cb.completion_tokens
+            aggregated_token_usage["total_cost"] += cb.total_cost
+
+        usage_summary = "\n\n--- Token Usage ---"
+        usage_summary += f"\nTotal Tokens: {aggregated_token_usage['total_tokens']}"
+        usage_summary += f"\nPrompt Tokens: {aggregated_token_usage['prompt_tokens']}"
+        usage_summary += f"\nCompletion Tokens: {aggregated_token_usage['completion_tokens']}"
+        usage_summary += f"\nTotal Cost (USD): ${format(aggregated_token_usage['total_cost'], '.6f')}"
+
+        return output_code + usage_summary
+
     except Exception as e:
         return f"[ERROR] {str(e)}"
 
+# ================== Step 6: Gradio UI ==================
 chatbot_ui = gr.ChatInterface(
     fn=process_java_project,
     title="JUnit Test Generator",
@@ -197,25 +219,3 @@ chatbot_ui = gr.ChatInterface(
 
 if __name__ == "__main__":
     chatbot_ui.launch()
-
-
-          if not test_classes:
-                return "[INFO] No JUnit tests could be generated for allowed types."
- 
-            output_code = save_and_format_output(test_classes)
- 
-            aggregated_token_usage["total_tokens"] += cb.total_tokens
-            aggregated_token_usage["prompt_tokens"] += cb.prompt_tokens
-            aggregated_token_usage["completion_tokens"] += cb.completion_tokens
-            aggregated_token_usage["total_cost"] += cb.total_cost
- 
-        usage_summary = "\n\n--- Token Usage ---"
-        usage_summary += f"\nTotal Tokens: {aggregated_token_usage['total_tokens']}"
-        usage_summary += f"\nPrompt Tokens: {aggregated_token_usage['prompt_tokens']}"
-        usage_summary += f"\nCompletion Tokens: {aggregated_token_usage['completion_tokens']}"
-        usage_summary += f"\nTotal Cost (USD): ${format(aggregated_token_usage['total_cost'], '.6f')}"
- 
-        return output_code + usage_summary
- 
-    except Exception as e:
-        return f"[ERROR] {str(e)}"
