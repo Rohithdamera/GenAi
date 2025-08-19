@@ -3,68 +3,26 @@ prompt = PromptTemplate(
     template="""
 Analyze the following Java source code and return JSON with:
 - class_name
-- class_type (Controller, Service, Repository, Config, Entity, DTO, Main, etc.)
+- class_type: one of exactly ["Controller", "Service", "Repository", "Config", "Entity", "DTO", "Main"]. 
+  ⚠️ Map annotations correctly:
+    - If annotated with @RestController or @Controller → class_type = "Controller"
+    - If annotated with @Service → class_type = "Service"
+    - If annotated with @Repository → class_type = "Repository"
+    - If annotated with @Entity or @Table → class_type = "Entity"
+    - If class name ends with DTO → class_type = "DTO"
+    - If class has main method → class_type = "Main"
 - package_path
-- methods: list of public method names with their signatures (include parameter types & return type)
-- uses_repository: true if this class has any field or constructor parameter whose type name ends with 'Repository'
-If class_type == "Entity" or "DTO", also include:
-- entity_fields: list of objects with {{"name": fieldName, "type": fieldType}}
+- methods: list of public method signatures (include parameter types & return type)
+- uses_repository: true if this class has any field or constructor parameter whose type ends with 'Repository'
+
+If class_type is "Entity" or "DTO", also include:
+- entity_fields: list of {{"name": fieldName, "type": fieldType}}
 
 ⚠️ Always extract ALL fields (private/public) from entities/DTOs.
-⚠️ For lists, include element type (e.g., List<String>).
-⚠️ Do not omit any field.
-Return only valid compact JSON.
+⚠️ Always normalize class_type to exactly one of the allowed values above.
+Return compact valid JSON only. No explanation.
+
 Java Source:
 {source}
 """
 )
-
-prompt = PromptTemplate(
-    input_variables=["class_name", "class_type", "package_path", "methods", "uses_repository", "entity_map"],
-    template="""
-Write a complete JUnit 5 test class for:
-
-Class Name: {class_name}
-Type: {class_type}
-Package: {package_path}
-Public Methods:
-{methods}
-uses_repository: {uses_repository}
-Available Entities:
-{entity_map}
-
-📌 Rules:
-1. **Controllers**  
-   - Use `@WebMvcTest({class_name}.class)` and `MockMvc`.  
-   - Add `@MockBean` for dependent services.  
-   - Use `ObjectMapper` for JSON serialization.  
-   - For GET/POST/PUT/DELETE tests, always mock service layer calls with `when(...).thenReturn(...)`.  
-   - Populate test data using all entity fields (from entity_map) with realistic dummy values.  
-   - Verify response fields using `jsonPath` for each entity property.  
-
-2. **Services**  
-   - Use `@ExtendWith(MockitoExtension.class)` only if repository is used.  
-   - If repository exists → mock it and inject into the service.  
-   - If no repository → instantiate service directly (no mocks).  
-   - Populate entities fully before testing.  
-   - Write assertions (`assertThat`) instead of verifying service method calls.  
-
-3. **Entity/DTO population**  
-   - Always include ALL fields.  
-   - Use dummy but realistic values:  
-     - `String` → "John Doe" / "cand123"  
-     - `UUID` → `UUID.randomUUID().toString()`  
-     - `List<String>` → `Arrays.asList("Java","Spring","SQL")`  
-     - `LocalDateTime` → `"2025-07-25T10:00:00"`  
-     - `int` → 123  
-     - `boolean` → true  
-
-4. **General**  
-   - One `@Test` per public method.  
-   - Never hardcode unrelated JSON (derive from ObjectMapper + entity objects).  
-   - Always test list-returning methods with multiple objects.  
-   - Output only valid, compilable Java code.
-"""
-)
-
-
