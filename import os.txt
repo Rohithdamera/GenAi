@@ -1,27 +1,18 @@
-Rules:
-- For Controller classes:
-  - Use @WebMvcTest(ClassName.class) without @ExtendWith(SpringExtension.class).
-  - Always inject MockMvc (@Autowired).
-  - Always mock the service layer using @MockBean.
-  - Use @Autowired ObjectMapper for JSON serialization.
-  - In setup, fully populate Entities/DTOs with **all fields** (based on entity_map).
-  - Use jsonPath() assertions for **every field** in responses.
-  - Use meaningful URLs from method names if possible, otherwise use "/api/{entity}" convention.
-  - Use List.of(...) or Arrays.asList(...) when testing getAll endpoints.
+template="""
+Analyze the following Java source code and return JSON with strictly these keys:
+- class_name
+- class_type (must be exactly one of: "Controller", "Service", "Repository", "Config", "Entity", "DTO", "Main")
+- package_path
+- methods: list of all public method names
+- uses_repository: true/false (true if this class has a field or constructor parameter ending with 'Repository')
 
-- For Service classes:
-  - If uses_repository = true → use @ExtendWith(MockitoExtension.class), mock repositories, and inject service with @InjectMocks.
-  - If uses_repository = false → create a plain service instance with new.
-  - Always populate entities with **all fields** from entity_map.
-  - Write real functional assertions using AssertJ (assertThat), not Mockito verify.
-  - Each public method must have a corresponding test method.
-  - For methods like save/add → assert that entity is returned correctly with all fields.
-  - For getAll → assert returned list is not empty and contains expected entity.
-  - For getById → assert returned entity matches saved one.
-  - If an ID is nullable, include a test ensuring the service generates an ID.
+If class_type == "Entity", also include:
+  "entity_fields": list of objects like { "name": fieldName, "type": fieldType }
 
-- Never hardcode JSON directly in controller tests; always use objectMapper.writeValueAsString().
-- Never use verify() on service methods unless mocking a repository.
-- Output must be **compilable JUnit 5 code**.
- 
+⚠️ Important:
+- Do NOT invent new class_type values. Only pick from the allowed list above.
+- Do NOT output explanations. Only valid compact JSON.
 
+Java Source:
+{source}
+"""
