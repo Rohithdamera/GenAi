@@ -1,7 +1,86 @@
+update the below code, the code is running in local for to generate junit , the response which it is generating for junit is almost correct , but it need little modification, for example  i will provide to diiferent response , 1.expected and 2.actual generated response , i need the response like in expected result , 
+
+dont change the existing code functionality , of the coder , do what ever changes required in both (Rules and prompt) based on rules and prompt the proper junit need to be generated , also while generating junit for service and controller , it is missing some fields what are present in entity or dto class , so dont miss that , for get all data use list were ever requied dont hard coded anything based on (Rules and prompt) it need to generate accurate junit without missing any variables or format etc , 
+
+------------------------------------------------------------------------------------------------
+
+code:-
+
+
+
+import os
+import json
+from pathlib import Path
+import gradio as gr
+import re
+from typing import List, Dict
+from langchain.prompts import PromptTemplate
+from langchain_openai import AzureChatOpenAI
+from langchain.callbacks import get_openai_callback
+
+# === Azure OpenAI Client ===
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        deployment_name="gpt-4_complex_conversions",
+        openai_api_key="",  # Use your actual key or env var
+        openai_api_version="2024-08-01-preview",
+        openai_api_type="azure",
+        temperature=0.3,
+        max_tokens=2000,
+    )
+
+llm = get_openai_client()
+
+# === Step 1: Find Java Files Recursively ===
+def find_java_files(path: str) -> List[Path]:
+    base_path = Path(path)
+    if not base_path.exists():
+        raise FileNotFoundError(f"Path not found: {path}")
+    return list(base_path.rglob("*.java"))
+
+# === Step 2: Extract Metadata from Java Files ===
+def extract_class_metadata(java_paths: List[Path]) -> List[Dict]:
+    """
+    Also determines if a Service uses a Repository
+    and extracts all entity fields for later test generation.
+    """
+    prompt = PromptTemplate(
+        input_variables=["source"],
+        template="""
+Analyze the following Java source code and return JSON with:
+class_name
+class_type (Controller, Service, Repository, Config, Entity, DTO, Main, etc.)
+package_path
+methods: list of public method names
+uses_repository: true if this class has any field or constructor parameter whose type name ends with 'Repository'
+if class_type == "Entity", also include:
+    entity_fields: list of objects with {{"name": fieldName, "type": fieldType}}
+
+Only return compact valid JSON. No explanation.
+
+Java Source:
+{source}
+"""
+    )
+    chain = prompt | llm
+    parsed = []
+
+    for file_path in java_paths:
+        try:
+            source = file_path.read_text(encoding="utf-8")
+            response = chain.invoke({"source": source})
+            data = json.loads(response.content.strip())
+            parsed.append(data)
+        except Exception as e:
+            print(f"[WARN] Failed to parse {file_path}: {e}")
+    return parsed
+
+# === Step 3: Generate JUnit Tests (only for Controller & Service) ===
 def generate_junit_tests_from_metadata(parsed_info: List[Dict]) -> List[Dict]:
     ALLOWED_TYPES = {"Controller", "Service"}  # Only generate for these types
 
-    # Build a dictionary of entity fields for realistic population
+    # Build a dictionary of entity fields so that when we see them in Service/Controller params, we can populate them
     entity_map = {
         item["class_name"]: item.get("entity_fields", [])
         for item in parsed_info
@@ -11,8 +90,7 @@ def generate_junit_tests_from_metadata(parsed_info: List[Dict]) -> List[Dict]:
     prompt = PromptTemplate(
         input_variables=["class_name", "class_type", "package_path", "methods", "uses_repository", "entity_map"],
         template="""
-Write a complete JUnit 5 test class for the following Java class.
-
+Write a full JUnit 5 test class or:
 Class Name: {class_name}
 Type: {class_type}
 Package: {package_path}
@@ -20,46 +98,27 @@ Public Methods:
 {methods}
 uses_repository: {uses_repository}
 
-You also have access to the following entity definitions and their fields:
+Also, you have access to the following Entity definitions with their fields:
 {entity_map}
 
-Rules for Controller tests:
-- Annotate with @WebMvcTest({class_name}.class) and no other class-level test annotation.
-- Inject MockMvc with @Autowired.
-- Inject ObjectMapper with @Autowired (do not manually create it).
-- Mock the Service layer with @MockBean.
-- Use `when(...).thenReturn(...)` from Mockito, never BDDMockito.
-- Use JSON serialization via `objectMapper.writeValueAsString(...)` instead of hardcoded JSON strings.
-- Match JSON property names and casing exactly as per the entity fields (preserve camel case or Pascal case exactly as in the entity).
-- For collections, verify specific indexes with `jsonPath("$[0]....")` when appropriate.
-- Use static imports for MockMvcRequestBuilders.* and MockMvcResultMatchers.*.
+Rules:
+- For Controller: use @WebMvcTest + MockMvc.
+- For Service: use @ExtendWith(MockitoExtension.class).
+- If uses_repository is false, do NOT include any repository mocks, imports, or related injections.
+- If uses_repository is true, mock the repository and inject it properly.
+- In test setup, if any method takes or returns an Entity, create and fully populate it with ALL its fields using realistic dummy values based on field type.
+- Do NOT hardcode unrelated values — base them on field type (String, Long, int, boolean, LocalDateTime, etc.).
+- Include mocks, proper setup, and one test per public method.
 
-Rules for Service tests:
-- No Spring annotations; instantiate service directly.
-- No mocking unless uses_repository == true, in which case mock the repository with Mockito.
-- Use AssertJ (`assertThat(...)`) instead of JUnit `assertEquals`.
-- Populate all entity fields with realistic values:
-    - String fields: `"John Doe"` or `"sampleString"` depending on context.
-    - Long: `1L`
-    - int: `123`
-    - boolean: `true`
-    - LocalDateTime: `"2025-07-25T10:00:00"` (string) or `LocalDateTime.now()` if needed.
-    - UUID: `UUID.randomUUID().toString()`
-- If an ID field is nullable, include a test that sets it to null before calling `add` method, and assert that an ID gets generated.
-- Include assertions verifying that returned objects match what was stored.
-
-General:
-- Create one test method per public method in the target class.
-- Include proper imports.
-- Output only valid Java code — no explanations.
+Output valid Java code ONLY.
 """
     )
-
     chain = prompt | llm
 
     test_classes = []
     for item in parsed_info:
         if item["class_type"] not in ALLOWED_TYPES:
+            print(f"[SKIP] Skipping {item['class_name']} ({item['class_type']})")
             continue
         try:
             result = chain.invoke({
@@ -78,3 +137,452 @@ General:
         except Exception as e:
             print(f"[WARN] Could not generate test for {item['class_name']}: {e}")
     return test_classes
+
+# === Step 4: Save Files ===
+def save_and_format_output(junit_tests: List[Dict]) -> str:
+    output = ""
+    for test in junit_tests:
+        folder = Path("generated_tests") / test["package_path"].replace(".", "/")
+        folder.mkdir(parents=True, exist_ok=True)
+        file_path = folder / test["file_name"]
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(test["code"])
+        output += f"\n===== {test['file_name']} =====\n{test['code']}\n===== End of {test['file_name']} =====\n"
+    return output.strip()
+
+# === Main Function ===
+def process_java_project(prompt: str, history):
+    aggregated_token_usage = {
+        "total_tokens": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_cost": 0.0
+    }
+
+    try:
+        path_match = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", prompt)
+        if not path_match:
+            return "[ERROR] Please provide a valid Windows file path."
+
+        project_path = path_match.group(1).strip()
+        java_paths = find_java_files(project_path)
+        if not java_paths:
+            return "[INFO] No Java files found."
+
+        with get_openai_callback() as cb:
+            parsed_info = extract_class_metadata(java_paths)
+            if not parsed_info:
+                return "[INFO] No parsable Java classes found."
+
+            test_classes = generate_junit_tests_from_metadata(parsed_info)
+            if not test_classes:
+                return "[INFO] No JUnit tests could be generated for allowed types."
+
+            output_code = save_and_format_output(test_classes)
+
+            aggregated_token_usage["total_tokens"] += cb.total_tokens
+            aggregated_token_usage["prompt_tokens"] += cb.prompt_tokens
+            aggregated_token_usage["completion_tokens"] += cb.completion_tokens
+            aggregated_token_usage["total_cost"] += cb.total_cost
+
+        usage_summary = "\n\n--- Token Usage ---"
+        usage_summary += f"\nTotal Tokens: {aggregated_token_usage['total_tokens']}"
+        usage_summary += f"\nPrompt Tokens: {aggregated_token_usage['prompt_tokens']}"
+        usage_summary += f"\nCompletion Tokens: {aggregated_token_usage['completion_tokens']}"
+        usage_summary += f"\nTotal Cost (USD): ${format(aggregated_token_usage['total_cost'], '.6f')}"
+
+        return output_code + usage_summary
+
+    except Exception as e:
+        return f"[ERROR] {str(e)}"
+
+# === Gradio UI ===
+chatbot_ui = gr.ChatInterface(
+    fn=process_java_project,
+    title="JUnit Test Generator ",
+    description=(
+        "Give me a path to generate junit "
+    ),
+    theme="default"
+)
+
+if __name__ == "__main__":
+    chatbot_ui.launch()
+
+
+
+
+---------------------------------------------------------------------------------------------------------
+
+expected :-
+
+
+
+ 
+package com.example.osif_java_cg_candidate.controller;
+ 
+import com.example.osif_java_cg_candidate.model.Candidate;
+
+import com.example.osif_java_cg_candidate.service.CandidateService;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+ 
+import org.junit.jupiter.api.BeforeEach;
+
+import org.junit.jupiter.api.Test;
+
+import org.mockito.Mockito;
+ 
+import org.springframework.beans.factory.annotation.Autowired;
+
+import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+
+import org.springframework.boot.test.mock.mockito.MockBean;
+ 
+import org.springframework.http.MediaType;
+
+import org.springframework.test.web.servlet.MockMvc;
+ 
+import java.util.Arrays;
+
+import java.util.List;
+ 
+import static org.mockito.ArgumentMatchers.any;
+
+import static org.mockito.Mockito.when;
+ 
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
+
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
+ 
+@WebMvcTest(CandidateController.class)
+
+public class ControllerTestCopilot {
+ 
+    @Autowired
+
+    private MockMvc mockMvc;
+ 
+    @MockBean
+
+    private CandidateService candidateService;
+ 
+    @Autowired
+
+    private ObjectMapper objectMapper;
+ 
+    private Candidate candidate;
+ 
+    @BeforeEach
+
+    void setUp() {
+
+        candidate = new Candidate();
+
+        candidate.setCandidateId("cand123");
+
+        candidate.setCandidateName("John Doe");
+
+        candidate.setCandidateSkills(Arrays.asList("Java", "Spring", "SQL"));
+
+        candidate.setCandAvailability("2025-07-25T10:00:00");
+
+    }
+ 
+    @Test
+
+    void testAddCandidate() throws Exception {
+
+        when(candidateService.addCandidate(any(Candidate.class))).thenReturn(candidate);
+ 
+        mockMvc.perform(post("/api/candidates")
+
+                .contentType(MediaType.APPLICATION_JSON)
+
+                .content(objectMapper.writeValueAsString(candidate)))
+
+                .andExpect(status().isOk())
+
+                .andExpect(jsonPath("$.CandidateId").value("cand123"))
+
+                .andExpect(jsonPath("$.CandidateName").value("John Doe"))
+
+                .andExpect(jsonPath("$.CandidateSkills[0]").value("Java"))
+
+                .andExpect(jsonPath("$.CandAvailability").value("2025-07-25T10:00:00"));
+
+    }
+ 
+    @Test
+
+    void testGetCandidate() throws Exception {
+
+        when(candidateService.getCandidate("cand123")).thenReturn(candidate);
+ 
+        mockMvc.perform(get("/api/candidates/cand123"))
+
+                .andExpect(status().isOk())
+
+                .andExpect(jsonPath("$.CandidateId").value("cand123"))
+
+                .andExpect(jsonPath("$.CandidateName").value("John Doe"));
+
+    }
+ 
+    @Test
+
+    void testGetAllCandidates() throws Exception {
+
+        List<Candidate> candidates = Arrays.asList(candidate);
+
+        when(candidateService.getAllCandidates()).thenReturn(candidates);
+ 
+        mockMvc.perform(get("/api/candidates"))
+
+                .andExpect(status().isOk())
+
+                .andExpect(jsonPath("$[0].CandidateId").value("cand123"))
+
+                .andExpect(jsonPath("$[0].CandidateName").value("John Doe"));
+
+    }
+
+}
+
+ 
+
+
+
+ 
+package com.example.osif_java_cg_candidate.service;
+ 
+import com.example.osif_java_cg_candidate.model.Candidate;
+
+import org.junit.jupiter.api.BeforeEach;
+
+import org.junit.jupiter.api.Test;
+ 
+import java.util.Arrays;
+
+import java.util.List;
+
+import java.util.UUID;
+ 
+import static org.assertj.core.api.Assertions.assertThat;
+ 
+public class ServiceTestCopilot {
+ 
+    private CandidateService candidateService;
+
+    private Candidate candidate;
+ 
+    @BeforeEach
+
+    void setUp() {
+
+        candidateService = new CandidateService();
+ 
+        candidate = new Candidate();
+
+        candidate.setCandidateId(UUID.randomUUID().toString());
+
+        candidate.setCandidateName("John Doe");
+
+        candidate.setCandidateSkills(Arrays.asList("Java", "Spring", "SQL"));
+
+        candidate.setCandAvailability("2025-07-25T10:00:00");
+
+    }
+ 
+    @Test
+
+    void testAddCandidate() {
+
+        Candidate saved = candidateService.addCandidate(candidate);
+
+        assertThat(saved).isNotNull();
+
+        assertThat(saved.getCandidateId()).isEqualTo(candidate.getCandidateId());
+
+        assertThat(candidateService.getCandidate(saved.getCandidateId())).isEqualTo(saved);
+
+    }
+ 
+    @Test
+
+    void testAddCandidateWithoutIdGeneratesId() {
+
+        candidate.setCandidateId(null);
+
+        Candidate saved = candidateService.addCandidate(candidate);
+
+        assertThat(saved.getCandidateId()).isNotNull();
+
+    }
+ 
+    @Test
+
+    void testGetCandidate() {
+
+        candidateService.addCandidate(candidate);
+
+        Candidate found = candidateService.getCandidate(candidate.getCandidateId());
+
+        assertThat(found).isNotNull();
+
+        assertThat(found.getCandidateName()).isEqualTo("John Doe");
+
+    }
+ 
+    @Test
+
+    void testGetAllCandidates() {
+
+        candidateService.addCandidate(candidate);
+
+        List<Candidate> allCandidates = candidateService.getAllCandidates();
+
+        assertThat(allCandidates).isNotEmpty();
+
+        assertThat(allCandidates).contains(candidate);
+
+    }
+ 
+    @Test
+
+    void testSaveCandidate() {
+
+        Candidate saved = candidateService.save(candidate);
+
+        assertThat(saved).isEqualTo(candidate);
+
+    }
+
+}
+
+
+
+--------------------------------------------------------------------------------------------
+
+
+ACtual generated response :-
+
+
+===== CandidateControllerTest.java =====
+
+
+package com.example.osif_java_cg_candidate.controller;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.http.MediaType;
+import org.springframework.test.context.junit.jupiter.SpringExtension;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers;
+
+import static org.springframework.test.web.servlet.result.MockMvcResultHandlers.print;
+
+@WebMvcTest(CandidateController.class)
+@ExtendWith(SpringExtension.class)
+public class CandidateControllerTest {
+
+    @Autowired
+    private MockMvc mockMvc;
+
+    @BeforeEach
+    public void setUp() {
+        // Setup can include common mock setups if needed
+    }
+
+    @Test
+    public void testAddCandidate() throws Exception {
+        mockMvc.perform(MockMvcRequestBuilders.post("/candidates")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"name\":\"John Doe\",\"age\":30}"))
+                .andExpect(MockMvcResultMatchers.status().isOk())
+                .andDo(print());
+    }
+
+    @Test
+    public void testGetCandidate() throws Exception {
+        mockMvc.perform(MockMvcRequestBuilders.get("/candidates/1")
+                .accept(MediaType.APPLICATION_JSON))
+                .andExpect(MockMvcResultMatchers.status().isOk())
+                .andExpect(MockMvcResultMatchers.content().json("{\"id\":1,\"name\":\"John Doe\",\"age\":30}"))
+                .andDo(print());
+    }
+
+    @Test
+    public void testGetAllCandidates() throws Exception {
+        mockMvc.perform(MockMvcRequestBuilders.get("/candidates")
+                .accept(MediaType.APPLICATION_JSON))
+                .andExpect(MockMvcResultMatchers.status().isOk())
+                .andExpect(MockMvcResultMatchers.content().json("[{\"id\":1,\"name\":\"John Doe\",\"age\":30}]"))
+                .andDo(print());
+    }
+}
+===== End of CandidateControllerTest.java =====
+
+===== CandidateServiceTest.java =====
+
+
+package com.example.osif_java_cg_candidate.service;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+public class CandidateServiceTest {
+
+    @InjectMocks
+    private CandidateService candidateService;
+
+    @BeforeEach
+    void setUp() {
+        // Setup necessary for each test, if any
+    }
+
+    @Test
+    void testAddCandidate() {
+        // Assuming addCandidate takes a Candidate object and returns void
+        Candidate candidate = new Candidate(); // Populate with realistic dummy values
+        candidateService.addCandidate(candidate);
+        verify(candidateService, times(1)).addCandidate(candidate);
+    }
+
+    @Test
+    void testGetCandidate() {
+        // Assuming getCandidate takes a Long id and returns a Candidate object
+        Long candidateId = 1L;
+        when(candidateService.getCandidate(candidateId)).thenReturn(new Candidate()); // Return a populated Candidate
+        candidateService.getCandidate(candidateId);
+        verify(candidateService, times(1)).getCandidate(candidateId);
+    }
+
+    @Test
+    void testGetAllCandidates() {
+        // Assuming getAllCandidates returns a List of Candidate
+        when(candidateService.getAllCandidates()).thenReturn(List.of(new Candidate(), new Candidate())); // Return a list of populated Candidates
+        candidateService.getAllCandidates();
+        verify(candidateService, times(1)).getAllCandidates();
+    }
+}
+===== End of CandidateServiceTest.java =====
+
+--- Token Usage ---
+Total Tokens: 2946
+Prompt Tokens: 1905
+Completion Tokens: 1041
+Total Cost (USD): $0.050280
+
+ 
