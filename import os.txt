@@ -1,3 +1,4 @@
+
 import os
 import json
 import re
@@ -52,7 +53,7 @@ Analyze the following Java source code and return JSON with:
 If class_type is "Entity" or "DTO", also include:
 - entity_fields: list of {{"name": fieldName, "type": fieldType}}
 
-⚠️ Always extract ALL fields from entities/DTOs.
+ Always extract ALL fields from entities/DTOs.
 Return compact valid JSON only.
 Java Source:
 {source}
@@ -196,3 +197,25 @@ chatbot_ui = gr.ChatInterface(
 
 if __name__ == "__main__":
     chatbot_ui.launch()
+
+
+          if not test_classes:
+                return "[INFO] No JUnit tests could be generated for allowed types."
+ 
+            output_code = save_and_format_output(test_classes)
+ 
+            aggregated_token_usage["total_tokens"] += cb.total_tokens
+            aggregated_token_usage["prompt_tokens"] += cb.prompt_tokens
+            aggregated_token_usage["completion_tokens"] += cb.completion_tokens
+            aggregated_token_usage["total_cost"] += cb.total_cost
+ 
+        usage_summary = "\n\n--- Token Usage ---"
+        usage_summary += f"\nTotal Tokens: {aggregated_token_usage['total_tokens']}"
+        usage_summary += f"\nPrompt Tokens: {aggregated_token_usage['prompt_tokens']}"
+        usage_summary += f"\nCompletion Tokens: {aggregated_token_usage['completion_tokens']}"
+        usage_summary += f"\nTotal Cost (USD): ${format(aggregated_token_usage['total_cost'], '.6f')}"
+ 
+        return output_code + usage_summary
+ 
+    except Exception as e:
+        return f"[ERROR] {str(e)}"
