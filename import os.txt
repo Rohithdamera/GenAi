@@ -9,8 +9,6 @@ from langchain.tools import Tool
 
 # === Azure OpenAI Client ===
 def get_openai_client():
-   
-    
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="gpt-4_complex_conversions",
@@ -42,27 +40,30 @@ def copy_project_structure(reference_path: str, new_project_name: str, output_ba
         for file in files:
             if file == "pom.xml":
                 shutil.copy2(Path(root) / file, target_dir / file)
-            elif file.endswith((".java", ".xml", ".yml", ".properties")):
+            elif file.endswith((".java", ".xml", ".yml", ".properties", ".gradle", ".md")):
                 (target_dir / file).touch()
 
-    return f"Project '{new_project_name}' created at {dest_path}"
+    return f"✅ Project '{new_project_name}' created at {dest_path}"
 
 # === Tool 2: Parse User Input for Command ===
 def parse_command(user_input: str) -> dict:
     """
-    Parse user input like:
-    'generate a java project take this project (C:\\Users\\rdamera\\Downloads\\ddddd) as a reference, 
-    with name AWS connector'
+    Flexible parser for user input.
+    Examples it will handle:
+      - generate a java project with aws_connector takes this path as a reference C:\\Users\\me\\project
+      - generate a java project take this project (C:\\Users\\me\\project) as a reference, with name SalesforceConnector
     """
-    match_path = re.search(r"\(([A-Za-z]:[\\/\w\-. ]+)\)", user_input)
-    match_name = re.search(r"with name ([\w\s]+)", user_input, re.IGNORECASE)
+    # Try to capture path
+    match_path = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", user_input)
+    # Try to capture project name
+    match_name = re.search(r"(with name|with|called)\s+([\w_]+)", user_input, re.IGNORECASE)
 
     if not match_path or not match_name:
-        raise ValueError("Invalid input format. Provide (project_path) and a project name.")
+        raise ValueError("Invalid input format. Please provide a valid project path and new project name.")
 
     return {
         "reference_path": match_path.group(1).strip(),
-        "new_project_name": match_name.group(1).strip().replace(" ", "")
+        "new_project_name": match_name.group(2).strip().replace(" ", "_")
     }
 
 # === Tool 3: Orchestrator ===
@@ -88,16 +89,3 @@ chatbot_ui = gr.ChatInterface(
 
 if __name__ == "__main__":
     chatbot_ui.launch()
-
-
-
-error
-
-
-generate a java project with aws_connector takes this path as a reference C:\Users\rdamera\Downloads\cg-osif-salesforce-opportunity
-
-[ERROR] Invalid input format. Provide (project_path) and a project name.
-
-C:\Users\rdamera\Downloads\cg-osif-salesforce-opportunity
-
-[ERROR] Invalid input format. Provide (project_path) and a project name.
