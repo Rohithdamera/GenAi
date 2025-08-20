@@ -21,15 +21,18 @@ def get_openai_client():
 
 llm = get_openai_client()
 
+# === Default Output Folder (hardcoded) ===
+OUTPUT_BASE = r"C:\Users\rdamera\Downloads\dddd"
+
 # === Tool 1: Copy Java Project Structure ===
-def copy_project_structure(reference_path: str, new_project_name: str, output_base: str = ".") -> str:
+def copy_project_structure(reference_path: str, new_project_name: str) -> str:
     ref_path = Path(reference_path)
     if not ref_path.exists():
         raise FileNotFoundError(f"Reference project not found: {reference_path}")
 
-    dest_path = Path(output_base) / new_project_name
+    dest_path = Path(OUTPUT_BASE) / new_project_name
     if dest_path.exists():
-        shutil.rmtree(dest_path)
+        shutil.rmtree(dest_path)  # clean up old version
     dest_path.mkdir(parents=True, exist_ok=True)
 
     for root, dirs, files in os.walk(ref_path):
@@ -41,6 +44,7 @@ def copy_project_structure(reference_path: str, new_project_name: str, output_ba
             if file == "pom.xml":
                 shutil.copy2(Path(root) / file, target_dir / file)
             elif file.endswith((".java", ".xml", ".yml", ".properties", ".gradle", ".md")):
+                # create empty placeholder file with same name
                 (target_dir / file).touch()
 
     return f"✅ Project '{new_project_name}' created at {dest_path}"
@@ -53,9 +57,9 @@ def parse_command(user_input: str) -> dict:
       - generate a java project with aws_connector takes this path as a reference C:\\Users\\me\\project
       - generate a java project take this project (C:\\Users\\me\\project) as a reference, with name SalesforceConnector
     """
-    # Try to capture path
+    # capture Windows path
     match_path = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", user_input)
-    # Try to capture project name
+    # capture project name
     match_name = re.search(r"(with name|with|called)\s+([\w_]+)", user_input, re.IGNORECASE)
 
     if not match_path or not match_name:
