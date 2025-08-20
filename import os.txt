@@ -1,18 +1,21 @@
 import os
+import json
 import re
-import shutil
 from pathlib import Path
+from typing import List, Dict
 import gradio as gr
 
+from langchain.prompts import PromptTemplate
 from langchain_openai import AzureChatOpenAI
 from langchain.tools import Tool
+from langchain.callbacks import get_openai_callback
 
 # === Azure OpenAI Client ===
 def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="gpt-4_complex_conversions",
-        openai_api_key="",
+        openai_api_key="" ,
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
         temperature=0.3,
@@ -21,105 +24,216 @@ def get_openai_client():
 
 llm = get_openai_client()
 
-# === Default Output Folder ===
-OUTPUT_BASE = r"C:\Users\rdamera\Downloads\dddd"
+# === Tool 1: List Java Files ===
+def list_java_files(path: str) -> List[Path]:
+    base_path = Path(path)
+    if not base_path.exists():
+        raise FileNotFoundError(f"Path not found: {path}")
+    return list(base_path.rglob("*.java"))
 
-# === Tool 1: Copy & Replace Project Structure ===
-def copy_and_replace_structure(reference_path: str, old_name: str, new_name: str) -> str:
-    ref_path = Path(reference_path)
-    if not ref_path.exists():
-        raise FileNotFoundError(f"Reference project not found: {reference_path}")
-
-    dest_path = Path(OUTPUT_BASE) / new_name
-    if dest_path.exists():
-        shutil.rmtree(dest_path)
-    dest_path.mkdir(parents=True, exist_ok=True)
-
-    for root, dirs, files in os.walk(ref_path):
-        rel_path = Path(root).relative_to(ref_path)
-
-        # Replace old name in folder path (for packages and directories)
-        rel_path_parts = [part.replace(old_name, new_name) for part in rel_path.parts]
-        target_dir = dest_path.joinpath(*rel_path_parts)
-        target_dir.mkdir(parents=True, exist_ok=True)
-
-        for file in files:
-            src_file = Path(root) / file
-
-            # Replace old name in file name
-            new_file_name = file.replace(old_name, new_name)
-            target_file = target_dir / new_file_name
-
-            # Copy and replace inside text-based files
-            if file.endswith((".java", ".xml", ".yml", ".properties", ".gradle", ".md")) or file == "pom.xml":
-                try:
-                    content = src_file.read_text(encoding="utf-8")
-
-                    # Replace all occurrences of old name with new name
-                    content = content.replace(old_name, new_name)
-
-                    # If Java main class: rename class declaration
-                    if file.endswith(".java") and "public static void main" in content:
-                        content = re.sub(
-                            r"class\s+\w+",
-                            f"class {new_name}Application",
-                            content
-                        )
-                        # also update package if it contains old name
-                        content = content.replace(old_name, new_name)
-
-                    target_file.write_text(content, encoding="utf-8")
-                except Exception:
-                    shutil.copy2(src_file, target_file)  # fallback copy
-            else:
-                shutil.copy2(src_file, target_file)
-
-    return f"✅ Project '{new_name}' created at {dest_path}, with all '{old_name}' replaced in folders, files, and main class."
-
-# === Tool 2: Parse User Input for Command ===
-def parse_command(user_input: str) -> dict:
+# === Tool 2: Extract Code Info ===
+def extract_code_info(java_paths: List[Path]) -> List[Dict]:
     """
-    Parse input like:
-    generate a java project with AWS_connector takes this path as reference C:\\Users\\me\\cg-os-salesforce-opportunity
+    Extracts structured metadata from Java source files.
+    Returns JSON with class_name, class_type, methods, uses_repository, entity_fields (if applicable).
     """
-    match_path = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", user_input)
-    match_name = re.search(r"(with name|with|called|with)\s+([\w_]+)", user_input, re.IGNORECASE)
 
-    if not match_path or not match_name:
-        raise ValueError("Invalid input format. Provide both project path and new project name.")
+    prompt = PromptTemplate(
+        input_variables=["source"],
+        template="""
+Return ONLY compact JSON describing this Java class with these keys:
+- class_name
+- class_type (must be exactly: "Controller", "Service", "Repository", "Config", "Entity", "DTO", "Main")
+- package_path
+- methods: list of all public method names
+- uses_repository: true/false
+If class_type == "Entity", also include:
+  "entity_fields": list of {{"name": fieldName, "type": fieldType}}
 
-    reference_path = match_path.group(1).strip()
-    new_project_name = match_name.group(2).strip().replace(" ", "_")
+Rules:
+- Do not explain.
+- Do not invent other class_type values.
+- Always valid JSON.
 
-    # old name = last folder in reference path
-    old_project_name = Path(reference_path).name
+Java Source:
+{source}
+"""
+    )
 
-    return {
-        "reference_path": reference_path,
-        "old_project_name": old_project_name,
-        "new_project_name": new_project_name
+    chain = prompt | llm
+    parsed = []
+
+    for file_path in java_paths:
+        try:
+            source = file_path.read_text(encoding="utf-8")
+            response = chain.invoke({"source": source})
+            data = json.loads(response.content.strip())
+            parsed.append(data)
+        except Exception as e:
+            print(f"[WARN] Failed to parse {file_path}: {e}")
+    return parsed
+
+# === Tool 3: Generate JUnit Tests ===
+def generate_junit_tests(parsed_info: List[Dict]) -> List[Dict]:
+    ALLOWED_TYPES = {"Controller", "Service"}
+
+    entity_map = {
+        item["class_name"]: item.get("entity_fields", [])
+        for item in parsed_info
+        if item.get("class_type") == "Entity"
     }
 
-# === Tool 3: Orchestrator ===
-def process_user_request(user_input: str, history):
-    try:
-        cmd = parse_command(user_input)
-        return copy_and_replace_structure(cmd["reference_path"], cmd["old_project_name"], cmd["new_project_name"])
-    except Exception as e:
-        return f"[ERROR] {str(e)}"
+    prompt = PromptTemplate(
+        input_variables=[
+            "class_name",
+            "class_type",
+            "package_path",
+            "methods",
+            "uses_repository",
+            "entity_map",
+        ],
+        template="""
+Write a complete JUnit 5 test class for:
+
+Class Name: {class_name}
+Type: {class_type}
+Package: {package_path}
+Public Methods:
+{methods}
+uses_repository: {uses_repository}
+
+Available Entities:
+{entity_map}
+
+Rules:
+
+1. Controllers
+   - Use @WebMvcTest, MockMvc, @MockBean, ObjectMapper.
+   - Test all endpoints, mock services, assert JSON with jsonPath.
+   - Check all fields, not just IDs.
+
+2. Services
+   - Use Mockito if repository exists (@ExtendWith, @Mock, @InjectMocks).
+   - Otherwise instantiate directly.
+   - Populate full entities in @BeforeEach.
+   - Assert with assertThat for all fields.
+
+3. Entity population
+   - Strings → "John Doe"
+   - UUID → UUID.randomUUID().toString()
+   - Lists → Arrays.asList("Java","Spring")
+   - LocalDateTime → "2025-07-25T10:00:00"
+   - int → 123
+   - boolean → true
+
+4. General
+   - One @Test per public method.
+   - Valid compilable Java code only.
+"""
+    )
+
+    chain = prompt | llm
+    test_classes = []
+
+    for item in parsed_info:
+        if item["class_type"] not in ALLOWED_TYPES:
+            print(f"[SKIP] {item['class_name']} ({item['class_type']})")
+            continue
+        try:
+            result = chain.invoke({
+                "class_name": item["class_name"],
+                "class_type": item["class_type"],
+                "package_path": item["package_path"],
+                "methods": "\n".join(item["methods"]),
+                "uses_repository": str(item.get("uses_repository", False)).lower(),
+                "entity_map": json.dumps(entity_map, indent=2),
+            })
+            test_classes.append({
+                "file_name": f"{item['class_name']}Test.java",
+                "package_path": item["package_path"],
+                "code": result.content.strip(),
+            })
+        except Exception as e:
+            print(f"[WARN] Could not generate test for {item['class_name']}: {e}")
+    return test_classes
+
+# === Tool 4: Save & Print JUnit Tests ===
+def save_and_print_tests(junit_tests: List[Dict]) -> str:
+    output = ""
+    for test in junit_tests:
+        folder = Path("generated_tests") / test["package_path"].replace(".", "/")
+        folder.mkdir(parents=True, exist_ok=True)
+        file_path = folder / test["file_name"]
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(test["code"])
+        output += f"\n===== {test['file_name']} =====\n{test['code']}\n===== End of {test['file_name']} =====\n"
+    return output.strip()
 
 # === Register Tools ===
 tools = [
-    Tool(name="CopyAndReplaceProject", func=copy_and_replace_structure, description="Copies a Java project, replaces names in folders, files, and main class."),
+    Tool(name="ListJavaFiles", func=list_java_files, description="Lists all Java files."),
+    Tool(name="ExtractCodeInfo", func=extract_code_info, description="Parses each Java file."),
+    Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Generates JUnit 5 test classes."),
+    Tool(name="SaveJUnitTests", func=save_and_print_tests, description="Saves tests to disk and prints them."),
 ]
+
+# === Orchestration ===
+def process_java_project(user_input: str, history):
+    aggregated_token_usage = {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_cost": 0.0}
+
+    try:
+        path_match = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", user_input)
+        if not path_match:
+            return "[ERROR] Please provide a valid Windows file path."
+
+        project_path = path_match.group(1).strip()
+
+        with get_openai_callback() as cb:
+            java_files = tools[0].func(project_path)
+            if not java_files:
+                return "[INFO] No Java files found."
+
+            parsed_info = tools[1].func(java_files)
+            if not parsed_info:
+                return "[INFO] No parsable Java classes found."
+
+            junit_tests = tools[2].func(parsed_info)
+            if not junit_tests:
+                return "[INFO] No JUnit tests could be generated for allowed types."
+
+            output_code = tools[3].func(junit_tests)
+
+            aggregated_token_usage["total_tokens"] += cb.total_tokens
+            aggregated_token_usage["prompt_tokens"] += cb.prompt_tokens
+            aggregated_token_usage["completion_tokens"] += cb.completion_tokens
+            aggregated_token_usage["total_cost"] += cb.total_cost
+
+        usage_summary = "\n\n--- Token Usage ---"
+        usage_summary += f"\nTotal Tokens: {aggregated_token_usage['total_tokens']}"
+        usage_summary += f"\nPrompt Tokens: {aggregated_token_usage['prompt_tokens']}"
+        usage_summary += f"\nCompletion Tokens: {aggregated_token_usage['completion_tokens']}"
+        usage_summary += f"\nTotal Cost (USD): ${format(aggregated_token_usage['total_cost'], '.6f')}"
+
+        return output_code + usage_summary
+
+    except Exception as e:
+        return f"[ERROR] {str(e)}"
 
 # === Gradio UI ===
 chatbot_ui = gr.ChatInterface(
-    fn=process_user_request,
-    title="Java Project Generator",
-    description="Generate a new Java project by replacing names in a reference project (folders, files, packages, main class).",
+    fn=process_java_project,
+    title="JUnit Test Generator",
+    description="Provide a path to generate JUnit tests.",
     theme="default",
 )
 
 if __name__ == "__main__":
     chatbot_ui.launch()
+
+
+
+
+generate a java project with aws_connector takes this path as a reference C:\Users\rdamera\Downloads\cg-osif-salesforce-opportunity
+
+
+C:\Users\rdamera\Downloads\ddddd
