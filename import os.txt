@@ -26,7 +26,35 @@ def get_openai_client():
 llm = get_openai_client()
 
 # ====================================================
-# === Part 1: YAML Model Class Generator (from code1)
+# === Utility: Token Tracking Wrapper
+# ====================================================
+def run_with_token_tracking(func, *args, **kwargs):
+    """Run LLM-related function and capture token usage."""
+    aggregated_token_usage = {
+        "total_tokens": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_cost": 0.0,
+    }
+
+    with get_openai_callback() as cb:
+        result = func(*args, **kwargs)
+
+        aggregated_token_usage["total_tokens"] += cb.total_tokens
+        aggregated_token_usage["prompt_tokens"] += cb.prompt_tokens
+        aggregated_token_usage["completion_tokens"] += cb.completion_tokens
+        aggregated_token_usage["total_cost"] += cb.total_cost
+
+    usage_summary = "\n\n--- Token Usage ---"
+    usage_summary += f"\nTotal Tokens: {aggregated_token_usage['total_tokens']}"
+    usage_summary += f"\nPrompt Tokens: {aggregated_token_usage['prompt_tokens']}"
+    usage_summary += f"\nCompletion Tokens: {aggregated_token_usage['completion_tokens']}"
+    usage_summary += f"\nTotal Cost (USD): ${format(aggregated_token_usage['total_cost'], '.6f')}"
+
+    return result, usage_summary
+
+# ====================================================
+# === Part 1: YAML Model Class Generator
 # ====================================================
 def generate_model_from_yaml(prompt: str, yaml_file) -> str:
     try:
@@ -46,14 +74,18 @@ def generate_model_from_yaml(prompt: str, yaml_file) -> str:
             f"\n\nPrompt: {prompt}\n\nHere is the YAML:\n\n{yaml_text}"
         )
 
-        response = llm.invoke(full_prompt)
-        return response.content.strip()
+        def _call_llm():
+            return llm.invoke(full_prompt)
+
+        response, usage = run_with_token_tracking(_call_llm)
+
+        return response.content.strip() + usage
 
     except Exception as e:
         return f"[ERROR] Failed to process YAML: {str(e)}"
 
 # ====================================================
-# === Part 2: JUnit Generator (from code2)
+# === Part 2: JUnit Generator
 # ====================================================
 # Tool 1: List Java Files
 def list_java_files(path: str) -> List[Path]:
@@ -203,8 +235,6 @@ tools = [
 ]
 
 def process_java_project(user_input: str) -> str:
-    aggregated_token_usage = {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_cost": 0.0}
-
     try:
         path_match = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", user_input)
         if not path_match:
@@ -212,7 +242,7 @@ def process_java_project(user_input: str) -> str:
 
         project_path = path_match.group(1).strip()
 
-        with get_openai_callback() as cb:
+        def _process():
             java_files = tools[0].func(project_path)
             if not java_files:
                 return "[INFO] No Java files found."
@@ -225,19 +255,9 @@ def process_java_project(user_input: str) -> str:
             if not junit_tests:
                 return "[INFO] No JUnit tests could be generated for allowed types."
 
-            output_code = tools[3].func(junit_tests)
+            return tools[3].func(junit_tests)
 
-            aggregated_token_usage["total_tokens"] += cb.total_tokens
-            aggregated_token_usage["prompt_tokens"] += cb.prompt_tokens
-            aggregated_token_usage["completion_tokens"] += cb.completion_tokens
-            aggregated_token_usage["total_cost"] += cb.total_cost
-
-        usage_summary = "\n\n--- Token Usage ---"
-        usage_summary += f"\nTotal Tokens: {aggregated_token_usage['total_tokens']}"
-        usage_summary += f"\nPrompt Tokens: {aggregated_token_usage['prompt_tokens']}"
-        usage_summary += f"\nCompletion Tokens: {aggregated_token_usage['completion_tokens']}"
-        usage_summary += f"\nTotal Cost (USD): ${format(aggregated_token_usage['total_cost'], '.6f')}"
-
+        output_code, usage_summary = run_with_token_tracking(_process)
         return output_code + usage_summary
 
     except Exception as e:
