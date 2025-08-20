@@ -1,82 +1,5 @@
-code 1
-
 import os
 import yaml
-import json
-import re
-from pathlib import Path
-import gradio as gr
-from langchain.prompts import PromptTemplate
-from langchain_openai import AzureChatOpenAI
- 
-# === Azure OpenAI Client ===
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        deployment_name="gpt-4_complex_conversions",
-        openai_api_key="",
-        openai_api_version="2024-08-01-preview",
-        openai_api_type="azure",
-        temperature=0.3,
-        max_tokens=2000,
-    )
- 
-llm = get_openai_client()
- 
-# === YAML Model Class Generator ===
-def generate_model_from_yaml(prompt: str, yaml_file) -> str:
-    try:
-        with open(yaml_file.name, "r", encoding="utf-8") as f:
-            yaml_text = f.read()
-        yaml.safe_load(yaml_text)
- 
-        full_prompt = (
-            "You are a senior Java developer. A developer will provide you with a YAML configuration file. "
-            "Your task is to generate Java model classes only for the fields that are explicitly marked or structured with class paths. "
-            "Each class path (e.g., `com.example.config.MyConfig`) should be used as the fully qualified name of the class. "
-            "Use nested classes or separate classes as needed based on the YAML structure. "
-            "Use lombok annotations to generate getters, setters and constructors. "
-            "Do not include explanations or comments. Output only the Java class code. "
-            "Whenever a class is end use this line ----------- and give a line break."
-            "Give the conclusion like which classes are created classes. "
-            f"\n\nPrompt: {prompt}\n\nHere is the YAML:\n\n{yaml_text}"
-        )
- 
-        response = llm.invoke(full_prompt)
-        return response.content.strip()
- 
-    except Exception as e:
-        return f"[ERROR] Failed to process YAML: {str(e)}"
- 
-# === Unified Chatbot Function ===
-def unified_chatbot(prompt, history, yaml_file=None):
-    if yaml_file is not None:
-        return generate_model_from_yaml(prompt, yaml_file)
-    else:
-        return "[ERROR] Please upload a YAML file and provide a valid prompt."
- 
-# === Gradio Chat Interface ===
-chatbot_ui = gr.ChatInterface(
-    fn=unified_chatbot,
-    title="OSIF Model Class Generator",
-    description=(
-        "Upload a YAML file and enter a prompt like:\n"
-        "`generate model class from this config`"
-    ),
-    additional_inputs=[gr.File(label="Upload YAML File", file_types=[".yaml", ".yml"])],
-    theme="default"
-)
- 
-# === Launch App ===
-if __name__ == "__main__":
-    print("Starting OSIF Model Class Generator...")
-    chatbot_ui.launch()
- 
-
-
-code2
-
-import os
 import json
 import re
 from pathlib import Path
@@ -93,7 +16,7 @@ def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="gpt-4_complex_conversions",
-        openai_api_key="" ,
+        openai_api_key="",
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
         temperature=0.3,
@@ -102,20 +25,45 @@ def get_openai_client():
 
 llm = get_openai_client()
 
-# === Tool 1: List Java Files ===
+# ====================================================
+# === Part 1: YAML Model Class Generator (from code1)
+# ====================================================
+def generate_model_from_yaml(prompt: str, yaml_file) -> str:
+    try:
+        with open(yaml_file.name, "r", encoding="utf-8") as f:
+            yaml_text = f.read()
+        yaml.safe_load(yaml_text)
+
+        full_prompt = (
+            "You are a senior Java developer. A developer will provide you with a YAML configuration file. "
+            "Your task is to generate Java model classes only for the fields that are explicitly marked or structured with class paths. "
+            "Each class path (e.g., `com.example.config.MyConfig`) should be used as the fully qualified name of the class. "
+            "Use nested classes or separate classes as needed based on the YAML structure. "
+            "Use lombok annotations to generate getters, setters and constructors. "
+            "Do not include explanations or comments. Output only the Java class code. "
+            "Whenever a class is end use this line ----------- and give a line break."
+            "Give the conclusion like which classes are created classes. "
+            f"\n\nPrompt: {prompt}\n\nHere is the YAML:\n\n{yaml_text}"
+        )
+
+        response = llm.invoke(full_prompt)
+        return response.content.strip()
+
+    except Exception as e:
+        return f"[ERROR] Failed to process YAML: {str(e)}"
+
+# ====================================================
+# === Part 2: JUnit Generator (from code2)
+# ====================================================
+# Tool 1: List Java Files
 def list_java_files(path: str) -> List[Path]:
     base_path = Path(path)
     if not base_path.exists():
         raise FileNotFoundError(f"Path not found: {path}")
     return list(base_path.rglob("*.java"))
 
-# === Tool 2: Extract Code Info ===
+# Tool 2: Extract Code Info
 def extract_code_info(java_paths: List[Path]) -> List[Dict]:
-    """
-    Extracts structured metadata from Java source files.
-    Returns JSON with class_name, class_type, methods, uses_repository, entity_fields (if applicable).
-    """
-
     prompt = PromptTemplate(
         input_variables=["source"],
         template="""
@@ -151,7 +99,7 @@ Java Source:
             print(f"[WARN] Failed to parse {file_path}: {e}")
     return parsed
 
-# === Tool 3: Generate JUnit Tests ===
+# Tool 3: Generate JUnit Tests
 def generate_junit_tests(parsed_info: List[Dict]) -> List[Dict]:
     ALLOWED_TYPES = {"Controller", "Service"}
 
@@ -235,7 +183,7 @@ Rules:
             print(f"[WARN] Could not generate test for {item['class_name']}: {e}")
     return test_classes
 
-# === Tool 4: Save & Print JUnit Tests ===
+# Tool 4: Save & Print JUnit Tests
 def save_and_print_tests(junit_tests: List[Dict]) -> str:
     output = ""
     for test in junit_tests:
@@ -247,7 +195,6 @@ def save_and_print_tests(junit_tests: List[Dict]) -> str:
         output += f"\n===== {test['file_name']} =====\n{test['code']}\n===== End of {test['file_name']} =====\n"
     return output.strip()
 
-# === Register Tools ===
 tools = [
     Tool(name="ListJavaFiles", func=list_java_files, description="Lists all Java files."),
     Tool(name="ExtractCodeInfo", func=extract_code_info, description="Parses each Java file."),
@@ -255,8 +202,7 @@ tools = [
     Tool(name="SaveJUnitTests", func=save_and_print_tests, description="Saves tests to disk and prints them."),
 ]
 
-# === Orchestration ===
-def process_java_project(user_input: str, history):
+def process_java_project(user_input: str) -> str:
     aggregated_token_usage = {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_cost": 0.0}
 
     try:
@@ -297,13 +243,32 @@ def process_java_project(user_input: str, history):
     except Exception as e:
         return f"[ERROR] {str(e)}"
 
-# === Gradio UI ===
+# ====================================================
+# === Unified Chatbot Function (Decision Layer)
+# ====================================================
+def unified_chatbot(prompt, history, yaml_file=None):
+    if yaml_file is not None:
+        return generate_model_from_yaml(prompt, yaml_file)
+    elif re.search(r"([A-Za-z]:[\\/\w\-. ]+)", prompt):
+        return process_java_project(prompt)
+    else:
+        return "[ERROR] Please upload a YAML file with prompt for models OR provide a valid file path for JUnit generation."
+
+# ====================================================
+# === Gradio Chat Interface
+# ====================================================
 chatbot_ui = gr.ChatInterface(
-    fn=process_java_project,
-    title="JUnit Test Generator",
-    description="Provide a path to generate JUnit tests.",
-    theme="default",
+    fn=unified_chatbot,
+    title="OSIF Model & JUnit Generator",
+    description=(
+        "Options:\n"
+        "1. Upload a YAML file and enter a prompt like: `generate model class from this config`\n"
+        "2. Provide a Windows file path like: `C:\\Users\\project\\src` to generate JUnit tests."
+    ),
+    additional_inputs=[gr.File(label="Upload YAML File", file_types=[".yaml", ".yml"])],
+    theme="default"
 )
 
 if __name__ == "__main__":
+    print("Starting Unified Generator...")
     chatbot_ui.launch()
