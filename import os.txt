@@ -38,39 +38,43 @@ def copy_and_replace_structure(reference_path: str, old_name: str, new_name: str
     for root, dirs, files in os.walk(ref_path):
         rel_path = Path(root).relative_to(ref_path)
 
-        # Replace old name in folder names
+        # Replace old name in folder path (for packages and directories)
         rel_path_parts = [part.replace(old_name, new_name) for part in rel_path.parts]
         target_dir = dest_path.joinpath(*rel_path_parts)
         target_dir.mkdir(parents=True, exist_ok=True)
 
         for file in files:
             src_file = Path(root) / file
-            # Replace old name in file names
+
+            # Replace old name in file name
             new_file_name = file.replace(old_name, new_name)
             target_file = target_dir / new_file_name
 
-            # Copy and replace inside text files
+            # Copy and replace inside text-based files
             if file.endswith((".java", ".xml", ".yml", ".properties", ".gradle", ".md")) or file == "pom.xml":
                 try:
                     content = src_file.read_text(encoding="utf-8")
+
+                    # Replace all occurrences of old name with new name
                     content = content.replace(old_name, new_name)
 
-                    # Special handling: main class rename
+                    # If Java main class: rename class declaration
                     if file.endswith(".java") and "public static void main" in content:
-                        # Find class declaration and rename
                         content = re.sub(
                             r"class\s+\w+",
                             f"class {new_name}Application",
                             content
                         )
+                        # also update package if it contains old name
+                        content = content.replace(old_name, new_name)
 
                     target_file.write_text(content, encoding="utf-8")
                 except Exception:
-                    shutil.copy2(src_file, target_file)  # fallback
+                    shutil.copy2(src_file, target_file)  # fallback copy
             else:
                 shutil.copy2(src_file, target_file)
 
-    return f"✅ Project '{new_name}' created at {dest_path}, with all '{old_name}' replaced."
+    return f"✅ Project '{new_name}' created at {dest_path}, with all '{old_name}' replaced in folders, files, and main class."
 
 # === Tool 2: Parse User Input for Command ===
 def parse_command(user_input: str) -> dict:
@@ -79,7 +83,7 @@ def parse_command(user_input: str) -> dict:
     generate a java project with AWS_connector takes this path as reference C:\\Users\\me\\cg-os-salesforce-opportunity
     """
     match_path = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", user_input)
-    match_name = re.search(r"(with name|with|called)\s+([\w_]+)", user_input, re.IGNORECASE)
+    match_name = re.search(r"(with name|with|called|with)\s+([\w_]+)", user_input, re.IGNORECASE)
 
     if not match_path or not match_name:
         raise ValueError("Invalid input format. Provide both project path and new project name.")
@@ -106,14 +110,14 @@ def process_user_request(user_input: str, history):
 
 # === Register Tools ===
 tools = [
-    Tool(name="CopyAndReplaceProject", func=copy_and_replace_structure, description="Copies a Java project, replaces names with user-provided name."),
+    Tool(name="CopyAndReplaceProject", func=copy_and_replace_structure, description="Copies a Java project, replaces names in folders, files, and main class."),
 ]
 
 # === Gradio UI ===
 chatbot_ui = gr.ChatInterface(
     fn=process_user_request,
     title="Java Project Generator",
-    description="Generate a new Java project by replacing names in a reference project.",
+    description="Generate a new Java project by replacing names in a reference project (folders, files, packages, main class).",
     theme="default",
 )
 
