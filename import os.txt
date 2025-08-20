@@ -1,3 +1,7 @@
+what is the misatake here
+
+
+
 import os
 import json
 import re
@@ -29,7 +33,7 @@ llm = get_openai_client()
 def extract_project_details(user_input: str) -> Dict:
     """
     Extracts the new project name and reference project path from user input.
-    Example: "generate a java project with aws_connector takes this path as a reference C:\\Users\\me\\Downloads\\cg-osif-salesforce-opportunity"
+    Example: "generate a java project with aws_connector takes this path as a reference C:\Users\rdamera\Downloads\ddddd"
     """
     name_match = re.search(r"project with ([\w\-]+)", user_input, re.IGNORECASE)
     path_match = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", user_input)
