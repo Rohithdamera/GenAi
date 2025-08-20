@@ -9,6 +9,8 @@ from langchain.tools import Tool
 
 # === Azure OpenAI Client ===
 def get_openai_client():
+   
+    
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="gpt-4_complex_conversions",
@@ -27,10 +29,9 @@ def copy_project_structure(reference_path: str, new_project_name: str, output_ba
     if not ref_path.exists():
         raise FileNotFoundError(f"Reference project not found: {reference_path}")
 
-    # Destination path
     dest_path = Path(output_base) / new_project_name
     if dest_path.exists():
-        shutil.rmtree(dest_path)  # clean old project
+        shutil.rmtree(dest_path)
     dest_path.mkdir(parents=True, exist_ok=True)
 
     for root, dirs, files in os.walk(ref_path):
@@ -39,27 +40,25 @@ def copy_project_structure(reference_path: str, new_project_name: str, output_ba
         target_dir.mkdir(parents=True, exist_ok=True)
 
         for file in files:
-            if file == "pom.xml":  # Copy pom.xml as-is
+            if file == "pom.xml":
                 shutil.copy2(Path(root) / file, target_dir / file)
-            else:
-                # Create empty files with same extension
-                if file.endswith(".java") or file.endswith(".xml") or file.endswith(".yml") or file.endswith(".properties"):
-                    (target_dir / file).touch()
+            elif file.endswith((".java", ".xml", ".yml", ".properties")):
+                (target_dir / file).touch()
 
-    return f"✅ Project '{new_project_name}' created at {dest_path}"
+    return f"Project '{new_project_name}' created at {dest_path}"
 
 # === Tool 2: Parse User Input for Command ===
 def parse_command(user_input: str) -> dict:
     """
     Parse user input like:
-    'generate a java project take this project (C:/Users/me/ref_project) as a reference, 
+    'generate a java project take this project (C:\\Users\\rdamera\\Downloads\\ddddd) as a reference, 
     with name AWS connector'
     """
     match_path = re.search(r"\(([A-Za-z]:[\\/\w\-. ]+)\)", user_input)
     match_name = re.search(r"with name ([\w\s]+)", user_input, re.IGNORECASE)
 
     if not match_path or not match_name:
-        raise ValueError("❌ Invalid input format. Provide (project_path) and a project name.")
+        raise ValueError("Invalid input format. Provide (project_path) and a project name.")
 
     return {
         "reference_path": match_path.group(1).strip(),
@@ -74,7 +73,7 @@ def process_user_request(user_input: str, history):
     except Exception as e:
         return f"[ERROR] {str(e)}"
 
-# === Register Tools (extensible for future features) ===
+# === Register Tools ===
 tools = [
     Tool(name="CopyJavaProject", func=copy_project_structure, description="Copies a Java project structure with new name"),
 ]
@@ -89,3 +88,16 @@ chatbot_ui = gr.ChatInterface(
 
 if __name__ == "__main__":
     chatbot_ui.launch()
+
+
+
+error
+
+
+generate a java project with aws_connector takes this path as a reference C:\Users\rdamera\Downloads\cg-osif-salesforce-opportunity
+
+[ERROR] Invalid input format. Provide (project_path) and a project name.
+
+C:\Users\rdamera\Downloads\cg-osif-salesforce-opportunity
+
+[ERROR] Invalid input format. Provide (project_path) and a project name.
