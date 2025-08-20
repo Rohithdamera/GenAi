@@ -21,73 +21,99 @@ def get_openai_client():
 
 llm = get_openai_client()
 
-# === Default Output Folder (hardcoded) ===
+# === Default Output Folder ===
 OUTPUT_BASE = r"C:\Users\rdamera\Downloads\dddd"
 
-# === Tool 1: Copy Java Project Structure ===
-def copy_project_structure(reference_path: str, new_project_name: str) -> str:
+# === Tool 1: Copy & Replace Project Structure ===
+def copy_and_replace_structure(reference_path: str, old_name: str, new_name: str) -> str:
     ref_path = Path(reference_path)
     if not ref_path.exists():
         raise FileNotFoundError(f"Reference project not found: {reference_path}")
 
-    dest_path = Path(OUTPUT_BASE) / new_project_name
+    dest_path = Path(OUTPUT_BASE) / new_name
     if dest_path.exists():
-        shutil.rmtree(dest_path)  # clean up old version
+        shutil.rmtree(dest_path)
     dest_path.mkdir(parents=True, exist_ok=True)
 
     for root, dirs, files in os.walk(ref_path):
         rel_path = Path(root).relative_to(ref_path)
-        target_dir = dest_path / rel_path
+
+        # Replace old name in folder names
+        rel_path_parts = [part.replace(old_name, new_name) for part in rel_path.parts]
+        target_dir = dest_path.joinpath(*rel_path_parts)
         target_dir.mkdir(parents=True, exist_ok=True)
 
         for file in files:
-            if file == "pom.xml":
-                shutil.copy2(Path(root) / file, target_dir / file)
-            elif file.endswith((".java", ".xml", ".yml", ".properties", ".gradle", ".md")):
-                # create empty placeholder file with same name
-                (target_dir / file).touch()
+            src_file = Path(root) / file
+            # Replace old name in file names
+            new_file_name = file.replace(old_name, new_name)
+            target_file = target_dir / new_file_name
 
-    return f"✅ Project '{new_project_name}' created at {dest_path}"
+            # Copy and replace inside text files
+            if file.endswith((".java", ".xml", ".yml", ".properties", ".gradle", ".md")) or file == "pom.xml":
+                try:
+                    content = src_file.read_text(encoding="utf-8")
+                    content = content.replace(old_name, new_name)
+
+                    # Special handling: main class rename
+                    if file.endswith(".java") and "public static void main" in content:
+                        # Find class declaration and rename
+                        content = re.sub(
+                            r"class\s+\w+",
+                            f"class {new_name}Application",
+                            content
+                        )
+
+                    target_file.write_text(content, encoding="utf-8")
+                except Exception:
+                    shutil.copy2(src_file, target_file)  # fallback
+            else:
+                shutil.copy2(src_file, target_file)
+
+    return f"✅ Project '{new_name}' created at {dest_path}, with all '{old_name}' replaced."
 
 # === Tool 2: Parse User Input for Command ===
 def parse_command(user_input: str) -> dict:
     """
-    Flexible parser for user input.
-    Examples it will handle:
-      - generate a java project with aws_connector takes this path as a reference C:\\Users\\me\\project
-      - generate a java project take this project (C:\\Users\\me\\project) as a reference, with name SalesforceConnector
+    Parse input like:
+    generate a java project with AWS_connector takes this path as reference C:\\Users\\me\\cg-os-salesforce-opportunity
     """
-    # capture Windows path
     match_path = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", user_input)
-    # capture project name
     match_name = re.search(r"(with name|with|called)\s+([\w_]+)", user_input, re.IGNORECASE)
 
     if not match_path or not match_name:
-        raise ValueError("Invalid input format. Please provide a valid project path and new project name.")
+        raise ValueError("Invalid input format. Provide both project path and new project name.")
+
+    reference_path = match_path.group(1).strip()
+    new_project_name = match_name.group(2).strip().replace(" ", "_")
+
+    # old name = last folder in reference path
+    old_project_name = Path(reference_path).name
 
     return {
-        "reference_path": match_path.group(1).strip(),
-        "new_project_name": match_name.group(2).strip().replace(" ", "_")
+        "reference_path": reference_path,
+        "old_project_name": old_project_name,
+        "new_project_name": new_project_name
     }
 
 # === Tool 3: Orchestrator ===
 def process_user_request(user_input: str, history):
     try:
         cmd = parse_command(user_input)
-        return copy_project_structure(cmd["reference_path"], cmd["new_project_name"])
+        return copy_and_replace_structure(cmd["reference_path"], cmd["old_project_name"], cmd["new_project_name"])
     except Exception as e:
         return f"[ERROR] {str(e)}"
 
 # === Register Tools ===
 tools = [
-    Tool(name="CopyJavaProject", func=copy_project_structure, description="Copies a Java project structure with new name"),
+    Tool(name="CopyAndReplaceProject", func=copy_and_replace_structure, description="Copies a Java project, replaces names with user-provided name."),
 ]
 
 # === Gradio UI ===
 chatbot_ui = gr.ChatInterface(
     fn=process_user_request,
     title="Java Project Generator",
-    description="Ask me to generate a new Java project based on a reference project structure.",
+    description="Generate a new Java project by replacing names in a reference project.",
     theme="default",
 )
 
