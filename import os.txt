@@ -3,7 +3,6 @@ import shutil
 from pathlib import Path
 import gradio as gr
 import json
-import re
 
 from langchain.prompts import PromptTemplate
 from langchain_openai import AzureChatOpenAI
@@ -40,8 +39,8 @@ User request:
     response = (prompt | llm).invoke({"user_input": user_input})
     return json.loads(response.content.strip())
 
-# === Step 2: Let AI decide renaming map for folders/files ===
-def get_rename_map(reference_path: str, new_project_name: str) -> dict:
+# === Step 2: Analyze structure & decide what to regenerate ===
+def analyze_structure(reference_path: str, new_project_name: str) -> dict:
     structure = []
     for root, dirs, files in os.walk(reference_path):
         rel_root = os.path.relpath(root, reference_path)
@@ -52,40 +51,49 @@ def get_rename_map(reference_path: str, new_project_name: str) -> dict:
     prompt = PromptTemplate(
         input_variables=["structure", "new_name"],
         template="""
-You are refactoring a Java project.
-
-The current folder structure is:
-{structure}
+You are generating a new Java project based on a reference structure.
 
 Rules:
-- Detect the old project/folder/class/package naming.
-- Suggest replacements so the project is renamed to {new_name}.
-- Example: "cg-osif-salesforce-opportunity" → "AWS_Connector", "salesforce" → "AWS".
-- Return ONLY valid JSON with key-value pairs where key=old name, value=new name.
+- Project must be renamed to {new_name}.
+- Keep folder/package structure, but rename references.
+- In "main" package: generate only ONE Application class (with main method).
+- In "service", "controller", "client", "config" etc.: generate only EMPTY skeleton classes (no business logic).
+- In "test": regenerate test skeletons with updated references.
+- Do not carry over old reference logic, only generate clean structure.
+- Return ONLY valid JSON with:
+  {
+    "folders_to_keep": [list of folders],
+    "files_to_generate": {
+        "relative/path/FileName.java": "Type of file (Application|Skeleton|Test)"
+    }
+  }
 """
     )
     response = (prompt | llm).invoke({"structure": json.dumps(structure), "new_name": new_project_name})
     return json.loads(response.content.strip())
 
-# === Step 3: AI rewrites code files ===
-def rewrite_file_with_ai(source: str, new_project_name: str) -> str:
+# === Step 3: AI generates file content ===
+def generate_file_content(file_type: str, file_path: str, new_project_name: str) -> str:
     prompt = PromptTemplate(
-        input_variables=["source", "new_name"],
+        input_variables=["file_type", "file_path", "new_name"],
         template="""
-Refactor the Java file.
+Generate a Java file.
 
-- Replace all old project/folder/class/package names with {new_name}.
-- If contains main() → class name = {new_name}.
-- Preserve compilable code.
+Type: {file_type}
+Path: {file_path}
+Project name: {new_name}
 
-Source:
-{source}
+Rules:
+- For Application: generate a proper Spring Boot (or plain) main class with main().
+- For Skeleton: generate an empty public class/interface with only package + class declaration.
+- For Test: generate a minimal JUnit test skeleton with correct package + class name.
+- Do not include old reference logic, only regenerate clean compilable code.
 """
     )
-    response = (prompt | llm).invoke({"source": source, "new_name": new_project_name})
+    response = (prompt | llm).invoke({"file_type": file_type, "file_path": file_path, "new_name": new_project_name})
     return response.content.strip()
 
-# === Step 4: Apply renames + rewrite project ===
+# === Step 4: Rewrite Project ===
 def rewrite_project(reference_path: str, new_project_name: str) -> str:
     ref_path = Path(reference_path)
     if not ref_path.exists():
@@ -95,36 +103,31 @@ def rewrite_project(reference_path: str, new_project_name: str) -> str:
     target_path = target_base / new_project_name
     if target_path.exists():
         shutil.rmtree(target_path)
-    shutil.copytree(ref_path, target_path)
+    target_path.mkdir(parents=True)
 
-    # Ask AI for rename mapping
-    rename_map = get_rename_map(reference_path, new_project_name)
+    # Analyze structure & decide what to generate
+    plan = analyze_structure(reference_path, new_project_name)
 
-    # Apply folder/file renames
-    for old, new in sorted(rename_map.items(), key=lambda x: -len(x[0])):
-        for path in target_path.rglob("*"):
-            if old in path.name:
-                new_path = path.with_name(path.name.replace(old, new))
-                path.rename(new_path)
+    # Recreate folder structure
+    for folder in plan.get("folders_to_keep", []):
+        (target_path / folder).mkdir(parents=True, exist_ok=True)
 
-    # Rewrite file contents
-    for file_path in target_path.rglob("*.*"):
-        if file_path.suffix in [".java", ".xml", ".properties", ".yml", ".gradle", ".md"]:
-            source = file_path.read_text(encoding="utf-8", errors="ignore")
-            updated = rewrite_file_with_ai(source, new_project_name)
-            file_path.write_text(updated, encoding="utf-8")
+    # Generate files
+    for rel_path, file_type in plan.get("files_to_generate", {}).items():
+        abs_path = target_path / rel_path
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        content = generate_file_content(file_type, rel_path, new_project_name)
+        abs_path.write_text(content, encoding="utf-8")
 
     return str(target_path)
 
 # === Main Orchestration ===
 def process_java_project(user_input: str, history):
     try:
-        # Step 1: Extract intent
         intent = extract_user_intent(user_input)
         reference_path = intent["reference_path"]
         new_project_name = intent["new_project_name"]
 
-        # Step 2: Rewrite project
         new_path = rewrite_project(reference_path, new_project_name)
 
         return f"[SUCCESS] Project '{new_project_name}' created at {new_path}"
@@ -136,7 +139,7 @@ def process_java_project(user_input: str, history):
 chatbot_ui = gr.ChatInterface(
     fn=process_java_project,
     title="AI Java Project Generator",
-    description="Provide a reference project path and a new project name. AI will regenerate the project with updated names in folders, classes, and references.",
+    description="Provide a reference project path and a new project name. AI will regenerate the project structure, Application class, and skeletons without copying reference logic.",
     theme="default",
 )
 
