@@ -39,7 +39,7 @@ def process_java_project(user_input: str, history):
         if not ref_path.exists():
             return f"[ERROR] Reference project not found: {reference_path}"
 
-        target_base = Path("C:/users/rdamera/javaproj")
+        target_base = Path("C:/Users/rdamera/Downloads/ddddd")
         target_path = target_base / new_project_name
         if target_path.exists():
             shutil.rmtree(target_path)
@@ -84,3 +84,12 @@ chatbot_ui = gr.ChatInterface(
 
 if __name__ == "__main__":
     chatbot_ui.launch()
+
+
+
+error 
+
+
+generate a aws_connector java project using this reference project path C:\Users\rdamera\Downloads\cg-osif-salesforce-opportunity
+
+[ERROR] bad character range \-/ at position 14
