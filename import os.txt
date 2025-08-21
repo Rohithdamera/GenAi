@@ -1,53 +1,109 @@
-example 
+import os
+import shutil
+from pathlib import Path
+import gradio as gr
+import json
 
+from langchain.prompts import PromptTemplate
+from langchain_openai import AzureChatOpenAI
 
-reference folder:-
+# === Azure OpenAI Client ===
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        deployment_name="gpt-4_complex_conversions",
+        openai_api_key="",
+        openai_api_version="2024-08-01-preview",
+        openai_api_type="azure",
+        temperature=0.4,
+        max_tokens=4000,
+    )
 
+llm = get_openai_client()
 
-cg-osif-salesforce-opportunity/
-│
-├── src/
-│   ├── main 
+# === Step 1: Extract project name + reference path from free user input ===
+def extract_user_intent(user_input: str) -> dict:
+    prompt = PromptTemplate(
+        input_variables=["user_input"],
+        template="""
+From the following user request, extract the information.
 
-          ├──resources
+Return ONLY valid JSON with:
+- new_project_name: (the project name to create, e.g. AWS_Connector, GCP_Connector)
+- reference_path: (the absolute reference path user provided)
 
-           ├──java
+User request:
+{user_input}
+"""
+    )
+    response = (prompt | llm).invoke({"user_input": user_input})
+    return json.loads(response.content.strip())
 
-                ├──integration 
+# === Step 2: Let AI rewrite file content ===
+def rewrite_file_with_ai(source: str, new_project_name: str) -> str:
+    prompt = PromptTemplate(
+        input_variables=["source", "new_name"],
+        template="""
+You are refactoring a Java project.
 
-                   ├──salesforce
+Instructions:
+- Analyze the old source and detect the old project name automatically.
+- Replace every occurrence of the old project/folder/class/package names with the new project name: {new_name}.
+- If this file contains the main method, rename the main class to {new_name}.
+- Preserve the same structure, imports, and valid compilable Java code.
+- Output ONLY the full updated Java source code.
 
-                      ├──  cg-osif-salesforce-opportunity.Application mani method 
+Old Source:
+{source}
+"""
+    )
+    response = (prompt | llm).invoke({"source": source, "new_name": new_project_name})
+    return response.content.strip()
 
-                        ├──service, client, config , controller 
-│   └── test
-│
-├── target
+# === Step 3: AI decides folder + file renaming ===
+def rewrite_project(reference_path: str, new_project_name: str) -> str:
+    ref_path = Path(reference_path)
+    if not ref_path.exists():
+        return f"[ERROR] Reference project not found: {reference_path}"
 
+    target_base = Path("C:/Users/rdamera/javaproj")
+    target_path = target_base / new_project_name
+    if target_path.exists():
+        shutil.rmtree(target_path)
+    shutil.copytree(ref_path, target_path)
 
+    # Iterate through all Java files and rewrite them using AI
+    for file_path in target_path.rglob("*.java"):
+        source = file_path.read_text(encoding="utf-8")
+        updated = rewrite_file_with_ai(source, new_project_name)
+        file_path.write_text(updated, encoding="utf-8")
 
----------------------------------
-question :generate a AWS_Connector java project using this reference project path C:\Users\rdamera\Downloads\cg-osif-salesforce-opportunity
+    # Rename top-level folder if AI requires
+    return str(target_path)
 
-expected folder structure :-
+# === Main Orchestration ===
+def process_java_project(user_input: str, history):
+    try:
+        # Step 1: Extract intent
+        intent = extract_user_intent(user_input)
+        reference_path = intent["reference_path"]
+        new_project_name = intent["new_project_name"]
 
+        # Step 2: Rewrite project with AI
+        new_path = rewrite_project(reference_path, new_project_name)
 
-AWS_Connector/  (replaced)
-│
-├── src/
-│   ├── main 
+        return f"[SUCCESS] Project '{new_project_name}' created at {new_path}"
 
-          ├──resources
+    except Exception as e:
+        return f"[ERROR] {str(e)}"
 
-           ├──java
+# === Gradio UI ===
+chatbot_ui = gr.ChatInterface(
+    fn=process_java_project,
+    title="AI Java Project Generator",
+    description="Provide a reference project path and a new project name in natural language. AI will regenerate the project with the same structure but all names replaced.",
+    theme="default",
+)
 
-                ├──integration 
-
-                   ├──AWS(replaced)
-
-                      ├──  AWS_Connector.Application (main method)  (replaced)
-
-                        ├──service, client, config , controller 
-│   └── test imside need to be replaced were ever the reference folder name with provided name 
-│
-├── target
+if __name__ == "__main__":
+    chatbot_ui.launch()
