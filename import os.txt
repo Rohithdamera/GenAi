@@ -1,107 +1,53 @@
-import os
-import shutil
-from pathlib import Path
-import gradio as gr
-import json
+example 
 
-from langchain.prompts import PromptTemplate
-from langchain_openai import AzureChatOpenAI
 
-# === Azure OpenAI Client ===
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        deployment_name="gpt-4_complex_conversions",
-        openai_api_key="",
-        openai_api_version="2024-08-01-preview",
-        openai_api_type="azure",
-        temperature=0.4,
-        max_tokens=3000,
-    )
+reference folder:-
 
-llm = get_openai_client()
 
-# === Step 1: Extract user intent ===
-def extract_user_intent(user_input: str) -> dict:
-    prompt = PromptTemplate(
-        input_variables=["user_input"],
-        template="""
-You are an assistant that extracts structured instructions.
+cg-osif-salesforce-opportunity/
+│
+├── src/
+│   ├── main 
 
-From the user input, identify:
-- new_project_name (example: AWS_Connector, GCP_Connector)
-- reference_path (the file path provided)
+          ├──resources
 
-Return ONLY valid JSON like:
-{{
-  "new_project_name": "...",
-  "reference_path": "..."
-}}
+           ├──java
 
-User input:
-{user_input}
-"""
-    )
-    response = (prompt | llm).invoke({"user_input": user_input})
-    return json.loads(response.content.strip())
+                ├──integration 
 
-# === Step 2: Rewrite project files with AI ===
-def rewrite_project_files(reference_path: str, new_project_name: str, target_path: Path):
-    for file_path in target_path.rglob("*.java"):
-        source = file_path.read_text(encoding="utf-8")
+                   ├──salesforce
 
-        prompt = PromptTemplate(
-            input_variables=["source", "new_name"],
-            template="""
-You are refactoring a Java project.
+                      ├──  cg-osif-salesforce-opportunity.Application mani method 
 
-Rules:
-- Detect the current project/class/package name automatically.
-- Replace all references with the new project name: {new_name}.
-- If this file contains the main method, rename the main class itself.
-- Keep the same folder/package structure.
-- Do not explain, output only the updated Java code.
+                        ├──service, client, config , controller 
+│   └── test
+│
+├── target
 
-Old Source:
-{source}
-"""
-        )
 
-        response = (prompt | llm).invoke({"source": source, "new_name": new_project_name})
-        file_path.write_text(response.content.strip(), encoding="utf-8")
 
-# === Main Orchestration ===
-def process_java_project(user_input: str, history):
-    try:
-        intent = extract_user_intent(user_input)
+---------------------------------
+question :generate a AWS_Connector java project using this reference project path C:\Users\rdamera\Downloads\cg-osif-salesforce-opportunity
 
-        reference_path = intent["reference_path"]
-        new_project_name = intent["new_project_name"]
+expected folder structure :-
 
-        ref_path = Path(reference_path)
-        if not ref_path.exists():
-            return f"[ERROR] Reference project not found: {reference_path}"
 
-        target_base = Path("C:/Users/rdamera/javaproj")
-        target_path = target_base / new_project_name
-        if target_path.exists():
-            shutil.rmtree(target_path)
-        shutil.copytree(ref_path, target_path)
+AWS_Connector/  (replaced)
+│
+├── src/
+│   ├── main 
 
-        rewrite_project_files(reference_path, new_project_name, target_path)
+          ├──resources
 
-        return f"[SUCCESS] Project '{new_project_name}' created at {target_path}"
+           ├──java
 
-    except Exception as e:
-        return f"[ERROR] {str(e)}"
+                ├──integration 
 
-# === Gradio UI ===
-chatbot_ui = gr.ChatInterface(
-    fn=process_java_project,
-    title="AI Java Project Generator",
-    description="Provide a reference project path and a new project name in plain English. AI will generate a new Java project with the same structure but renamed.",
-    theme="default",
-)
+                   ├──AWS(replaced)
 
-if __name__ == "__main__":
-    chatbot_ui.launch()
+                      ├──  AWS_Connector.Application (main method)  (replaced)
+
+                        ├──service, client, config , controller 
+│   └── test imside need to be replaced were ever the reference folder name with provided name 
+│
+├── target
