@@ -1,3 +1,44 @@
-give me sales force connectors
+# ====================================================
+# === Unified Chatbot Function (Decision Layer)
+# ====================================================
+def unified_chatbot(prompt, history, yaml_file=None):
+    user_input_lower = prompt.lower()
 
-[ERROR] Please mention either 'JUnit' with a project path, 'model' with a YAML file, or ask about connectors (Salesforce, SQS, S3, etc.).
+    # Case 1: JUnit request always takes precedence, regardless of YAML file
+    if "junit" in user_input_lower:
+        path_match = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", prompt)
+        if not path_match:
+            return "[ERROR] Please provide a valid Windows file path for JUnit generation."
+        project_path = path_match.group(1).strip()
+
+        def _process():
+            java_files = junit_agent_tools[0].func(project_path)
+            parsed_info = junit_agent_tools[1].func(java_files)
+            junit_tests = junit_agent_tools[2].func(parsed_info)
+            return junit_agent_tools[3].func(junit_tests)
+
+        output_code, usage_summary = run_with_token_tracking(_process)
+        return output_code + usage_summary
+
+    # Case 2: Model class generation
+    elif "model" in user_input_lower:
+        if yaml_file is None:
+            return "[ERROR] Please upload a YAML file for model class generation."
+        return model_agent.run({"prompt": prompt, "file": yaml_file})
+
+    # Case 3: Application properties (connector snippets)
+    else:
+        normalized = re.sub(r"[\s\-]", "", user_input_lower)  # remove spaces/dashes
+
+        if "salesforce" in normalized or "sfdc" in normalized:
+            return connector_snippets["salesforce"]
+        elif "crossaccountsqs" in normalized or ("sqs" in normalized and "cross" in normalized):
+            return connector_snippets["crossaccountsqs"]
+        elif "sqs" in normalized:
+            return connector_snippets["sqs"]
+        elif "s3" in normalized:
+            return connector_snippets["s3"]
+        elif "commonapi" in normalized or "commonapilibrary" in normalized:
+            return connector_snippets["common-api-library"]
+
+        return "[ERROR] Please mention either 'JUnit' with a project path, 'model' with a YAML file, or ask about connectors (Salesforce, SQS, S3, etc.)."
