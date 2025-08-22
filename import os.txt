@@ -1,295 +1,244 @@
+import os import yaml import json import re from pathlib import Path from typing import List, Dict import gradio as gr
 
-import os
-import yaml
-import json
-import re
-from pathlib import Path
-from typing import List, Dict
-import gradio as gr
+from langchain.prompts import PromptTemplate from langchain_openai import AzureChatOpenAI from langchain.tools import Tool from langchain.callbacks import get_openai_callback from langchain.agents import initialize_agent, AgentType
 
-from langchain.prompts import PromptTemplate
-from langchain_openai import AzureChatOpenAI
-from langchain.tools import Tool
-from langchain.callbacks import get_openai_callback
+=== Azure OpenAI Client ===
 
-# === Azure OpenAI Client ===
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        deployment_name="gpt-4_complex_conversions",
-        openai_api_key="",
-        openai_api_version="2024-08-01-preview",
-        openai_api_type="azure",
-        temperature=0.3,
-        max_tokens=2000,
-    )
+def get_openai_client(): return AzureChatOpenAI( azure_endpoint="https://testopenaiassets.openai.azure.com", deployment_name="gpt-4_complex_conversions", openai_api_key="", openai_api_version="2024-08-01-preview", openai_api_type="azure", temperature=0.3, max_tokens=2000, )
 
 llm = get_openai_client()
 
-# ====================================================
-# === Utility: Token Tracking Wrapper
-# ====================================================
-def run_with_token_tracking(func, *args, **kwargs):
-    """Run LLM-related function and capture token usage."""
-    aggregated_token_usage = {
-        "total_tokens": 0,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_cost": 0.0,
-    }
+====================================================
 
-    with get_openai_callback() as cb:
-        result = func(*args, **kwargs)
+=== Utility: Token Tracking Wrapper
 
-        aggregated_token_usage["total_tokens"] += cb.total_tokens
-        aggregated_token_usage["prompt_tokens"] += cb.prompt_tokens
-        aggregated_token_usage["completion_tokens"] += cb.completion_tokens
-        aggregated_token_usage["total_cost"] += cb.total_cost
+====================================================
 
-    usage_summary = "\n\n--- Token Usage ---"
-    usage_summary += f"\nTotal Tokens: {aggregated_token_usage['total_tokens']}"
-    usage_summary += f"\nPrompt Tokens: {aggregated_token_usage['prompt_tokens']}"
-    usage_summary += f"\nCompletion Tokens: {aggregated_token_usage['completion_tokens']}"
-    usage_summary += f"\nTotal Cost (USD): ${format(aggregated_token_usage['total_cost'], '.6f')}"
+def run_with_token_tracking(func, *args, **kwargs): aggregated_token_usage = { "total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_cost": 0.0, }
 
-    return result, usage_summary
+with get_openai_callback() as cb:
+    result = func(*args, **kwargs)
 
-# ====================================================
-# === Part 1: YAML Model Class Generator
-# ====================================================
-def generate_model_from_yaml(prompt: str, yaml_file) -> str:
-    try:
-        with open(yaml_file.name, "r", encoding="utf-8") as f:
-            yaml_text = f.read()
-        yaml.safe_load(yaml_text)
+    aggregated_token_usage["total_tokens"] += cb.total_tokens
+    aggregated_token_usage["prompt_tokens"] += cb.prompt_tokens
+    aggregated_token_usage["completion_tokens"] += cb.completion_tokens
+    aggregated_token_usage["total_cost"] += cb.total_cost
 
-        full_prompt = (
-            "You are a senior Java developer. A developer will provide you with a YAML configuration file. "
-            "Your task is to generate Java model classes only for the fields that are explicitly marked or structured with class paths. "
-            "Each class path (e.g., `com.example.config.MyConfig`) should be used as the fully qualified name of the class. "
-            "Use nested classes or separate classes as needed based on the YAML structure. "
-            "Use lombok annotations to generate getters, setters and constructors. "
-            "Do not include explanations or comments. Output only the Java class code. "
-            "Whenever a class is end use this line ----------- and give a line break."
-            "Give the conclusion like which classes are created classes. "
-            f"\n\nPrompt: {prompt}\n\nHere is the YAML:\n\n{yaml_text}"
-        )
+usage_summary = "\n\n--- Token Usage ---"
+usage_summary += f"\nTotal Tokens: {aggregated_token_usage['total_tokens']}"
+usage_summary += f"\nPrompt Tokens: {aggregated_token_usage['prompt_tokens']}"
+usage_summary += f"\nCompletion Tokens: {aggregated_token_usage['completion_tokens']}"
+usage_summary += f"\nTotal Cost (USD): ${format(aggregated_token_usage['total_cost'], '.6f')}"
 
-        def _call_llm():
-            return llm.invoke(full_prompt)
+return result, usage_summary
 
-        response, usage = run_with_token_tracking(_call_llm)
+====================================================
 
-        return response.content.strip() + usage
+=== Part 1: YAML Model Class Generator
 
-    except Exception as e:
-        return f"[ERROR] Failed to process YAML: {str(e)}"
+====================================================
 
-# ====================================================
-# === Part 2: JUnit Generator
-# ====================================================
-# Tool 1: List Java Files
-def list_java_files(path: str) -> List[Path]:
-    base_path = Path(path)
-    if not base_path.exists():
-        raise FileNotFoundError(f"Path not found: {path}")
-    return list(base_path.rglob("*.java"))
+def generate_model_from_yaml(prompt: str, yaml_file) -> str: try: with open(yaml_file.name, "r", encoding="utf-8") as f: yaml_text = f.read() yaml.safe_load(yaml_text)
 
-# Tool 2: Extract Code Info
-def extract_code_info(java_paths: List[Path]) -> List[Dict]:
-    prompt = PromptTemplate(
-        input_variables=["source"],
-        template="""
-Return ONLY compact JSON describing this Java class with these keys:
-- class_name
-- class_type (must be exactly: "Controller", "Service", "Repository", "Config", "Entity", "DTO", "Main")
-- package_path
-- methods: list of all public method names
-- uses_repository: true/false
-If class_type == "Entity", also include:
-  "entity_fields": list of {{"name": fieldName, "type": fieldType}}
-
-Rules:
-- Do not explain.
-- Do not invent other class_type values.
-- Always valid JSON.
-
-Java Source:
-{source}
-"""
+full_prompt = (
+        "You are a senior Java developer. A developer will provide you with a YAML configuration file. "
+        "Your task is to generate Java model classes only for the fields that are explicitly marked or structured with class paths. "
+        "Each class path (e.g., `com.example.config.MyConfig`) should be used as the fully qualified name of the class. "
+        "Use nested classes or separate classes as needed based on the YAML structure. "
+        "Use lombok annotations to generate getters, setters and constructors. "
+        "Do not include explanations or comments. Output only the Java class code. "
+        "Whenever a class is end use this line ----------- and give a line break."
+        "Give the conclusion like which classes are created classes. "
+        f"\n\nPrompt: {prompt}\n\nHere is the YAML:\n\n{yaml_text}"
     )
 
-    chain = prompt | llm
-    parsed = []
+    def _call_llm():
+        return llm.invoke(full_prompt)
 
-    for file_path in java_paths:
-        try:
-            source = file_path.read_text(encoding="utf-8")
-            response = chain.invoke({"source": source})
-            data = json.loads(response.content.strip())
-            parsed.append(data)
-        except Exception as e:
-            print(f"[WARN] Failed to parse {file_path}: {e}")
-    return parsed
+    response, usage = run_with_token_tracking(_call_llm)
 
-# Tool 3: Generate JUnit Tests
-def generate_junit_tests(parsed_info: List[Dict]) -> List[Dict]:
-    ALLOWED_TYPES = {"Controller", "Service"}
+    return response.content.strip() + usage
 
-    entity_map = {
-        item["class_name"]: item.get("entity_fields", [])
-        for item in parsed_info
-        if item.get("class_type") == "Entity"
-    }
+except Exception as e:
+    return f"[ERROR] Failed to process YAML: {str(e)}"
 
-    prompt = PromptTemplate(
-        input_variables=[
-            "class_name",
-            "class_type",
-            "package_path",
-            "methods",
-            "uses_repository",
-            "entity_map",
-        ],
-        template="""
+====================================================
+
+=== Part 2: JUnit Generator
+
+====================================================
+
+def list_java_files(path: str) -> List[Path]: base_path = Path(path) if not base_path.exists(): raise FileNotFoundError(f"Path not found: {path}") return list(base_path.rglob("*.java"))
+
+def extract_code_info(java_paths: List[Path]) -> List[Dict]: prompt = PromptTemplate( input_variables=["source"], template=""" Return ONLY compact JSON describing this Java class with these keys:
+
+class_name
+
+class_type (must be exactly: "Controller", "Service", "Repository", "Config", "Entity", "DTO", "Main")
+
+package_path
+
+methods: list of all public method names
+
+uses_repository: true/false If class_type == "Entity", also include: "entity_fields": list of {{"name": fieldName, "type": fieldType}}
+
+
+Rules:
+
+Do not explain.
+
+Do not invent other class_type values.
+
+Always valid JSON.
+
+
+Java Source: {source} """ )
+
+chain = prompt | llm
+parsed = []
+
+for file_path in java_paths:
+    try:
+        source = file_path.read_text(encoding="utf-8")
+        response = chain.invoke({"source": source})
+        data = json.loads(response.content.strip())
+        parsed.append(data)
+    except Exception as e:
+        print(f"[WARN] Failed to parse {file_path}: {e}")
+return parsed
+
+def generate_junit_tests(parsed_info: List[Dict]) -> List[Dict]: ALLOWED_TYPES = {"Controller", "Service"}
+
+entity_map = {
+    item["class_name"]: item.get("entity_fields", [])
+    for item in parsed_info
+    if item.get("class_type") == "Entity"
+}
+
+prompt = PromptTemplate(
+    input_variables=[
+        "class_name",
+        "class_type",
+        "package_path",
+        "methods",
+        "uses_repository",
+        "entity_map",
+    ],
+    template="""
+
 Write a complete JUnit 5 test class for:
 
-Class Name: {class_name}
-Type: {class_type}
-Package: {package_path}
-Public Methods:
-{methods}
-uses_repository: {uses_repository}
+Class Name: {class_name} Type: {class_type} Package: {package_path} Public Methods: {methods} uses_repository: {uses_repository}
 
-Available Entities:
-{entity_map}
+Available Entities: {entity_map}
 
 Rules:
 
 1. Controllers
-   - Use @WebMvcTest, MockMvc, @MockBean, ObjectMapper.
-   - Test all endpoints, mock services, assert JSON with jsonPath.
-   - Check all fields, not just IDs.
+
+Use @WebMvcTest, MockMvc, @MockBean, ObjectMapper.
+
+Test all endpoints, mock services, assert JSON with jsonPath.
+
+Check all fields, not just IDs.
+
+
 
 2. Services
-   - Use Mockito if repository exists (@ExtendWith, @Mock, @InjectMocks).
-   - Otherwise instantiate directly.
-   - Populate full entities in @BeforeEach.
-   - Assert with assertThat for all fields.
+
+Use Mockito if repository exists (@ExtendWith, @Mock, @InjectMocks).
+
+Otherwise instantiate directly.
+
+Populate full entities in @BeforeEach.
+
+Assert with assertThat for all fields.
+
+
 
 3. Entity population
-   - Strings → "John Doe"
-   - UUID → UUID.randomUUID().toString()
-   - Lists → Arrays.asList("Java","Spring")
-   - LocalDateTime → "2025-07-25T10:00:00"
-   - int → 123
-   - boolean → true
+
+Strings → "John Doe"
+
+UUID → UUID.randomUUID().toString()
+
+Lists → Arrays.asList("Java","Spring")
+
+LocalDateTime → "2025-07-25T10:00:00"
+
+int → 123
+
+boolean → true
+
+
 
 4. General
-   - One @Test per public method.
-   - Valid compilable Java code only.
-"""
-    )
 
-    chain = prompt | llm
-    test_classes = []
+One @Test per public method.
 
-    for item in parsed_info:
-        if item["class_type"] not in ALLOWED_TYPES:
-            print(f"[SKIP] {item['class_name']} ({item['class_type']})")
-            continue
-        try:
-            result = chain.invoke({
-                "class_name": item["class_name"],
-                "class_type": item["class_type"],
-                "package_path": item["package_path"],
-                "methods": "\n".join(item["methods"]),
-                "uses_repository": str(item.get("uses_repository", False)).lower(),
-                "entity_map": json.dumps(entity_map, indent=2),
-            })
-            test_classes.append({
-                "file_name": f"{item['class_name']}Test.java",
-                "package_path": item["package_path"],
-                "code": result.content.strip(),
-            })
-        except Exception as e:
-            print(f"[WARN] Could not generate test for {item['class_name']}: {e}")
-    return test_classes
+Valid compilable Java code only. """ )
 
-# Tool 4: Save & Print JUnit Tests
-def save_and_print_tests(junit_tests: List[Dict]) -> str:
-    output = ""
-    for test in junit_tests:
-        folder = Path("generated_tests") / test["package_path"].replace(".", "/")
-        folder.mkdir(parents=True, exist_ok=True)
-        file_path = folder / test["file_name"]
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(test["code"])
-        output += f"\n===== {test['file_name']} =====\n{test['code']}\n===== End of {test['file_name']} =====\n"
-    return output.strip()
 
-tools = [
-    Tool(name="ListJavaFiles", func=list_java_files, description="Lists all Java files."),
-    Tool(name="ExtractCodeInfo", func=extract_code_info, description="Parses each Java file."),
-    Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Generates JUnit 5 test classes."),
-    Tool(name="SaveJUnitTests", func=save_and_print_tests, description="Saves tests to disk and prints them."),
-]
+chain = prompt | llm test_classes = []
 
-def process_java_project(user_input: str) -> str:
-    try:
-        path_match = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", user_input)
-        if not path_match:
-            return "[ERROR] Please provide a valid Windows file path."
+for item in parsed_info: if item["class_type"] not in ALLOWED_TYPES: print(f"[SKIP] {item['class_name']} ({item['class_type']})") continue try: result = chain.invoke({ "class_name": item["class_name"], "class_type": item["class_type"], "package_path": item["package_path"], "methods": "\n".join(item["methods"]), "uses_repository": str(item.get("uses_repository", False)).lower(), "entity_map": json.dumps(entity_map, indent=2), }) test_classes.append({ "file_name": f"{item['class_name']}Test.java", "package_path": item["package_path"], "code": result.content.strip(), }) except Exception as e: print(f"[WARN] Could not generate test for {item['class_name']}: {e}") return test_classes
 
-        project_path = path_match.group(1).strip()
 
-        def _process():
-            java_files = tools[0].func(project_path)
-            if not java_files:
-                return "[INFO] No Java files found."
 
-            parsed_info = tools[1].func(java_files)
-            if not parsed_info:
-                return "[INFO] No parsable Java classes found."
+def save_and_print_tests(junit_tests: List[Dict]) -> str: output = "" for test in junit_tests: folder = Path("generated_tests") / test["package_path"].replace(".", "/") folder.mkdir(parents=True, exist_ok=True) file_path = folder / test["file_name"] with open(file_path, "w", encoding="utf-8") as f: f.write(test["code"]) output += f"\n===== {test['file_name']} =====\n{test['code']}\n===== End of {test['file_name']} =====\n" return output.strip()
 
-            junit_tests = tools[2].func(parsed_info)
-            if not junit_tests:
-                return "[INFO] No JUnit tests could be generated for allowed types."
+====================================================
 
-            return tools[3].func(junit_tests)
+=== Agent Definitions
 
-        output_code, usage_summary = run_with_token_tracking(_process)
-        return output_code + usage_summary
+====================================================
 
-    except Exception as e:
-        return f"[ERROR] {str(e)}"
+model_agent_tools = [ Tool( name="YAMLToModelGenerator", func=lambda prompt_and_file: generate_model_from_yaml(prompt_and_file["prompt"], prompt_and_file["file"]), description="Generates Java model classes from a YAML file and user prompt." ) ]
 
-# ====================================================
-# === Unified Chatbot Function (Decision Layer)
-# ====================================================
-def unified_chatbot(prompt, history, yaml_file=None):
-    if yaml_file is not None:
-        return generate_model_from_yaml(prompt, yaml_file)
-    elif re.search(r"([A-Za-z]:[\\/\w\-. ]+)", prompt):
-        return process_java_project(prompt)
-    else:
-        return "[ERROR] Please upload a YAML file with prompt for models OR provide a valid file path for JUnit generation."
+junit_agent_tools = [ Tool(name="ListJavaFiles", func=list_java_files, description="Lists all Java files."), Tool(name="ExtractCodeInfo", func=extract_code_info, description="Parses each Java file."), Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Generates JUnit 5 test classes."), Tool(name="SaveJUnitTests", func=save_and_print_tests, description="Saves tests to disk and prints them."), ]
 
-# ====================================================
-# === Gradio Chat Interface
-# ====================================================
-chatbot_ui = gr.ChatInterface(
-    fn=unified_chatbot,
-    title="OSIF Model & JUnit Generator",
-    description=(
-        "Options:\n"
-        "1. Upload a YAML file and enter a prompt like: `generate model class from this config`\n"
-        "2. Provide a Windows file path like: `C:\\Users\\project\\src` to generate JUnit tests."
-    ),
-    additional_inputs=[gr.File(label="Upload YAML File", file_types=[".yaml", ".yml"])],
-    theme="default"
-)
+model_agent = initialize_agent(model_agent_tools, llm, agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION, verbose=True) junit_agent = initialize_agent(junit_agent_tools, llm, agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION, verbose=True)
 
-if __name__ == "__main__":
-    print("Starting Unified Generator...")
-    chatbot_ui.launch()
+====================================================
+
+=== Unified Chatbot Function (Decision Layer)
+
+====================================================
+
+def unified_chatbot(prompt, history, yaml_file=None): user_input_lower = prompt.lower()
+
+# Case 1: JUnit request always takes precedence, regardless of YAML file
+if "junit" in user_input_lower:
+    path_match = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", prompt)
+    if not path_match:
+        return "[ERROR] Please provide a valid Windows file path for JUnit generation."
+    project_path = path_match.group(1).strip()
+
+    def _process():
+        java_files = junit_agent_tools[0].func(project_path)
+        parsed_info = junit_agent_tools[1].func(java_files)
+        junit_tests = junit_agent_tools[2].func(parsed_info)
+        return junit_agent_tools[3].func(junit_tests)
+
+    output_code, usage_summary = run_with_token_tracking(_process)
+    return output_code + usage_summary
+
+# Case 2: Model class generation
+elif "model" in user_input_lower:
+    if yaml_file is None:
+        return "[ERROR] Please upload a YAML file for model class generation."
+    return model_agent.run({"prompt": prompt, "file": yaml_file})
+
+else:
+    return "[ERROR] Please mention either 'JUnit' with a project path or 'model' with a YAML file in your request."
+
+====================================================
+
+=== Gradio Chat Interface
+
+====================================================
+
+chatbot_ui = gr.ChatInterface( fn=unified_chatbot, title="OSIF Model & JUnit Generator (Agent-Based)", description=( "Options:\n" "1. Upload a YAML file and enter a prompt like: generate model class from this config\n" "2. Provide a Windows file path like: C:\\Users\\project\\src to generate JUnit tests." ), additional_inputs=[gr.File(label="Upload YAML File", file_types=[".yaml", ".yml"])], theme="default" )
+
+if name == "main": print("Starting Unified Generator with Agents...") chatbot_ui.launch()
+
