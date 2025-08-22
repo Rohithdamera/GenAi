@@ -1,3 +1,4 @@
+
 import os
 import yaml
 import json
@@ -15,6 +16,7 @@ from langchain.agents import initialize_agent, AgentType
 # ====================================================
 # Azure OpenAI Client
 # ====================================================
+
 def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
@@ -31,6 +33,7 @@ llm = get_openai_client()
 # ====================================================
 # Utility: Token Tracking Wrapper
 # ====================================================
+
 def run_with_token_tracking(func, *args, **kwargs):
     aggregated_token_usage = {
         "total_tokens": 0,
@@ -38,8 +41,10 @@ def run_with_token_tracking(func, *args, **kwargs):
         "completion_tokens": 0,
         "total_cost": 0.0,
     }
+
     with get_openai_callback() as cb:
         result = func(*args, **kwargs)
+
         aggregated_token_usage["total_tokens"] += cb.total_tokens
         aggregated_token_usage["prompt_tokens"] += cb.prompt_tokens
         aggregated_token_usage["completion_tokens"] += cb.completion_tokens
@@ -54,8 +59,9 @@ def run_with_token_tracking(func, *args, **kwargs):
     return result, usage_summary
 
 # ====================================================
-# YAML Model Class Generator
+# Part 1: YAML Model Class Generator
 # ====================================================
+
 def generate_model_from_yaml(prompt: str, yaml_file) -> str:
     try:
         with open(yaml_file.name, "r", encoding="utf-8") as f:
@@ -85,8 +91,9 @@ def generate_model_from_yaml(prompt: str, yaml_file) -> str:
         return f"[ERROR] Failed to process YAML: {str(e)}"
 
 # ====================================================
-# JUnit Generator
+# Part 2: JUnit Generator
 # ====================================================
+
 def list_java_files(path: str) -> List[Path]:
     base_path = Path(path)
     if not base_path.exists():
@@ -226,6 +233,7 @@ def save_and_print_tests(junit_tests: List[Dict]) -> str:
 # ====================================================
 # Connector / Application Properties Agent
 # ====================================================
+
 connector_snippets = {
     "salesforce": """Salesforce connector:\ncore:\n  connectors:\n    sfdc:\n      authUrl: https://login.salesforce.com\n      username: your-username\n      password: your-password\n      client_id: your-client_id\n      client_secret: your-client-secret\n      grant_type: password\n      queryUrl: /\n      version: v53.0""",
     "sqs": """SQS connector:\naws.region :""",
@@ -242,42 +250,9 @@ def detect_connector_question(message: str) -> str:
     return "No matching connector found. Please ask about Salesforce, SQS, CrossAccountSQS, S3, or common-api-library."
 
 # ====================================================
-# Combined Chatbot Logic
+# Agent Definitions
 # ====================================================
-def chat_with_agent(message, history):
-    message_lower = message.lower()
-    
-    # Connector request
-    if any(conn in message_lower for conn in ["salesforce", "sfdc", "sqs", "s3", "common api", "common-api-library", "crossaccountsqs"]):
-        return detect_connector_question(message)
-    
-    # JUnit request
-    elif "junit" in message_lower:
-        java_path_match = re.search(r'path\s*=\s*(.*)', message_lower)
-        path = java_path_match.group(1).strip() if java_path_match else "."
-        try:
-            java_files = list_java_files(path)
-            parsed_info = extract_code_info(java_files)
-            junit_tests = generate_junit_tests(parsed_info)
-            return save_and_print_tests(junit_tests)
-        except Exception as e:
-            return f"[ERROR] Failed to generate JUnit: {str(e)}"
-    
-    # Model class generation request
-    elif "model class" in message_lower or "yaml" in message_lower:
-        return "Please upload YAML file for model class generation."
 
-    return "No matching action found. Ask for connector, JUnit generation, or model class generation."
+model_agent_tools = [
+    Tool(
 
-# ====================================================
-# Gradio UI
-# ====================================================
-chatbot_ui = gr.ChatInterface(
-    fn=chat_with_agent,
-    title="OSIF Connector & Code Assistant",
-    description="Ask for connector configuration formats, JUnit generation, or model class generation.",
-    theme="default"
-)
-
-# Launch the app
-chatbot_ui.launch(debug=False)
