@@ -1,11 +1,16 @@
+
 import os
-import shutil
-from pathlib import Path
-import gradio as gr
+import yaml
 import json
+import re
+from pathlib import Path
+from typing import List, Dict
+import gradio as gr
+
 from langchain.prompts import PromptTemplate
 from langchain_openai import AzureChatOpenAI
-
+from langchain.tools import Tool
+from langchain.callbacks import get_openai_callback
 
 # === Azure OpenAI Client ===
 def get_openai_client():
@@ -16,140 +21,275 @@ def get_openai_client():
         openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
         temperature=0.3,
-        max_tokens=4000,
+        max_tokens=2000,
     )
-
 
 llm = get_openai_client()
 
+# ====================================================
+# === Utility: Token Tracking Wrapper
+# ====================================================
+def run_with_token_tracking(func, *args, **kwargs):
+    """Run LLM-related function and capture token usage."""
+    aggregated_token_usage = {
+        "total_tokens": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_cost": 0.0,
+    }
 
-# === Step 1: Extract user intent ===
-def extract_user_intent(user_input: str) -> dict:
+    with get_openai_callback() as cb:
+        result = func(*args, **kwargs)
+
+        aggregated_token_usage["total_tokens"] += cb.total_tokens
+        aggregated_token_usage["prompt_tokens"] += cb.prompt_tokens
+        aggregated_token_usage["completion_tokens"] += cb.completion_tokens
+        aggregated_token_usage["total_cost"] += cb.total_cost
+
+    usage_summary = "\n\n--- Token Usage ---"
+    usage_summary += f"\nTotal Tokens: {aggregated_token_usage['total_tokens']}"
+    usage_summary += f"\nPrompt Tokens: {aggregated_token_usage['prompt_tokens']}"
+    usage_summary += f"\nCompletion Tokens: {aggregated_token_usage['completion_tokens']}"
+    usage_summary += f"\nTotal Cost (USD): ${format(aggregated_token_usage['total_cost'], '.6f')}"
+
+    return result, usage_summary
+
+# ====================================================
+# === Part 1: YAML Model Class Generator
+# ====================================================
+def generate_model_from_yaml(prompt: str, yaml_file) -> str:
+    try:
+        with open(yaml_file.name, "r", encoding="utf-8") as f:
+            yaml_text = f.read()
+        yaml.safe_load(yaml_text)
+
+        full_prompt = (
+            "You are a senior Java developer. A developer will provide you with a YAML configuration file. "
+            "Your task is to generate Java model classes only for the fields that are explicitly marked or structured with class paths. "
+            "Each class path (e.g., `com.example.config.MyConfig`) should be used as the fully qualified name of the class. "
+            "Use nested classes or separate classes as needed based on the YAML structure. "
+            "Use lombok annotations to generate getters, setters and constructors. "
+            "Do not include explanations or comments. Output only the Java class code. "
+            "Whenever a class is end use this line ----------- and give a line break."
+            "Give the conclusion like which classes are created classes. "
+            f"\n\nPrompt: {prompt}\n\nHere is the YAML:\n\n{yaml_text}"
+        )
+
+        def _call_llm():
+            return llm.invoke(full_prompt)
+
+        response, usage = run_with_token_tracking(_call_llm)
+
+        return response.content.strip() + usage
+
+    except Exception as e:
+        return f"[ERROR] Failed to process YAML: {str(e)}"
+
+# ====================================================
+# === Part 2: JUnit Generator
+# ====================================================
+# Tool 1: List Java Files
+def list_java_files(path: str) -> List[Path]:
+    base_path = Path(path)
+    if not base_path.exists():
+        raise FileNotFoundError(f"Path not found: {path}")
+    return list(base_path.rglob("*.java"))
+
+# Tool 2: Extract Code Info
+def extract_code_info(java_paths: List[Path]) -> List[Dict]:
     prompt = PromptTemplate(
-        input_variables=["user_input"],
+        input_variables=["source"],
         template="""
-From the following request, extract two things:
-
-1. new_project_name → the new project name (e.g., AWS_Connector, GCP_Connector)  
-2. reference_path → the given reference project path  
-
-Return only valid JSON:
-{{
-  "new_project_name": "...",
-  "reference_path": "..."
-}}
-
-User request:
-{user_input}
-"""
-    )
-    response = (prompt | llm).invoke({"user_input": user_input})
-    return json.loads(response.content.strip())
-
-
-# === Step 2: Detect old project name ===
-def detect_old_project_name(reference_path: str) -> str:
-    prompt = PromptTemplate(
-        input_variables=["path"],
-        template="""
-You are given a reference project folder path: {path}.
-
-From this path, identify the project name (the last folder name).  
-Return only the project name, nothing else.
-"""
-    )
-    response = (prompt | llm).invoke({"path": reference_path})
-    return response.content.strip()
-
-
-# === Step 3: AI rewrite file content ===
-def ai_rewrite_file(source: str, old_name: str, new_name: str) -> str:
-    prompt = PromptTemplate(
-        input_variables=["source", "old_name", "new_name"],
-        template="""
-You are refactoring a Java project.
+Return ONLY compact JSON describing this Java class with these keys:
+- class_name
+- class_type (must be exactly: "Controller", "Service", "Repository", "Config", "Entity", "DTO", "Main")
+- package_path
+- methods: list of all public method names
+- uses_repository: true/false
+If class_type == "Entity", also include:
+  "entity_fields": list of {{"name": fieldName, "type": fieldType}}
 
 Rules:
-- The old project name is {old_name}.
-- Replace it consistently with {new_name}.
-- This includes class names, package names, imports, configs, tests, comments.
-- Keep structure, formatting, and other logic intact.
-- Do not drop any content.
-- Only output the updated file text.
+- Do not explain.
+- Do not invent other class_type values.
+- Always valid JSON.
 
-File content:
+Java Source:
 {source}
 """
     )
-    response = (prompt | llm).invoke(
-        {"source": source, "old_name": old_name, "new_name": new_name}
+
+    chain = prompt | llm
+    parsed = []
+
+    for file_path in java_paths:
+        try:
+            source = file_path.read_text(encoding="utf-8")
+            response = chain.invoke({"source": source})
+            data = json.loads(response.content.strip())
+            parsed.append(data)
+        except Exception as e:
+            print(f"[WARN] Failed to parse {file_path}: {e}")
+    return parsed
+
+# Tool 3: Generate JUnit Tests
+def generate_junit_tests(parsed_info: List[Dict]) -> List[Dict]:
+    ALLOWED_TYPES = {"Controller", "Service"}
+
+    entity_map = {
+        item["class_name"]: item.get("entity_fields", [])
+        for item in parsed_info
+        if item.get("class_type") == "Entity"
+    }
+
+    prompt = PromptTemplate(
+        input_variables=[
+            "class_name",
+            "class_type",
+            "package_path",
+            "methods",
+            "uses_repository",
+            "entity_map",
+        ],
+        template="""
+Write a complete JUnit 5 test class for:
+
+Class Name: {class_name}
+Type: {class_type}
+Package: {package_path}
+Public Methods:
+{methods}
+uses_repository: {uses_repository}
+
+Available Entities:
+{entity_map}
+
+Rules:
+
+1. Controllers
+   - Use @WebMvcTest, MockMvc, @MockBean, ObjectMapper.
+   - Test all endpoints, mock services, assert JSON with jsonPath.
+   - Check all fields, not just IDs.
+
+2. Services
+   - Use Mockito if repository exists (@ExtendWith, @Mock, @InjectMocks).
+   - Otherwise instantiate directly.
+   - Populate full entities in @BeforeEach.
+   - Assert with assertThat for all fields.
+
+3. Entity population
+   - Strings → "John Doe"
+   - UUID → UUID.randomUUID().toString()
+   - Lists → Arrays.asList("Java","Spring")
+   - LocalDateTime → "2025-07-25T10:00:00"
+   - int → 123
+   - boolean → true
+
+4. General
+   - One @Test per public method.
+   - Valid compilable Java code only.
+"""
     )
-    return response.content.strip()
 
+    chain = prompt | llm
+    test_classes = []
 
-# === Step 4: Rewrite full project ===
-def rewrite_project(reference_path: str, old_project_name: str, new_project_name: str) -> str:
-    ref_path = Path(reference_path)
-    if not ref_path.exists():
-        return f"[ERROR] Reference project not found: {reference_path}"
+    for item in parsed_info:
+        if item["class_type"] not in ALLOWED_TYPES:
+            print(f"[SKIP] {item['class_name']} ({item['class_type']})")
+            continue
+        try:
+            result = chain.invoke({
+                "class_name": item["class_name"],
+                "class_type": item["class_type"],
+                "package_path": item["package_path"],
+                "methods": "\n".join(item["methods"]),
+                "uses_repository": str(item.get("uses_repository", False)).lower(),
+                "entity_map": json.dumps(entity_map, indent=2),
+            })
+            test_classes.append({
+                "file_name": f"{item['class_name']}Test.java",
+                "package_path": item["package_path"],
+                "code": result.content.strip(),
+            })
+        except Exception as e:
+            print(f"[WARN] Could not generate test for {item['class_name']}: {e}")
+    return test_classes
 
-    target_base = Path("C:/Users/rdamera/generated_projects")
-    target_path = target_base / new_project_name
-    if target_path.exists():
-        shutil.rmtree(target_path)
+# Tool 4: Save & Print JUnit Tests
+def save_and_print_tests(junit_tests: List[Dict]) -> str:
+    output = ""
+    for test in junit_tests:
+        folder = Path("generated_tests") / test["package_path"].replace(".", "/")
+        folder.mkdir(parents=True, exist_ok=True)
+        file_path = folder / test["file_name"]
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(test["code"])
+        output += f"\n===== {test['file_name']} =====\n{test['code']}\n===== End of {test['file_name']} =====\n"
+    return output.strip()
 
-    # Copy structure first
-    shutil.copytree(ref_path, target_path)
+tools = [
+    Tool(name="ListJavaFiles", func=list_java_files, description="Lists all Java files."),
+    Tool(name="ExtractCodeInfo", func=extract_code_info, description="Parses each Java file."),
+    Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Generates JUnit 5 test classes."),
+    Tool(name="SaveJUnitTests", func=save_and_print_tests, description="Saves tests to disk and prints them."),
+]
 
-    # Walk through and process
-    for file_path in target_path.rglob("*"):
-        # === 1. Rename folder names if they contain old project name ===
-        if old_project_name in file_path.name:
-            new_file_path = file_path.with_name(file_path.name.replace(old_project_name, new_project_name))
-            file_path.rename(new_file_path)
-            file_path = new_file_path
-
-        # === 2. Rewrite file contents if text file ===
-        if file_path.is_file() and file_path.suffix.lower() in [
-            ".java", ".xml", ".yml", ".yaml", ".properties", ".json", ".md", ".txt"
-        ]:
-            try:
-                source = file_path.read_text(encoding="utf-8", errors="ignore")
-                updated = ai_rewrite_file(source, old_project_name, new_project_name)
-                file_path.write_text(updated, encoding="utf-8")
-            except Exception as e:
-                print(f"[WARN] Skipping {file_path}: {e}")
-
-    return str(target_path)
-
-
-# === Main Orchestration ===
-def process_java_project(user_input: str, history):
+def process_java_project(user_input: str) -> str:
     try:
-        # Extract what user asked
-        intent = extract_user_intent(user_input)
-        reference_path = intent["reference_path"]
-        new_project_name = intent["new_project_name"]
+        path_match = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", user_input)
+        if not path_match:
+            return "[ERROR] Please provide a valid Windows file path."
 
-        # Detect old project name
-        old_project_name = detect_old_project_name(reference_path)
+        project_path = path_match.group(1).strip()
 
-        # Rewrite everything
-        new_path = rewrite_project(reference_path, old_project_name, new_project_name)
-        return f"[SUCCESS] Project '{new_project_name}' created at {new_path}"
+        def _process():
+            java_files = tools[0].func(project_path)
+            if not java_files:
+                return "[INFO] No Java files found."
+
+            parsed_info = tools[1].func(java_files)
+            if not parsed_info:
+                return "[INFO] No parsable Java classes found."
+
+            junit_tests = tools[2].func(parsed_info)
+            if not junit_tests:
+                return "[INFO] No JUnit tests could be generated for allowed types."
+
+            return tools[3].func(junit_tests)
+
+        output_code, usage_summary = run_with_token_tracking(_process)
+        return output_code + usage_summary
 
     except Exception as e:
         return f"[ERROR] {str(e)}"
 
+# ====================================================
+# === Unified Chatbot Function (Decision Layer)
+# ====================================================
+def unified_chatbot(prompt, history, yaml_file=None):
+    if yaml_file is not None:
+        return generate_model_from_yaml(prompt, yaml_file)
+    elif re.search(r"([A-Za-z]:[\\/\w\-. ]+)", prompt):
+        return process_java_project(prompt)
+    else:
+        return "[ERROR] Please upload a YAML file with prompt for models OR provide a valid file path for JUnit generation."
 
-# === Gradio UI ===
+# ====================================================
+# === Gradio Chat Interface
+# ====================================================
 chatbot_ui = gr.ChatInterface(
-    fn=process_java_project,
-    title="AI Java Project Generator",
-    description="Provide a reference project path and a new project name. AI will regenerate the full project with the same structure but with the new name everywhere.",
-    theme="default",
+    fn=unified_chatbot,
+    title="OSIF Model & JUnit Generator",
+    description=(
+        "Options:\n"
+        "1. Upload a YAML file and enter a prompt like: `generate model class from this config`\n"
+        "2. Provide a Windows file path like: `C:\\Users\\project\\src` to generate JUnit tests."
+    ),
+    additional_inputs=[gr.File(label="Upload YAML File", file_types=[".yaml", ".yml"])],
+    theme="default"
 )
 
-
 if __name__ == "__main__":
+    print("Starting Unified Generator...")
     chatbot_ui.launch()
