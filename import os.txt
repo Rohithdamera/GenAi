@@ -1,4 +1,34 @@
-update the below code , change this gpt_results = openai.ChatCompletion.create (, to below approach, dont change anything in the existing code, just change the methods, which i have mentioned , dont change the existing functionality , keep remain as it is , i am getting version confilts , so change it to latest which supports latest one , give me full updated code 
+update the below code , change this   
+ penaih.getGPTPreferredPrompt(prompt_hint=current_session[cui.USR_REQ_PROMPT],codeCatFrom=current_session[cui.CODE_CAT_FROM], codeCatTo=current_session[cui.CODE_CAT_TO])
+   openai.api_type = "azure"
+   #Initialize Azure OpenAI client
+   client = AzureOpenAI(
+    api_key = "",
+    api_version = "2024-08-01-preview",
+    azure_endpoint = "https://testopenaiassets.openai.azure.com/"
+   )
+   
+   # Azure OpenAI call
+   gpt_results = openai.ChatCompletion.create (
+       deployment_id="gpt-4.1-conversion",  # Azure deployment name
+       #model="gpt-4_complex_conversions",  # Azure deployment name
+       model="gpt-4.1",  # Still required even for Azure
+       messages=[
+           {
+               "role": "system",
+               "content": prompt,
+            },
+           {
+               "role": "user",
+               "content": dwl_content
+           }
+       ],
+       max_tokens=2000,
+       temperature=0.3,
+   )
+
+
+, remove role content etc use anything in that place , use below approach, dont change anything in the existing code, just change the methods, which i have mentioned , dont change the existing functionality , keep remain as it is , i am getting version confilts , so change it to latest which supports latest one , give me full updated code 
 
 
 def get_openai_client(config):
