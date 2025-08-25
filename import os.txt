@@ -1,62 +1,9 @@
-update the below code , change this   
- penaih.getGPTPreferredPrompt(prompt_hint=current_session[cui.USR_REQ_PROMPT],codeCatFrom=current_session[cui.CODE_CAT_FROM], codeCatTo=current_session[cui.CODE_CAT_TO])
-   openai.api_type = "azure"
-   #Initialize Azure OpenAI client
-   client = AzureOpenAI(
-    api_key = "",
-    api_version = "2024-08-01-preview",
-    azure_endpoint = "https://testopenaiassets.openai.azure.com/"
-   )
-   
-   # Azure OpenAI call
-   gpt_results = openai.ChatCompletion.create (
-       deployment_id="gpt-4.1-conversion",  # Azure deployment name
-       #model="gpt-4_complex_conversions",  # Azure deployment name
-       model="gpt-4.1",  # Still required even for Azure
-       messages=[
-           {
-               "role": "system",
-               "content": prompt,
-            },
-           {
-               "role": "user",
-               "content": dwl_content
-           }
-       ],
-       max_tokens=2000,
-       temperature=0.3,
-   )
-
-
-, remove role content etc use anything in that place , use below approach, dont change anything in the existing code, just change the methods, which i have mentioned , dont change the existing functionality , keep remain as it is , i am getting version confilts , so change it to latest which supports latest one , give me full updated code 
-
-
-def get_openai_client(config):
-    return AzureChatOpenAI(
-        deployment_name=config["deployment_name"],
-        openai_api_base=config["endpoint"],
-        openai_api_key=config["api_key"],
-        openai_api_version=config["api_version"],
-        temperature=0.3,
-        # max_tokens=4096
-    )
-
-
-
------------------------------------------------------------------
-
-code:-
-
-
-
 # from markupsafe import escape
 
 from os import environ as env
 from urllib.parse import quote_plus, urlencode
 import http.client
 import json
-
-
 
 from flask import Flask, redirect, render_template, session, request, url_for
 from flask_session import Session
@@ -70,9 +17,10 @@ import chroma_db_util as cdu
 import constants_ui as cui
 import java_src_util as jsu
 
-import openai
 import argparse
-from openai import AzureOpenAI
+
+# NEW: LangChain Azure client
+from langchain_openai import AzureChatOpenAI  
 
 import Azure_OpenAI_handler as openaih
 
@@ -87,9 +35,19 @@ app.config["SESSION_TYPE"] = "filesystem"
 Session(app)
 
 
-
 def getSessionObjectForCurrentUser():
     return session._get_current_object()
+
+
+def get_openai_client(config):
+    return AzureChatOpenAI(
+        deployment_name=config["deployment_name"],
+        openai_api_base=config["endpoint"],
+        openai_api_key=config["api_key"],
+        openai_api_version=config["api_version"],
+        temperature=0.3,
+        # max_tokens=4096
+    )
 
 
 @app.route("/")
@@ -98,6 +56,7 @@ def index():
     if not current_session.get(cui.NAME):
         return redirect("/login")
     return render_template('select.html')
+
 
 @app.route("/input", methods=["POST", "GET"])
 def input():
@@ -182,19 +141,16 @@ def manual():
     input_sample = ""
     output_sample = ""
     if request.method == "POST":
-        input_sample = request.form["v_input"]  # escape(request.form["v_input"])
-        output_sample = request.form["v_output"]  # escape(request.form["v_output"])
+        input_sample = request.form["v_input"]
+        output_sample = request.form["v_output"]
         codeCatFrom = request.form["code_cat_from"]
         codeCatTo = request.form["code_cat_to"]
         sample_source = request.form["v_source"]
-        # current_session[cui.CODE_CAT_FROM] = codeCatFrom
-        # current_session[cui.CODE_CAT_TO] = codeCatTo
         current_session[cui.SAMPLE_SOURCE] = sample_source
         if (LogLevel.shouldLog(LogLevel.DEBUG, LOCAL_LOG_LEVEL)):
             print(input_sample)
             print(output_sample)
             print(sample_source)
-        # ToDo try to save and display the id
         doc_id = cdu.addInputOutputExample(
             input_sample=input_sample,
             output_sample=output_sample,
@@ -241,7 +197,6 @@ def sendtoGPT():
     if not prompt_hint:
         prompt_hint = c.getDefaultPromptHint(codeCatFrom, codeCatTo)
     if v_gpt:
-        # call GPT to submit input, prompt, from/to, doc_ids
         gpt_results = cdu.getGPTResponse(input_request=input_request,
                                         doc_id_list=doc_id_list,
                                         prompt_hint=prompt_hint,
@@ -249,16 +204,13 @@ def sendtoGPT():
                                         codeCatTo=codeCatTo,
                                         java_prompt_jar=java_prompt_jar,
                                         java_prompt_prj=java_prompt_prj)
-        #display_result = gpt_results['choices'][0]['message']['content']
         display_result = gpt_results.choices[0].message.content
 
-        # return render_template('gpt_response.html', display_result=display_result)
         return render_template("manual.html", manual=False,
                             doc_id="",
                             doc_id_list=doc_id_list,
                             input_sample=current_session[cui.IN_DW],
                             output_sample=display_result)
-    # display the input as a page to be sent to GPT
     net_prompt = cdu.getNetPrompt(input_request=input_request,
                                 doc_id_list=doc_id_list,
                                 prompt_hint=prompt_hint,
@@ -269,58 +221,53 @@ def sendtoGPT():
     print(net_prompt)
     return render_template('net_prompt.html', net_prompt=net_prompt)
 
+
 @app.route("/AzureChatgptModel", methods=["POST"])
 def AzureChatgptModel():
-   current_session = getSessionObjectForCurrentUser()
-   if not current_session.get("name"):
-       return redirect("/login")
-   v_ids = request.form["v_ids"].strip()
-   v_azuregpt = "v_azuregpt" in request.form #added by ishika for testing
-   doc_id_list = c.convert_string(v_ids)
-   #embedding = request.form["embedding"]
-   embedding = request.form.get("embedding","")
-   if LogLevel.shouldLog(LogLevel.DEBUG, LOCAL_LOG_LEVEL):
-       print(f"Requested doc ids to send to Azure ChatGPT: {doc_id_list}")
-       print(f"Requested GPT: {v_azuregpt}") #added by ishika for testing
-   dwl_content = current_session[cui.IN_DW]
+    current_session = getSessionObjectForCurrentUser()
+    if not current_session.get("name"):
+        return redirect("/login")
+    v_ids = request.form["v_ids"].strip()
+    v_azuregpt = "v_azuregpt" in request.form
+    doc_id_list = c.convert_string(v_ids)
+    embedding = request.form.get("embedding", "")
+    if LogLevel.shouldLog(LogLevel.DEBUG, LOCAL_LOG_LEVEL):
+        print(f"Requested doc ids to send to Azure ChatGPT: {doc_id_list}")
+        print(f"Requested GPT: {v_azuregpt}")
+    dwl_content = current_session[cui.IN_DW]
   
-   prompt = openaih.getGPTPreferredPrompt(prompt_hint=current_session[cui.USR_REQ_PROMPT],codeCatFrom=current_session[cui.CODE_CAT_FROM], codeCatTo=current_session[cui.CODE_CAT_TO])
-   openai.api_type = "azure"
-   #Initialize Azure OpenAI client
-   client = AzureOpenAI(
-    api_key = "",
-    api_version = "2024-08-01-preview",
-    azure_endpoint = "https://testopenaiassets.openai.azure.com/"
-   )
-   
-   # Azure OpenAI call
-   gpt_results = openai.ChatCompletion.create (
-       deployment_id="gpt-4.1-conversion",  # Azure deployment name
-       #model="gpt-4_complex_conversions",  # Azure deployment name
-       model="gpt-4.1",  # Still required even for Azure
-       messages=[
-           {
-               "role": "system",
-               "content": prompt,
-            },
-           {
-               "role": "user",
-               "content": dwl_content
-           }
-       ],
-       max_tokens=2000,
-       temperature=0.3,
-   )
-   display_result = gpt_results.choices[0].message.content
-   
-   return render_template("manual.html",
-       manual=False,
-       doc_id="",
-       doc_id_list=doc_id_list,
-       input_sample=dwl_content,
-       output_sample=display_result,
-       prompt=current_session[cui.USR_REQ_PROMPT]
-   )
+    prompt = openaih.getGPTPreferredPrompt(
+        prompt_hint=current_session[cui.USR_REQ_PROMPT],
+        codeCatFrom=current_session[cui.CODE_CAT_FROM],
+        codeCatTo=current_session[cui.CODE_CAT_TO]
+    )
+
+    # ✅ Initialize new AzureChatOpenAI client
+    config = {
+        "deployment_name": "gpt-4.1-conversion",
+        "endpoint": "https://testopenaiassets.openai.azure.com/",
+        "api_key": "",   # TODO: add your key
+        "api_version": "2024-08-01-preview"
+    }
+    client = get_openai_client(config)
+
+    # ✅ Call AzureChatOpenAI with messages (roles not required explicitly)
+    gpt_results = client.invoke([
+        ("system", prompt),
+        ("user", dwl_content)
+    ])
+
+    display_result = gpt_results.content
+
+    return render_template("manual.html",
+        manual=False,
+        doc_id="",
+        doc_id_list=doc_id_list,
+        input_sample=dwl_content,
+        output_sample=display_result,
+        prompt=current_session[cui.USR_REQ_PROMPT]
+    )
+
 
 @app.route("/prompt", methods=["POST", "GET"])
 def prompt():
@@ -352,7 +299,6 @@ def prompt():
             current_session[cui.JAVA_HINTS_JAR] = java_hints_jar
             current_session[cui.JAVA_HINTS_PRJ] = java_hints_prj
     else:
-        # this is GET likely coming back after adding samples
         current_session = getSessionObjectForCurrentUser()
         dw = current_session[cui.IN_DW]
         prmpt = current_session[cui.USR_REQ_PROMPT]
@@ -362,7 +308,6 @@ def prompt():
             java_hints_jar = current_session[cui.JAVA_HINTS_JAR]
             java_hints_prj = current_session[cui.JAVA_HINTS_PRJ]
         
-    # requesting debug;
     if (LogLevel.shouldLog(LogLevel.DEBUG, LOCAL_LOG_LEVEL)):
         print(dw)
         print(prmpt)
@@ -371,7 +316,6 @@ def prompt():
         print(codeCatTo)
     if (dw and len(dw.strip()) > 0  and dw != "None"):
         print("DW not empty!")
-        # now search and get top k results to display
         results = cdu.searchSimilarExamplesForInputReq(
             input=dw,
             codeCatFrom=codeCatFrom,
@@ -409,12 +353,9 @@ def about():
     return '<h3>This is a CHatGPT DW-to-Java web application.</h3>'
 
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Flask app with configurable port")
     parser.add_argument("--port", type=int, default=5000, help="Port number to run the Flask app on")
     args = parser.parse_args()
-    # initialize vector db
     cdu.initClient()
-    #app.run(host='0.0.0.0',port=5000)
     app.run(host='0.0.0.0', port=args.port)
