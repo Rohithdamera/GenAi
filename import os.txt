@@ -1,361 +1,218 @@
-## from markupsafe import escape
 
-from os import environ as env
-from urllib.parse import quote_plus, urlencode
-import http.client
-import json
-
-from flask import Flask, redirect, render_template, session, request, url_for
-from flask_session import Session
-
-import sys
-sys.path.append('/home/ec2-user/newUpdatedFlaskApp06082025/py_space/src/')
-import common_stuff as c
-from common_stuff import LogLevel
-import chroma_db_util as cdu
-
-import constants_ui as cui
-import java_src_util as jsu
-
-import argparse
-
-# NEW: LangChain Azure client
-from langchain_openai import AzureChatOpenAI  
-
-import Azure_OpenAI_handler as openaih
-
-# control what gets logged
-LOCAL_LOG_LEVEL = c.GLOBAL_LOG_LEVEL
-LOCAL_LOG_LEVEL = LogLevel.DEBUG
-
-# setup flask and session
-app = Flask(__name__)
-app.config["SESSION_PERMANENT"] = False
-app.config["SESSION_TYPE"] = "filesystem"
-Session(app)
+update the below code , currently it is running in azure function through posman , i will pass in postman the below things 
 
 
-def getSessionObjectForCurrentUser():
-    return session._get_current_object()
+postman ->params ->
+
+key                   value 
+
+file_name            testfile_complex_Mapping_sheet.xslx
+sheet_name            v-complex
+source_system_column   c
+target_system_column   j
+business_logic_column  h
 
 
-def get_openai_client(config):
+
+and in body i will pass .xslx file , based on the file content inside .xslx ,  it will generate the test data according to it , so now i had one more requirement like i will be add one more called (special_note) in params along with all params
+
+example:-
+
+key                        value 
+
+file_name                 testfile_complex_Mapping_sheet.xslx
+sheet_name                v-complex
+source_system_column       c
+target_system_column       j
+business_logic_column      h 
+special_note              please refer to column e for another target_system_column (or) use column m also for business_logic_column
+
+
+
+what ever the prompt user passing through  special_note the ai need to handle it properly , need to go inside .xslx file , generate test data data according to it , just my requirement below of the prompt
+
+example;
+
+ f"- Column {source_col} contains source field details.\n"
+        f"- Column {target_col} contains target field details.\n"
+        f"- Column {logic_col} contains business logic for transformations.\n"
+          f"- Column {special_note} need to take conent from user 
+
+
+
+
+dont change anything in the exesting code like code functionality , prompts, instruction keep as it is , never change the exesting functionality  keep as it is , just add above mentioned  feature in the exesting code give me fully updated code 
+
+
+
+
+import os
+import logging
+import tempfile
+import openpyxl
+from base64 import b64decode
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
+from langchain_community.chat_models import AzureChatOpenAI
+from langchain.schema import HumanMessage
+from langchain.callbacks import get_openai_callback
+from openpyxl.utils import column_index_from_string
+import azure.functions as func
+
+logger = logging.getLogger(__name__)
+
+# Limit the number of rows processed
+max_rows = 500
+
+# AES Decryption
+def decrypt(data, key):
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)
+    decrypted_data = cipher.decrypt(b64decode(data))
+    decrypted_data = unpad(decrypted_data, AES.block_size)
+    return decrypted_data.decode()
+
+# LangChain OpenAI Client (using env for deployment name)
+def get_openai_client():
+    aes_key_base64 = os.environ['AES_KEY']
+    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+    api_version = os.environ['AZURE_API_VERSION']
+    deployment_name = os.environ['AZURE_DEPLOYMENT']
+
+    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+
+    if not decrypted_api_base.endswith('/'):
+        decrypted_api_base += '/'
+
     return AzureChatOpenAI(
-        deployment_name=config["deployment_name"],
-        openai_api_base=config["endpoint"],
-        openai_api_key=config["api_key"],
-        openai_api_version=config["api_version"],
-        temperature=0.3,
-        # max_tokens=4096
+        deployment_name=deployment_name,
+        openai_api_base=decrypted_api_base,
+        openai_api_key=decrypted_api_key,
+        openai_api_version=api_version,
+        temperature=1,
+        # max_tokens not supported for o4-mini
     )
 
+def col_letter_to_index(col_letter):
+    try:
+        return column_index_from_string(col_letter.upper()) - 1
+    except Exception as e:
+        logger.error(f"Invalid column letter: {col_letter} - {str(e)}")
+        return None
 
-@app.route("/")
-def index():
-    current_session = getSessionObjectForCurrentUser()
-    if not current_session.get(cui.NAME):
-        return redirect("/login")
-    return render_template('select.html')
+def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col):
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True)
+        sheet = wb[sheet_name]
+        data = []
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            source = row[source_col] if source_col < len(row) else None
+            logic = row[logic_col] if logic_col < len(row) else None
+            target = row[target_col] if target_col < len(row) else None
+            if source and target:
+                data.append({
+                    "source": source,
+                    "logic": logic or "",
+                    "target": target
+                })
+            if len(data) >= max_rows:
+                break
+        return data
+    except Exception as e:
+        logger.error(f"Failed to extract Excel data: {e}")
+        return []
 
+def build_dataweave_prompt(data, file_name, sheet_name, source_col, target_col, logic_col):
+    prompt = (
+        f"Write a DataWeave script referring to the uploaded Excel file named {file_name}, "
+        f"specifically the sheet named {sheet_name}.\n"
+        f"- Column {source_col} contains source field details.\n"
+        f"- Column {target_col} contains target field details.\n"
+        f"- Column {logic_col} contains business logic for transformations.\n"
+    )
+    for row in data:
+        prompt += f"- Source: {row['source']}, Target: {row['target']}, Logic: {row['logic']}\n"
+    return prompt
 
-@app.route("/input", methods=["POST", "GET"])
-def input():
-    current_session = getSessionObjectForCurrentUser()
-    if not current_session.get(cui.NAME):
-        return redirect("/login")
-    if request.method == "GET":
-        return render_template('select.html')
-    codeCatFrom = request.form["code_cat_from"]
-    if(codeCatFrom == c.CodeCategory.MULE_4_DW.value):
-        codeCatTo = "Java"
-    codeCatTo = request.form["code_cat_to"]
-    current_session[cui.CODE_CAT_FROM] = codeCatFrom
-    current_session[cui.CODE_CAT_TO] = codeCatTo
-    session["usr_req_prompt"] = c.getDefaultPromptHint(codeCatFrom, codeCatTo)
-    return render_template('index.html')
+# Chat with OpenAI and track token usage and cost
+def chat_with_agent(prompt, client):
+    messages = [
+        HumanMessage(content="""
+You are a DataWeave agent. Your task is to generate a valid DataWeave 2.0 script based on an integration mapping Excel file.
+Use the following rules:
 
+- Read and interpret each row of the Excel file.
+- For each row, generate a mapping in the DataWeave script that transforms the source field into the target field using the specified logic.
+- Start your script with output application/json or output application/xml — this sets the tone.
+- Use map, filter, pluck, groupBy — these are DataWeave functions.
+- Strictly follow Dataweave inbuilt functions syntax.
+        """),
+        HumanMessage(content=prompt),
+        HumanMessage(content="Generate the DataWeave script.")
+    ]
 
-def setJavaJarLocation(current_session) -> str:
-    jar_dir = current_session.get(cui.JAR_DIR)
-    jar_dir = c.getJarLocation(jar_dir)
-    current_session[cui.JAR_DIR] = jar_dir
+    try:
+        with get_openai_callback() as cb:
+            result = client.invoke(messages)
+            final_response = result.content.strip()
+            final_response += "\n\n--- Token Usage ---"
+            final_response += f"\nTotal Tokens: {cb.total_tokens}"
+            final_response += f"\nPrompt Tokens: {cb.prompt_tokens}"
+            final_response += f"\nCompletion Tokens: {cb.completion_tokens}"
+            final_response += f"\nTotal Cost (USD): ${format(cb.total_cost, '.6f')}"
+            return final_response
+    except Exception as e:
+        logger.error(f"Error during model invocation: {e}")
+        raise
 
+# Azure Function main handler
+def main(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        logger.info("DataWeave function triggered.")
 
-@app.route("/login", methods=["POST", "GET"])
-def login(): 
-    if request.method == "POST":
-        u_name = request.form.get("name")
-        if (LogLevel.shouldLog(LogLevel.DEBUG, LOCAL_LOG_LEVEL)):
-            print(f"User just logged in; {u_name}")
-        if (u_name and len(u_name.strip()) > 0):
-            current_session = getSessionObjectForCurrentUser()
-            current_session[cui.NAME] = u_name
-            current_session[cui.IS_DEV] = True
-            #we are going to change all to admin
-            current_session[cui.IS_ADMIN] = True
-            session["code_cat_from"] = "mule4_dw"
-            session["code_cat_to"] = "Java"
-            setJavaJarLocation(current_session)
-            return redirect("/")
-    return render_template("login.html")
+        file_name = req.params.get("file_name", "uploaded_file.xlsx")
+        sheet_name = req.params.get("sheet_name")
+        src_col = req.params.get("source_system_column")
+        tgt_col = req.params.get("target_system_column")
+        logic_col = req.params.get("business_logic_column")
 
+        logger.info(f"Parameters: file={file_name}, sheet={sheet_name}, src={src_col}, tgt={tgt_col}, logic={logic_col}")
 
-@app.route("/logout")
-def logout():
-    current_session = getSessionObjectForCurrentUser()
-    u_name = current_session.get(cui.NAME, 'Guest')
-    if (LogLevel.shouldLog(LogLevel.DEBUG, LOCAL_LOG_LEVEL)):
-        print(f"User just logged out; {u_name}")
-    current_session[cui.NAME] = None
-    return redirect("/")
+        if not all([sheet_name, src_col, tgt_col, logic_col]):
+            return func.HttpResponse("Missing one or more required query parameters.", status_code=400)
 
+        source_col_idx = col_letter_to_index(src_col)
+        target_col_idx = col_letter_to_index(tgt_col)
+        logic_col_idx = col_letter_to_index(logic_col)
 
-@app.route("/java", methods=["POST", "GET"])
-def java():
-    current_session = getSessionObjectForCurrentUser()
-    if not current_session.get("name"):
-        return redirect("/login")
-    valid_loc = True
-    if request.method == "POST":
-        # retrieve the directory
-        jar_dir = request.form["v_jar_dir"]
-        # if valid location
-        if jsu.verify_file_loc(jar_dir):
-            if (LogLevel.shouldLog(LogLevel.DEBUG, LOCAL_LOG_LEVEL)):
-                print(f"Java load dir loaded: {jar_dir}")
-            # store in the session
-            current_session[cui.JAR_DIR] = jar_dir
-            jsu.initUserContent(current_session[cui.NAME], jar_dir)
-            return render_template('index.html')
-        else:
-            valid_loc = False
-    return render_template('java.html', valid_loc=valid_loc)
+        if None in [source_col_idx, target_col_idx, logic_col_idx]:
+            return func.HttpResponse("Invalid column letters provided.", status_code=400)
 
+        body = req.get_body()
+        if not body:
+            return func.HttpResponse("No file content found in body.", status_code=400)
 
-@app.route("/manual", methods=["POST", "GET"])
-def manual():
-    current_session = getSessionObjectForCurrentUser()
-    if not current_session.get("name"):
-        return redirect("/login")
-    doc_id = None
-    input_sample = ""
-    output_sample = ""
-    if request.method == "POST":
-        input_sample = request.form["v_input"]
-        output_sample = request.form["v_output"]
-        codeCatFrom = request.form["code_cat_from"]
-        codeCatTo = request.form["code_cat_to"]
-        sample_source = request.form["v_source"]
-        current_session[cui.SAMPLE_SOURCE] = sample_source
-        if (LogLevel.shouldLog(LogLevel.DEBUG, LOCAL_LOG_LEVEL)):
-            print(input_sample)
-            print(output_sample)
-            print(sample_source)
-        doc_id = cdu.addInputOutputExample(
-            input_sample=input_sample,
-            output_sample=output_sample,
-            sample_source=sample_source,
-            codeCatFrom=codeCatFrom,
-            codeCatTo=codeCatTo,
-            user_id=current_session.get("name")
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as temp_file:
+            temp_file.write(body)
+            temp_file_path = temp_file.name
+
+        extracted_data = extract_excel_data(temp_file_path, sheet_name, source_col_idx, logic_col_idx, target_col_idx)
+        if not extracted_data:
+            return func.HttpResponse("No data extracted from Excel file.", status_code=400)
+
+        prompt = build_dataweave_prompt(
+            extracted_data,
+            file_name, sheet_name, src_col, tgt_col, logic_col
         )
 
-    return render_template("manual.html", manual=True,
-                           doc_id=doc_id,
-                           input_sample=input_sample,
-                           output_sample=output_sample)
-
-
-@app.route("/search_results", methods=["POST", "GET"])
-def searchResults():
-    current_session = getSessionObjectForCurrentUser()
-    if not current_session.get("name"):
-        return redirect("/login")
-    return render_template('search_results.html')
-
-
-@app.route("/sendtoGPT", methods=["POST"])
-def sendtoGPT():
-    current_session = getSessionObjectForCurrentUser()
-    u_name = current_session[cui.NAME]
-    if not current_session.get("name"):
-        return redirect("/login")
-    v_ids = request.form["v_ids"].strip()
-    v_gpt = "v_gpt" in request.form
-    if (LogLevel.shouldLog(LogLevel.DEBUG, LOCAL_LOG_LEVEL)):
-        print(f"Requested doc ids: {v_ids}")
-        print(f"Requested GPT: {v_gpt}")
-    doc_id_list = c.convert_string(v_ids)
-    if (LogLevel.shouldLog(LogLevel.DEBUG, LOCAL_LOG_LEVEL)):
-        print(f"Requested doc ids to send to GPT: {doc_id_list}")
-    input_request=current_session[cui.IN_DW]
-    prompt_hint=current_session[cui.USR_REQ_PROMPT]
-    codeCatFrom=current_session[cui.CODE_CAT_FROM]
-    codeCatTo=current_session[cui.CODE_CAT_TO]
-    java_prompt_jar = jsu.getJavaPromptJar(u_name)
-    java_prompt_prj = jsu.getJavaPromptPrj(u_name)
-    if not prompt_hint:
-        prompt_hint = c.getDefaultPromptHint(codeCatFrom, codeCatTo)
-    if v_gpt:
-        gpt_results = cdu.getGPTResponse(input_request=input_request,
-                                        doc_id_list=doc_id_list,
-                                        prompt_hint=prompt_hint,
-                                        codeCatFrom=codeCatFrom,
-                                        codeCatTo=codeCatTo,
-                                        java_prompt_jar=java_prompt_jar,
-                                        java_prompt_prj=java_prompt_prj)
-        display_result = gpt_results.choices[0].message.content
-
-        return render_template("manual.html", manual=False,
-                            doc_id="",
-                            doc_id_list=doc_id_list,
-                            input_sample=current_session[cui.IN_DW],
-                            output_sample=display_result)
-    net_prompt = cdu.getNetPrompt(input_request=input_request,
-                                doc_id_list=doc_id_list,
-                                prompt_hint=prompt_hint,
-                                codeCatFrom=codeCatFrom,
-                                codeCatTo=codeCatTo,
-                                java_prompt_jar=java_prompt_jar,
-                                java_prompt_prj=java_prompt_prj)
-    print(net_prompt)
-    return render_template('net_prompt.html', net_prompt=net_prompt)
-
-
-@app.route("/AzureChatgptModel", methods=["POST"])
-def AzureChatgptModel():
-    current_session = getSessionObjectForCurrentUser()
-    if not current_session.get("name"):
-        return redirect("/login")
-    v_ids = request.form["v_ids"].strip()
-    v_azuregpt = "v_azuregpt" in request.form
-    doc_id_list = c.convert_string(v_ids)
-    embedding = request.form.get("embedding", "")
-    if LogLevel.shouldLog(LogLevel.DEBUG, LOCAL_LOG_LEVEL):
-        print(f"Requested doc ids to send to Azure ChatGPT: {doc_id_list}")
-        print(f"Requested GPT: {v_azuregpt}")
-    dwl_content = current_session[cui.IN_DW]
-  
-    prompt = openaih.getGPTPreferredPrompt(
-        prompt_hint=current_session[cui.USR_REQ_PROMPT],
-        codeCatFrom=current_session[cui.CODE_CAT_FROM],
-        codeCatTo=current_session[cui.CODE_CAT_TO]
-    )
-
-    # ✅ Initialize new AzureChatOpenAI client
-    config = {
-        "deployment_name": "gpt-4.1-conversion",
-        "endpoint": "https://testopenaiassets.openai.azure.com/",
-        "api_key": "",   # TODO: add your key
-        "api_version": "2024-08-01-preview"
-    }
-    client = get_openai_client(config)
-
-    # ✅ Call AzureChatOpenAI with messages (roles not required explicitly)
-    gpt_results = client.invoke([
-        ("system", prompt),
-        ("user", dwl_content)
-    ])
-
-    display_result = gpt_results.content
-
-    return render_template("manual.html",
-        manual=False,
-        doc_id="",
-        doc_id_list=doc_id_list,
-        input_sample=dwl_content,
-        output_sample=display_result,
-        prompt=current_session[cui.USR_REQ_PROMPT]
-    )
-
-
-@app.route("/prompt", methods=["POST", "GET"])
-def prompt():
-    current_session = getSessionObjectForCurrentUser()
-    codeCatFrom = current_session[cui.CODE_CAT_FROM]
-    codeCatTo = current_session[cui.CODE_CAT_TO]
-    u_name = current_session[cui.NAME]
-    jar_dir = ""
-    prj_dir = ""
-    java_hints_jar = ""
-    java_hints_prj = ""
-    is_java = True if codeCatTo == "Java" or codeCatTo == "JUnit" else False
-    if is_java:
-        jar_dir = c.getJarLocation(current_session[cui.JAR_DIR])
-    if request.method == "POST":
-        dw = request.form["v_dw"]
-        prmpt = request.form["v_prompt"]
-        nbr = request.form["nbr_smpl_req"]
-        if is_java:
-            prj_dir = request.form["v_prj_dir"]
-            java_hints_jar = request.form["v_java_jar"]
-            java_hints_prj = request.form["v_java_prj"]
-        jsu.updateUserContent(u_name, jar_dir, java_hints_jar, prj_dir, java_hints_prj)
-        current_session[cui.IN_DW] = dw
-        current_session[cui.USR_REQ_PROMPT] = prmpt
-        current_session[cui.NBR_OF_SAMPLES_REQ] = nbr
-        if is_java:
-            current_session[cui.PRJ_DIR] = prj_dir
-            current_session[cui.JAVA_HINTS_JAR] = java_hints_jar
-            current_session[cui.JAVA_HINTS_PRJ] = java_hints_prj
-    else:
-        current_session = getSessionObjectForCurrentUser()
-        dw = current_session[cui.IN_DW]
-        prmpt = current_session[cui.USR_REQ_PROMPT]
-        nbr = current_session[cui.NBR_OF_SAMPLES_REQ]
-        if is_java:
-            prj_dir = current_session[cui.PRJ_DIR]
-            java_hints_jar = current_session[cui.JAVA_HINTS_JAR]
-            java_hints_prj = current_session[cui.JAVA_HINTS_PRJ]
+        client = get_openai_client()
+        result = chat_with_agent(prompt, client)
+       
         
-    if (LogLevel.shouldLog(LogLevel.DEBUG, LOCAL_LOG_LEVEL)):
-        print(dw)
-        print(prmpt)
-        print(nbr)
-        print(codeCatFrom)
-        print(codeCatTo)
-    if (dw and len(dw.strip()) > 0  and dw != "None"):
-        print("DW not empty!")
-        results = cdu.searchSimilarExamplesForInputReq(
-            input=dw,
-            codeCatFrom=codeCatFrom,
-            codeCatTo=codeCatTo
-        )
-        results_len = len(results["ids"][0])
-        if (LogLevel.shouldLog(LogLevel.DEBUG, LOCAL_LOG_LEVEL)):
-            print(f"Number of serach results returned: {results_len}")
-        jsu.updateUserContent(u_name, jar_dir, java_hints_jar, prj_dir, java_hints_prj)
-        return render_template(
-            "search_results.html",
-            results_len=results_len,
-            ids=results["ids"][0],
-            metadata=results["metadatas"][0],
-            distances=results["distances"][0],
-            documents=results["documents"][0],
-            yhats=results["yhats"][0],
-            idstring=c.convert_to_string(results["ids"][0]),
-            java_prompt_jar = jsu.getJavaPromptJar(u_name) if is_java else "",
-            java_prompt_prj = jsu.getJavaPromptPrj(u_name) if is_java else ""
-        )
-    else:
-        return render_template(
-            "search_results.html",
-            results_len=0,
-            java_prompt_jar = jsu.getJavaPromptJar(u_name) if is_java else "",
-            java_prompt_prj = jsu.getJavaPromptPrj(u_name) if is_java else ""
-        )
 
-    return redirect("/")
+        return func.HttpResponse(result, status_code=200, mimetype="text/plain")
 
-
-@app.route('/about/')
-def about():
-    return '<h3>This is a CHatGPT DW-to-Java web application.</h3>'
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run Flask app with configurable port")
-    parser.add_argument("--port", type=int, default=5000, help="Port number to run the Flask app on")
-    args = parser.parse_args()
-    cdu.initClient()
-    app.run(host='0.0.0.0', port=args.port)
+    except Exception as e:
+        logger.error(f"Unhandled error: {str(e)}", exc_info=True)
+        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
