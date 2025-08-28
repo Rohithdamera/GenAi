@@ -1,6 +1,7 @@
 import os   
 import logging   
 import tempfile   
+import re
 import openpyxl   
 from base64 import b64decode   
 from Crypto.Cipher import AES   
@@ -52,7 +53,14 @@ def col_letter_to_index(col_letter):
         logger.error(f"Invalid column letter: {col_letter} - {str(e)}")   
         return None   
   
-def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col):   
+def parse_special_note_columns(special_note: str):   
+    """Extract column letters from special_note (e.g., 'column E' -> ['E'])."""   
+    if not special_note:   
+        return []   
+    matches = re.findall(r"[Cc]olumn\s+([A-Za-z])", special_note)   
+    return [m.upper() for m in matches]   
+  
+def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col, extra_cols=None):   
     try:   
         wb = openpyxl.load_workbook(file_path, data_only=True)   
         sheet = wb[sheet_name]   
@@ -61,11 +69,20 @@ def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col)
             source = row[source_col] if source_col < len(row) else None   
             logic = row[logic_col] if logic_col < len(row) else None   
             target = row[target_col] if target_col < len(row) else None   
+  
+            extra_values = {}   
+            if extra_cols:   
+                for col_letter, col_idx in extra_cols.items():   
+                    extra_val = row[col_idx] if col_idx < len(row) else None   
+                    if extra_val:   
+                        extra_values[col_letter] = extra_val   
+  
             if source and target:   
                 data.append({   
                     "source": source,   
                     "logic": logic or "",   
-                    "target": target   
+                    "target": target,   
+                    "specials": extra_values   
                 })   
             if len(data) >= max_rows:   
                 break   
@@ -86,7 +103,12 @@ def build_dataweave_prompt(data, file_name, sheet_name, source_col, target_col, 
         prompt += f"- Special Note: {special_note}\n"   
   
     for row in data:   
-        prompt += f"- Source: {row['source']}, Target: {row['target']}, Logic: {row['logic']}\n"   
+        line = f"- Source: {row['source']}, Target: {row['target']}, Logic: {row['logic']}"   
+        if row.get("specials"):   
+            for col_letter, val in row["specials"].items():   
+                line += f", Special({col_letter}): {val}"   
+        prompt += line + "\n"   
+  
     return prompt   
   
 # Chat with OpenAI and track token usage and cost   
@@ -144,6 +166,15 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         if None in [source_col_idx, target_col_idx, logic_col_idx]:   
             return func.HttpResponse("Invalid column letters provided.", status_code=400)   
   
+        # Parse extra columns from special_note   
+        extra_cols = {}   
+        if special_note:   
+            col_letters = parse_special_note_columns(special_note)   
+            for letter in col_letters:   
+                idx = col_letter_to_index(letter)   
+                if idx is not None:   
+                    extra_cols[letter] = idx   
+  
         body = req.get_body()   
         if not body:   
             return func.HttpResponse("No file content found in body.", status_code=400)   
@@ -152,7 +183,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             temp_file.write(body)   
             temp_file_path = temp_file.name   
   
-        extracted_data = extract_excel_data(temp_file_path, sheet_name, source_col_idx, logic_col_idx, target_col_idx)   
+        extracted_data = extract_excel_data(   
+            temp_file_path, sheet_name, source_col_idx, logic_col_idx, target_col_idx, extra_cols   
+        )   
         if not extracted_data:   
             return func.HttpResponse("No data extracted from Excel file.", status_code=400)   
   
