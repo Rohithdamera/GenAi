@@ -1,178 +1,102 @@
-update the below code , according to my requirements , if i ask question like (generate java project name as AWS_Connector by taking this path as a reference C:\Users\rdamera\Downloads\osif-java-cg-candidate) it need to generate the entire java project and need created inside  this folder ("C:/Users/rdamera/Downloads/ddddd"), do what ever changes need to change just change in the code , use less java code , keep more instruction and prompt , so the the generated java project structure remains to be same as the reference java project path, pom.xml , controllers , service etc everything need to be same , only change is to in the reference java  folders names, with actual provided name  for example if ask like  generate java project name as AWS_Connector it need to replace with with the refrence name 
+import os import shutil from pathlib import Path import gradio as gr import json from langchain.prompts import PromptTemplate from langchain_openai import AzureChatOpenAI
 
+=== Azure OpenAI Client ===
 
-reference project structure:-
-1. C:\Users\rdamera\Downloads\osif-java-cg-candidate\osif-java-cg-candidate\osif-java-cg-candidate\src\main\java\com\example\osif_java_cg_candidate\main_method(OsifJavaCgCandidateApplication)
-
-2. 1. C:\Users\rdamera\Downloads\osif-java-cg-candidate\osif-java-cg-candidate\osif-java-cg-candidate\src\main\test\com\example\osif_java_cg_candidate\main_method(OsifJavaCgCandidateApplicationTests)
-
-expected project structure:
-1.C:\Users\rdamera\Downloads\AWS_Connector\AWS_Connector\AWS_Connector\src\main\java\com\example\AWS_Connector\aws_connectorApplication_main
-
-2.C:\Users\rdamera\Downloads\AWS_Connector\AWS_Connector\AWS_Connector\src\test\java\com\example\AWS_Connector\aws_connectorApplication_mainTests
-
-
-using ai the replaced names need to be generated with provided name by the user like aws_connector or gcp_connector etc , inside the controller , repository , service etc no code or .java class need not be generated , only main method need to be generated the structure remains need to be same reference file ,dont hard code anything , based on instruction, and prompt , reference java project stucture (folders , sub folders )it need to replace  the names of generated java  project folders  based on user provided name, give me fuly updated code 
-
-
-
-
-code:-
-
-
-
-import os
-import shutil
-from pathlib import Path
-import gradio as gr
-import json
-from langchain.prompts import PromptTemplate
-from langchain_openai import AzureChatOpenAI
-
-
-# === Azure OpenAI Client ===
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        deployment_name="gpt-4_complex_conversions",
-        openai_api_key="",
-        openai_api_version="2024-08-01-preview",
-        openai_api_type="azure",
-        temperature=0.3,
-        max_tokens=4000,
-    )
-
+def get_openai_client(): return AzureChatOpenAI( azure_endpoint="https://testopenaiassets.openai.azure.com", deployment_name="gpt-4_complex_conversions", openai_api_key="", openai_api_version="2024-08-01-preview", openai_api_type="azure", temperature=0.3, max_tokens=4000, )
 
 llm = get_openai_client()
 
+=== Step 1: Extract user intent ===
 
-# === Step 1: Extract user intent ===
-def extract_user_intent(user_input: str) -> dict:
-    prompt = PromptTemplate(
-        input_variables=["user_input"],
-        template="""
-From the following request, extract two things:
+def extract_user_intent(user_input: str) -> dict: prompt = PromptTemplate( input_variables=["user_input"], template=""" From the following request, extract two things:
 
-1. new_project_name → the new project name (e.g., AWS_Connector, GCP_Connector)  
-2. reference_path → the given reference project path  
-
-Return only valid JSON:
-{{
-  "new_project_name": "...",
-  "reference_path": "..."
-}}
-
-User request:
-{user_input}
-"""
-    )
-    response = (prompt | llm).invoke({"user_input": user_input})
-    return json.loads(response.content.strip())
+1. new_project_name → the new project name (e.g., AWS_Connector, GCP_Connector)
 
 
-# === Step 2: Detect old project name ===
-def detect_old_project_name(reference_path: str) -> str:
-    prompt = PromptTemplate(
-        input_variables=["path"],
-        template="""
-You are given a reference project folder path: {path}.
-
-From this path, identify the project name (the last folder name).  
-Return only the project name, nothing else.
-"""
-    )
-    response = (prompt | llm).invoke({"path": reference_path})
-    return response.content.strip()
+2. reference_path → the given reference project path
 
 
-# === Step 3: AI rewrite file content ===
-def ai_rewrite_file(source: str, old_name: str, new_name: str) -> str:
-    prompt = PromptTemplate(
-        input_variables=["source", "old_name", "new_name"],
-        template="""
-You are refactoring a Java project.
+
+Return only valid JSON: {{ "new_project_name": "...", "reference_path": "..." }}
+
+User request: {user_input} """ ) response = (prompt | llm).invoke({"user_input": user_input}) return json.loads(response.content.strip())
+
+=== Step 2: Detect old project name ===
+
+def detect_old_project_name(reference_path: str) -> str: return Path(reference_path).name
+
+=== Step 3: Generate only Main + Test class ===
+
+def ai_generate_main_and_test(old_name: str, new_name: str) -> dict: prompt = PromptTemplate( input_variables=["old_name", "new_name"], template=""" You are generating a new Java Spring Boot project.
 
 Rules:
-- The old project name is {old_name}.
-- Replace it consistently with {new_name}.
-- This includes class names, package names, imports, configs, tests, comments.
-- Keep structure, formatting, and other logic intact.
-- Do not drop any content.
-- Only output the updated file text.
 
-File content:
-{source}
-"""
-    )
-    response = (prompt | llm).invoke(
-        {"source": source, "old_name": old_name, "new_name": new_name}
-    )
-    return response.content.strip()
+The old project name is {old_name}.
+
+Replace it everywhere with {new_name}.
+
+Only generate two files:
+
+1. The main Spring Boot application class.
 
 
-# === Step 4: Rewrite full project ===
-def rewrite_project(reference_path: str, old_project_name: str, new_project_name: str) -> str:
-    ref_path = Path(reference_path)
-    if not ref_path.exists():
-        return f"[ERROR] Reference project not found: {reference_path}"
-
-    target_base = Path("C:/Users/rdamera/Downloads/ddddd")
-    target_path = target_base / new_project_name
-    if target_path.exists():
-        shutil.rmtree(target_path)
-
-    # Copy structure first
-    shutil.copytree(ref_path, target_path)
-
-    # Walk through and process
-    for file_path in target_path.rglob("*"):
-        # === 1. Rename folder names if they contain old project name ===
-        if old_project_name in file_path.name:
-            new_file_path = file_path.with_name(file_path.name.replace(old_project_name, new_project_name))
-            file_path.rename(new_file_path)
-            file_path = new_file_path
-
-        # === 2. Rewrite file contents if text file ===
-        if file_path.is_file() and file_path.suffix.lower() in [
-            ".java", ".xml", ".yml", ".yaml", ".properties", ".json", ".md", ".txt"
-        ]:
-            try:
-                source = file_path.read_text(encoding="utf-8", errors="ignore")
-                updated = ai_rewrite_file(source, old_project_name, new_project_name)
-                file_path.write_text(updated, encoding="utf-8")
-            except Exception as e:
-                print(f"[WARN] Skipping {file_path}: {e}")
-
-    return str(target_path)
+2. The corresponding JUnit test class.
 
 
-# === Main Orchestration ===
-def process_java_project(user_input: str, history):
-    try:
-        # Extract what user asked
-        intent = extract_user_intent(user_input)
-        reference_path = intent["reference_path"]
-        new_project_name = intent["new_project_name"]
 
-        # Detect old project name
-        old_project_name = detect_old_project_name(reference_path)
+All other packages (controller, repository, service, etc.) should remain empty folders.
 
-        # Rewrite everything
-        new_path = rewrite_project(reference_path, old_project_name, new_project_name)
-        return f"[SUCCESS] Project '{new_project_name}' created at {new_path}"
+Keep correct Java package structure: com.example.{new_name}
 
-    except Exception as e:
-        return f"[ERROR] {str(e)}"
+Use correct PascalCase for class names (e.g., AWS_Connector → AwsConnectorApplication).
+
+Do not add extra comments or files.
 
 
-# === Gradio UI ===
-chatbot_ui = gr.ChatInterface(
-    fn=process_java_project,
-    title="AI Java Project Generator",
-    description="Provide a reference project path and a new project name. AI will regenerate the full project with the same structure but with the new name everywhere.",
-    theme="default",
-)
+Return output as JSON: {{ "main_class": "<java code>", "test_class": "<java code>" }} """ ) response = (prompt | llm).invoke({"old_name": old_name, "new_name": new_name}) return json.loads(response.content.strip())
 
+=== Step 4: Build project structure ===
 
-if __name__ == "__main__":
-    chatbot_ui.launch()
+def build_project(reference_path: str, old_project_name: str, new_project_name: str) -> str: ref_path = Path(reference_path) if not ref_path.exists(): return f"[ERROR] Reference project not found: {reference_path}"
+
+target_base = Path("C:/Users/rdamera/Downloads/ddddd")
+target_path = target_base / new_project_name / new_project_name / new_project_name
+if target_path.exists():
+    shutil.rmtree(target_path)
+
+# Copy only structure (folders)
+shutil.copytree(ref_path, target_path, ignore=shutil.ignore_patterns("*.java"))
+
+# Generate new main + test files
+code = ai_generate_main_and_test(old_project_name, new_project_name)
+
+# Write main class
+main_dir = target_path / "src" / "main" / "java" / "com" / "example" / new_project_name
+main_dir.mkdir(parents=True, exist_ok=True)
+(main_dir / f"{new_project_name}Application.java").write_text(code["main_class"], encoding="utf-8")
+
+# Write test class
+test_dir = target_path / "src" / "test" / "java" / "com" / "example" / new_project_name
+test_dir.mkdir(parents=True, exist_ok=True)
+(test_dir / f"{new_project_name}ApplicationTests.java").write_text(code["test_class"], encoding="utf-8")
+
+return str(target_path)
+
+=== Main Orchestration ===
+
+def process_java_project(user_input: str, history): try: intent = extract_user_intent(user_input) reference_path = intent["reference_path"] new_project_name = intent["new_project_name"]
+
+old_project_name = detect_old_project_name(reference_path)
+
+    new_path = build_project(reference_path, old_project_name, new_project_name)
+    return f"[SUCCESS] Project '{new_project_name}' created at {new_path}"
+
+except Exception as e:
+    return f"[ERROR] {str(e)}"
+
+=== Gradio UI ===
+
+chatbot_ui = gr.ChatInterface( fn=process_java_project, title="AI Java Project Generator", description="Provide a reference project path and a new project name. AI will regenerate the full project with the same structure but with the new name everywhere (only main + test class generated).", theme="default", )
+
+if name == "main": chatbot_ui.launch()
+
