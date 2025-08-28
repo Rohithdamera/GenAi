@@ -1,218 +1,171 @@
-
-update the below code , currently it is running in azure function through posman , i will pass in postman the below things 
-
-
-postman ->params ->
-
-key                   value 
-
-file_name            testfile_complex_Mapping_sheet.xslx
-sheet_name            v-complex
-source_system_column   c
-target_system_column   j
-business_logic_column  h
-
-
-
-and in body i will pass .xslx file , based on the file content inside .xslx ,  it will generate the test data according to it , so now i had one more requirement like i will be add one more called (special_note) in params along with all params
-
-example:-
-
-key                        value 
-
-file_name                 testfile_complex_Mapping_sheet.xslx
-sheet_name                v-complex
-source_system_column       c
-target_system_column       j
-business_logic_column      h 
-special_note              please refer to column e for another target_system_column (or) use column m also for business_logic_column
-
-
-
-what ever the prompt user passing through  special_note the ai need to handle it properly , need to go inside .xslx file , generate test data data according to it , just my requirement below of the prompt
-
-example;
-
- f"- Column {source_col} contains source field details.\n"
-        f"- Column {target_col} contains target field details.\n"
-        f"- Column {logic_col} contains business logic for transformations.\n"
-          f"- Column {special_note} need to take conent from user 
-
-
-
-
-dont change anything in the exesting code like code functionality , prompts, instruction keep as it is , never change the exesting functionality  keep as it is , just add above mentioned  feature in the exesting code give me fully updated code 
-
-
-
-
-import os
-import logging
-import tempfile
-import openpyxl
-from base64 import b64decode
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import unpad
-from langchain_community.chat_models import AzureChatOpenAI
-from langchain.schema import HumanMessage
-from langchain.callbacks import get_openai_callback
-from openpyxl.utils import column_index_from_string
-import azure.functions as func
-
-logger = logging.getLogger(__name__)
-
-# Limit the number of rows processed
-max_rows = 500
-
-# AES Decryption
-def decrypt(data, key):
-    cipher = AES.new(b64decode(key), AES.MODE_ECB)
-    decrypted_data = cipher.decrypt(b64decode(data))
-    decrypted_data = unpad(decrypted_data, AES.block_size)
-    return decrypted_data.decode()
-
-# LangChain OpenAI Client (using env for deployment name)
-def get_openai_client():
-    aes_key_base64 = os.environ['AES_KEY']
-    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
-    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
-    api_version = os.environ['AZURE_API_VERSION']
-    deployment_name = os.environ['AZURE_DEPLOYMENT']
-
-    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
-    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
-
-    if not decrypted_api_base.endswith('/'):
-        decrypted_api_base += '/'
-
-    return AzureChatOpenAI(
-        deployment_name=deployment_name,
-        openai_api_base=decrypted_api_base,
-        openai_api_key=decrypted_api_key,
-        openai_api_version=api_version,
-        temperature=1,
-        # max_tokens not supported for o4-mini
-    )
-
-def col_letter_to_index(col_letter):
-    try:
-        return column_index_from_string(col_letter.upper()) - 1
-    except Exception as e:
-        logger.error(f"Invalid column letter: {col_letter} - {str(e)}")
-        return None
-
-def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col):
-    try:
-        wb = openpyxl.load_workbook(file_path, data_only=True)
-        sheet = wb[sheet_name]
-        data = []
-        for row in sheet.iter_rows(min_row=2, values_only=True):
-            source = row[source_col] if source_col < len(row) else None
-            logic = row[logic_col] if logic_col < len(row) else None
-            target = row[target_col] if target_col < len(row) else None
-            if source and target:
-                data.append({
-                    "source": source,
-                    "logic": logic or "",
-                    "target": target
-                })
-            if len(data) >= max_rows:
-                break
-        return data
-    except Exception as e:
-        logger.error(f"Failed to extract Excel data: {e}")
-        return []
-
-def build_dataweave_prompt(data, file_name, sheet_name, source_col, target_col, logic_col):
-    prompt = (
-        f"Write a DataWeave script referring to the uploaded Excel file named {file_name}, "
-        f"specifically the sheet named {sheet_name}.\n"
-        f"- Column {source_col} contains source field details.\n"
-        f"- Column {target_col} contains target field details.\n"
-        f"- Column {logic_col} contains business logic for transformations.\n"
-    )
-    for row in data:
-        prompt += f"- Source: {row['source']}, Target: {row['target']}, Logic: {row['logic']}\n"
-    return prompt
-
-# Chat with OpenAI and track token usage and cost
-def chat_with_agent(prompt, client):
-    messages = [
-        HumanMessage(content="""
-You are a DataWeave agent. Your task is to generate a valid DataWeave 2.0 script based on an integration mapping Excel file.
-Use the following rules:
-
-- Read and interpret each row of the Excel file.
-- For each row, generate a mapping in the DataWeave script that transforms the source field into the target field using the specified logic.
-- Start your script with output application/json or output application/xml — this sets the tone.
-- Use map, filter, pluck, groupBy — these are DataWeave functions.
-- Strictly follow Dataweave inbuilt functions syntax.
-        """),
-        HumanMessage(content=prompt),
-        HumanMessage(content="Generate the DataWeave script.")
-    ]
-
-    try:
-        with get_openai_callback() as cb:
-            result = client.invoke(messages)
-            final_response = result.content.strip()
-            final_response += "\n\n--- Token Usage ---"
-            final_response += f"\nTotal Tokens: {cb.total_tokens}"
-            final_response += f"\nPrompt Tokens: {cb.prompt_tokens}"
-            final_response += f"\nCompletion Tokens: {cb.completion_tokens}"
-            final_response += f"\nTotal Cost (USD): ${format(cb.total_cost, '.6f')}"
-            return final_response
-    except Exception as e:
-        logger.error(f"Error during model invocation: {e}")
-        raise
-
-# Azure Function main handler
-def main(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        logger.info("DataWeave function triggered.")
-
-        file_name = req.params.get("file_name", "uploaded_file.xlsx")
-        sheet_name = req.params.get("sheet_name")
-        src_col = req.params.get("source_system_column")
-        tgt_col = req.params.get("target_system_column")
-        logic_col = req.params.get("business_logic_column")
-
-        logger.info(f"Parameters: file={file_name}, sheet={sheet_name}, src={src_col}, tgt={tgt_col}, logic={logic_col}")
-
-        if not all([sheet_name, src_col, tgt_col, logic_col]):
-            return func.HttpResponse("Missing one or more required query parameters.", status_code=400)
-
-        source_col_idx = col_letter_to_index(src_col)
-        target_col_idx = col_letter_to_index(tgt_col)
-        logic_col_idx = col_letter_to_index(logic_col)
-
-        if None in [source_col_idx, target_col_idx, logic_col_idx]:
-            return func.HttpResponse("Invalid column letters provided.", status_code=400)
-
-        body = req.get_body()
-        if not body:
-            return func.HttpResponse("No file content found in body.", status_code=400)
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as temp_file:
-            temp_file.write(body)
-            temp_file_path = temp_file.name
-
-        extracted_data = extract_excel_data(temp_file_path, sheet_name, source_col_idx, logic_col_idx, target_col_idx)
-        if not extracted_data:
-            return func.HttpResponse("No data extracted from Excel file.", status_code=400)
-
-        prompt = build_dataweave_prompt(
-            extracted_data,
-            file_name, sheet_name, src_col, tgt_col, logic_col
-        )
-
-        client = get_openai_client()
-        result = chat_with_agent(prompt, client)
-       
-        
-
-        return func.HttpResponse(result, status_code=200, mimetype="text/plain")
-
-    except Exception as e:
-        logger.error(f"Unhandled error: {str(e)}", exc_info=True)
+import os   
+import logging   
+import tempfile   
+import openpyxl   
+from base64 import b64decode   
+from Crypto.Cipher import AES   
+from Crypto.Util.Padding import unpad   
+from langchain_community.chat_models import AzureChatOpenAI   
+from langchain.schema import HumanMessage   
+from langchain.callbacks import get_openai_callback   
+from openpyxl.utils import column_index_from_string   
+import azure.functions as func   
+  
+logger = logging.getLogger(__name__)   
+  
+# Limit the number of rows processed   
+max_rows = 500   
+  
+# AES Decryption   
+def decrypt(data, key):   
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)   
+    decrypted_data = cipher.decrypt(b64decode(data))   
+    decrypted_data = unpad(decrypted_data, AES.block_size)   
+    return decrypted_data.decode()   
+  
+# LangChain OpenAI Client (using env for deployment name)   
+def get_openai_client():   
+    aes_key_base64 = os.environ['AES_KEY']   
+    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']   
+    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']   
+    api_version = os.environ['AZURE_API_VERSION']   
+    deployment_name = os.environ['AZURE_DEPLOYMENT']   
+  
+    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)   
+    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)   
+  
+    if not decrypted_api_base.endswith('/'):   
+        decrypted_api_base += '/'   
+  
+    return AzureChatOpenAI(   
+        deployment_name=deployment_name,   
+        openai_api_base=decrypted_api_base,   
+        openai_api_key=decrypted_api_key,   
+        openai_api_version=api_version,   
+        temperature=1,   
+    )   
+  
+def col_letter_to_index(col_letter):   
+    try:   
+        return column_index_from_string(col_letter.upper()) - 1   
+    except Exception as e:   
+        logger.error(f"Invalid column letter: {col_letter} - {str(e)}")   
+        return None   
+  
+def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col):   
+    try:   
+        wb = openpyxl.load_workbook(file_path, data_only=True)   
+        sheet = wb[sheet_name]   
+        data = []   
+        for row in sheet.iter_rows(min_row=2, values_only=True):   
+            source = row[source_col] if source_col < len(row) else None   
+            logic = row[logic_col] if logic_col < len(row) else None   
+            target = row[target_col] if target_col < len(row) else None   
+            if source and target:   
+                data.append({   
+                    "source": source,   
+                    "logic": logic or "",   
+                    "target": target   
+                })   
+            if len(data) >= max_rows:   
+                break   
+        return data   
+    except Exception as e:   
+        logger.error(f"Failed to extract Excel data: {e}")   
+        return []   
+  
+def build_dataweave_prompt(data, file_name, sheet_name, source_col, target_col, logic_col, special_note=None):   
+    prompt = (   
+        f"Write a DataWeave script referring to the uploaded Excel file named {file_name}, "   
+        f"specifically the sheet named {sheet_name}.\n"   
+        f"- Column {source_col} contains source field details.\n"   
+        f"- Column {target_col} contains target field details.\n"   
+        f"- Column {logic_col} contains business logic for transformations.\n"   
+    )   
+    if special_note:   
+        prompt += f"- Special Note: {special_note}\n"   
+  
+    for row in data:   
+        prompt += f"- Source: {row['source']}, Target: {row['target']}, Logic: {row['logic']}\n"   
+    return prompt   
+  
+# Chat with OpenAI and track token usage and cost   
+def chat_with_agent(prompt, client):   
+    messages = [   
+        HumanMessage(content="""   
+You are a DataWeave agent. Your task is to generate a valid DataWeave 2.0 script based on an integration mapping Excel file.   
+Use the following rules:   
+  
+- Read and interpret each row of the Excel file.   
+- For each row, generate a mapping in the DataWeave script that transforms the source field into the target field using the specified logic.   
+- Start your script with output application/json or output application/xml — this sets the tone.   
+- Use map, filter, pluck, groupBy — these are DataWeave functions.   
+- Strictly follow Dataweave inbuilt functions syntax.   
+        """),   
+        HumanMessage(content=prompt),   
+        HumanMessage(content="Generate the DataWeave script.")   
+    ]   
+  
+    try:   
+        with get_openai_callback() as cb:   
+            result = client.invoke(messages)   
+            final_response = result.content.strip()   
+            final_response += "\n\n--- Token Usage ---"   
+            final_response += f"\nTotal Tokens: {cb.total_tokens}"   
+            final_response += f"\nPrompt Tokens: {cb.prompt_tokens}"   
+            final_response += f"\nCompletion Tokens: {cb.completion_tokens}"   
+            final_response += f"\nTotal Cost (USD): ${format(cb.total_cost, '.6f')}"   
+            return final_response   
+    except Exception as e:   
+        logger.error(f"Error during model invocation: {e}")   
+        raise   
+  
+# Azure Function main handler   
+def main(req: func.HttpRequest) -> func.HttpResponse:   
+    try:   
+        logger.info("DataWeave function triggered.")   
+  
+        file_name = req.params.get("file_name", "uploaded_file.xlsx")   
+        sheet_name = req.params.get("sheet_name")   
+        src_col = req.params.get("source_system_column")   
+        tgt_col = req.params.get("target_system_column")   
+        logic_col = req.params.get("business_logic_column")   
+        special_note = req.params.get("special_note")   # <-- NEW PARAM   
+  
+        logger.info(f"Parameters: file={file_name}, sheet={sheet_name}, src={src_col}, tgt={tgt_col}, logic={logic_col}, special_note={special_note}")   
+  
+        if not all([sheet_name, src_col, tgt_col, logic_col]):   
+            return func.HttpResponse("Missing one or more required query parameters.", status_code=400)   
+  
+        source_col_idx = col_letter_to_index(src_col)   
+        target_col_idx = col_letter_to_index(tgt_col)   
+        logic_col_idx = col_letter_to_index(logic_col)   
+  
+        if None in [source_col_idx, target_col_idx, logic_col_idx]:   
+            return func.HttpResponse("Invalid column letters provided.", status_code=400)   
+  
+        body = req.get_body()   
+        if not body:   
+            return func.HttpResponse("No file content found in body.", status_code=400)   
+  
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as temp_file:   
+            temp_file.write(body)   
+            temp_file_path = temp_file.name   
+  
+        extracted_data = extract_excel_data(temp_file_path, sheet_name, source_col_idx, logic_col_idx, target_col_idx)   
+        if not extracted_data:   
+            return func.HttpResponse("No data extracted from Excel file.", status_code=400)   
+  
+        prompt = build_dataweave_prompt(   
+            extracted_data,   
+            file_name, sheet_name, src_col, tgt_col, logic_col, special_note   
+        )   
+  
+        client = get_openai_client()   
+        result = chat_with_agent(prompt, client)   
+  
+        return func.HttpResponse(result, status_code=200, mimetype="text/plain")   
+  
+    except Exception as e:   
+        logger.error(f"Unhandled error: {str(e)}", exc_info=True)   
         return func.HttpResponse(f"Error: {str(e)}", status_code=500)
