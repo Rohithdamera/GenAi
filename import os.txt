@@ -41,96 +41,159 @@ AI only need to decide what to change to generate accurate java project , make t
 code:-
 
 
+
+import os
+import shutil
+from pathlib import Path
 import gradio as gr
-from langgraph.prebuilt import create_react_agent
+import json
+from langchain.prompts import PromptTemplate
 from langchain_openai import AzureChatOpenAI
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.tools import tool
-from langchain.callbacks.tracers import ConsoleCallbackHandler
-from langchain_community.callbacks import get_openai_callback
-import io
-import sys
 
-#create a local reference to remote llm model
-llm = AzureChatOpenAI(
-    deployment_name="gpt-4_complex_conversions",
-    azure_endpoint="https://testopenaiassets.openai.azure.com",
-    openai_api_key="",
-    openai_api_version="2025-01-01-preview",
-    #verbose=False
-)
 
-@tool
-def save_graph_png() -> str:
-    """
-    Generates a visual graph of the agent's internal structure using Mermaid,
-    saves it as a PNG file named 'graph.png', and returns a local URL for download.
-
-    Returns:
-        str: A message confirming that if the graph has been saved and a link to download.
-    """
-    png_data = agent.get_graph().draw_mermaid_png()
-    file_path = "graph.png"
-    with open(file_path, "wb") as f:
-        f.write(png_data)
-    return (
-        " Graph saved successfully!\n\n"
-        "!Graph Preview\n\n"
-        " Download " +file_path
+# === Azure OpenAI Client ===
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        deployment_name="gpt-4_complex_conversions",
+        openai_api_key="",
+        openai_api_version="2024-08-01-preview",
+        openai_api_type="azure",
+        temperature=0.3,
+        max_tokens=4000,
     )
 
 
+llm = get_openai_client()
 
 
-agent = create_react_agent(
-    model=llm,
-    tools=[save_graph_png],
-    # Add verbose=True to enable logging
-    verbose=True
-)
+# === Step 1: Extract user intent ===
+def extract_user_intent(user_input: str) -> dict:
+    prompt = PromptTemplate(
+        input_variables=["user_input"],
+        template="""
+From the following request, extract two things:
 
-# Define the chatbot function
-def chat_with_agent(message, history):
-    messages = []
-    for user_msg, bot_msg in history:
-        messages.append(HumanMessage(content=user_msg))
-        messages.append(AIMessage(content=bot_msg))
-    messages.append(HumanMessage(content=message))
+1. new_project_name → the new project name (e.g., AWS_Connector, GCP_Connector)  
+2. reference_path → the given reference project path  
 
+Return only valid JSON:
+{{
+  "new_project_name": "...",
+  "reference_path": "..."
+}}
+
+User request:
+{user_input}
+"""
+    )
+    response = (prompt | llm).invoke({"user_input": user_input})
+    return json.loads(response.content.strip())
+
+
+# === Step 2: Detect old project name ===
+def detect_old_project_name(reference_path: str) -> str:
+    prompt = PromptTemplate(
+        input_variables=["path"],
+        template="""
+You are given a reference project folder path: {path}.
+
+From this path, identify the project name (the last folder name).  
+Return only the project name, nothing else.
+"""
+    )
+    response = (prompt | llm).invoke({"path": reference_path})
+    return response.content.strip()
+
+
+# === Step 3: AI rewrite file content ===
+def ai_rewrite_file(source: str, old_name: str, new_name: str) -> str:
+    prompt = PromptTemplate(
+        input_variables=["source", "old_name", "new_name"],
+        template="""
+You are refactoring a Java project.
+
+Rules:
+- The old project name is {old_name}.
+- Replace it consistently with {new_name}.
+- This includes class names, package names, imports, configs, tests, comments.
+- Keep structure, formatting, and other logic intact.
+- Do not drop any content.
+- Only output the updated file text.
+
+File content:
+{source}
+"""
+    )
+    response = (prompt | llm).invoke(
+        {"source": source, "old_name": old_name, "new_name": new_name}
+    )
+    return response.content.strip()
+
+
+# === Step 4: Rewrite full project ===
+def rewrite_project(reference_path: str, old_project_name: str, new_project_name: str) -> str:
+    ref_path = Path(reference_path)
+    if not ref_path.exists():
+        return f"[ERROR] Reference project not found: {reference_path}"
+
+    target_base = Path("C:/Users/rdamera/Downloads/ddddd")
+    target_path = target_base / new_project_name
+    if target_path.exists():
+        shutil.rmtree(target_path)
+
+    # Copy structure first
+    shutil.copytree(ref_path, target_path)
+
+    # Walk through and process
+    for file_path in target_path.rglob("*"):
+        # === 1. Rename folder names if they contain old project name ===
+        if old_project_name in file_path.name:
+            new_file_path = file_path.with_name(file_path.name.replace(old_project_name, new_project_name))
+            file_path.rename(new_file_path)
+            file_path = new_file_path
+
+        # === 2. Rewrite file contents if text file ===
+        if file_path.is_file() and file_path.suffix.lower() in [
+            ".java", ".xml", ".yml", ".yaml", ".properties", ".json", ".md", ".txt"
+        ]:
+            try:
+                source = file_path.read_text(encoding="utf-8", errors="ignore")
+                updated = ai_rewrite_file(source, old_project_name, new_project_name)
+                file_path.write_text(updated, encoding="utf-8")
+            except Exception as e:
+                print(f"[WARN] Skipping {file_path}: {e}")
+
+    return str(target_path)
+
+
+# === Main Orchestration ===
+def process_java_project(user_input: str, history):
     try:
-        with get_openai_callback() as cb: # Use the callback context manager
-            result = agent.invoke(
-                {"messages": messages},
-                config={"callbacks": [ConsoleCallbackHandler()]}
-            )
-            final_response = result["messages"][-1].content
-            # Append the token usage and cost information to the final_response
-            final_response += "\n\n--- Token Usage ---"
-            final_response += f"\nTotal Tokens: {cb.total_tokens}"
-            final_response += f"\nPrompt Tokens: {cb.prompt_tokens}"
-            final_response += f"\nCompletion Tokens: {cb.completion_tokens}"
-            final_response += f"\nTotal Cost (USD): ${format(cb.total_cost, '.6f')}"
-    finally:
-         print("+++")
+        # Extract what user asked
+        intent = extract_user_intent(user_input)
+        reference_path = intent["reference_path"]
+        new_project_name = intent["new_project_name"]
 
-  
-    return final_response
+        # Detect old project name
+        old_project_name = detect_old_project_name(reference_path)
+
+        # Rewrite everything
+        new_path = rewrite_project(reference_path, old_project_name, new_project_name)
+        return f"[SUCCESS] Project '{new_project_name}' created at {new_path}"
+
+    except Exception as e:
+        return f"[ERROR] {str(e)}"
 
 
-
-
-# Create the Gradio interface
+# === Gradio UI ===
 chatbot_ui = gr.ChatInterface(
-    fn=chat_with_agent,
-    title=" OSIF Co-Developer",
-    description="Your co-developer for OSIF development",
-    theme="default"
+    fn=process_java_project,
+    title="AI Java Project Generator",
+    description="Provide a reference project path and a new project name. AI will regenerate the full project with the same structure but with the new name everywhere.",
+    theme="default",
 )
 
-# Launch the app
-chatbot_ui.launch(debug=False)
 
-
-
-
-
+if __name__ == "__main__":
+    chatbot_ui.launch()
