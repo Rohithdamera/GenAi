@@ -1,234 +1,231 @@
-Ah I see what’s happening 👀
 
-The error WinError 183 means we’re trying to rename a file/folder into a path that already exists.
-That happened because we were renaming inside the copied project while the structure was already nested.
-
-👉 Your new idea is correct:
-
-1. First copy the project exactly as-is from the reference path to the destination.
-
-
-2. Then run AI/tools only for replacement → detect all occurrences of the old project name in folder names, file names, and main/test class content.
-
-
-3. Safely rename after the copy is complete, instead of renaming while copying.
-
-
-
-Here’s the fully updated version (safe flow):
-
-import os
-import shutil
-from pathlib import Path
-import gradio as gr
-import json
-from langchain.prompts import PromptTemplate
-from langchain_openai import AzureChatOpenAI
-
-
-# === Azure OpenAI Client ===
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        deployment_name="gpt-4_complex_conversions",
-        openai_api_key="",   # 🔑 put your key
-        openai_api_version="2024-08-01-preview",
-        openai_api_type="azure",
-        temperature=0.3,
-        max_tokens=4000,
-    )
-
-llm = get_openai_client()
-
-
-# === Extract user intent ===
-def extract_user_intent(user_input: str) -> dict:
-    prompt = PromptTemplate(
-        input_variables=["user_input"],
-        template="""
-From the request, extract:
-1. new_project_name (e.g., AWS_Connector, GCP_Connector)  
-2. reference_path (absolute folder path)  
-
-Return JSON only:
-{{
-  "new_project_name": "...",
-  "reference_path": "..."
-}}
-
-User request:
-{user_input}
-"""
-    )
-    response = (prompt | llm).invoke({"user_input": user_input})
-    return json.loads(response.content.strip())
-
-
-# === Detect old project name from reference path ===
-def detect_old_project_name(reference_path: str) -> str:
-    prompt = PromptTemplate(
-        input_variables=["path"],
-        template="""
-Given this reference path: {path}  
-Identify the main reference project name (the folder name used as the root).  
-
-Return only the name string.
-"""
-    )
-    response = (prompt | llm).invoke({"path": reference_path})
-    return response.content.strip()
-
-
-# === AI decide what needs replacing ===
-def ai_should_replace(old_name: str, new_name: str, file_path: str) -> dict:
-    prompt = PromptTemplate(
-        input_variables=["old_name", "new_name", "file_path"],
-        template="""
-We are refactoring a Java project.
-
-Old name: {old_name}  
-New name: {new_name}  
-File path: {file_path}  
-
-Rules:
-- Replace old_name with new_name in folder names, package names, main/test class names.
-- Other files (controllers, services, repos, configs) remain unchanged.
-- Only main and test classes should have **content updated**.
-- Return JSON only.
-
-Format:
-{{
-  "rename": true/false,
-  "new_name": "new-name-if-applicable",
-  "update_content": true/false
-}}
-"""
-    )
-    response = (prompt | llm).invoke(
-        {"old_name": old_name, "new_name": new_name, "file_path": file_path}
-    )
-    return json.loads(response.content.strip())
-
-
-# === AI rewrite only main/test classes ===
-def ai_rewrite_main(source: str, old_name: str, new_name: str) -> str:
-    prompt = PromptTemplate(
-        input_variables=["source", "old_name", "new_name"],
-        template="""
-Refactor only the main or test Application class.
-
-- Old project name: {old_name}
-- New project name: {new_name}
-- Rename class accordingly (e.g., AWS_ConnectorApplication, AWS_ConnectorApplicationTests).
-- Keep imports/annotations the same.
-- Return only the updated file text.
-
-File:
-{source}
-"""
-    )
-    response = (prompt | llm).invoke(
-        {"source": source, "old_name": old_name, "new_name": new_name}
-    )
-    return response.content.strip()
-
-
-# === Step: Generate new project ===
-def generate_project(reference_path: str, old_name: str, new_name: str) -> str:
-    ref_path = Path(reference_path)
-    if not ref_path.exists():
-        return f"[ERROR] Reference project not found: {reference_path}"
-
-    # Copy project "as-is"
-    target_base = Path("C:/Users/rdamera/Downloads/ddddd")
-    target_path = target_base / new_name
-    if target_path.exists():
-        shutil.rmtree(target_path)
-
-    shutil.copytree(ref_path, target_path)
-
-    # Now perform replacements
-    for file_path in list(target_path.rglob("*"))[::-1]:  
-        # (reverse order to safely rename nested files first)
-
-        decision = ai_should_replace(old_name, new_name, str(file_path))
-
-        # === Rename folders/files ===
-        if decision.get("rename", False):
-            new_file_path = file_path.with_name(
-                file_path.name.replace(old_name, new_name)
-            )
-            if not new_file_path.exists():  # prevent WinError 183
-                file_path.rename(new_file_path)
-                file_path = new_file_path
-
-        # === Rewrite main/test classes ===
-        if decision.get("update_content", False) and file_path.is_file():
-            try:
-                source = file_path.read_text(encoding="utf-8", errors="ignore")
-                updated = ai_rewrite_main(source, old_name, new_name)
-                file_path.write_text(updated, encoding="utf-8")
-            except Exception as e:
-                print(f"[WARN] Could not update {file_path}: {e}")
-
-    return str(target_path)
-
-
-# === Main Orchestration ===
-def process_java_project(user_input: str, history):
-    try:
-        intent = extract_user_intent(user_input)
-        ref_path = intent["reference_path"]
-        new_name = intent["new_project_name"]
-
-        old_name = detect_old_project_name(ref_path)
-        new_path = generate_project(ref_path, old_name, new_name)
-
-        return f"[SUCCESS] Project '{new_name}' created at {new_path}"
-
-    except Exception as e:
-        return f"[ERROR] {str(e)}"
-
-
-# === Gradio UI ===
-chatbot_ui = gr.ChatInterface(
-    fn=process_java_project,
-    title="AI Java Project Generator",
-    description="Provide a new project name and reference path. AI will copy the project, then replace old project name with the new one in folder names and only main/test classes.",
-    theme="default",
-)
-
-if __name__ == "__main__":
-    chatbot_ui.launch()
+import os   
+import logging   
+import tempfile   
+import re
+import openpyxl   
+from base64 import b64decode   
+from Crypto.Cipher import AES   
+from Crypto.Util.Padding import unpad   
+from langchain_community.chat_models import AzureChatOpenAI   
+from langchain.schema import HumanMessage   
+from langchain.callbacks import get_openai_callback   
+from openpyxl.utils import column_index_from_string   
+import azure.functions as func   
+  
+logger = logging.getLogger(__name__)   
+  
+# Limit the number of rows processed   
+max_rows = 500   
+  
+# AES Decryption   
+def decrypt(data, key):   
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)   
+    decrypted_data = cipher.decrypt(b64decode(data))   
+    decrypted_data = unpad(decrypted_data, AES.block_size)   
+    return decrypted_data.decode()   
+  
+# LangChain OpenAI Client (using env for deployment name)   
+def get_openai_client():   
+    aes_key_base64 = os.environ['AES_KEY']   
+    encrypted_api_base = os.environ['ENCRYPTED_API_BASE']   
+    encrypted_api_key = os.environ['ENCRYPTED_API_KEY']   
+    api_version = os.environ['AZURE_API_VERSION']   
+    deployment_name = os.environ['AZURE_DEPLOYMENT']   
+  
+    decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)   
+    decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)   
+  
+    if not decrypted_api_base.endswith('/'):   
+        decrypted_api_base += '/'   
+  
+    return AzureChatOpenAI(   
+        deployment_name=deployment_name,   
+        openai_api_base=decrypted_api_base,   
+        openai_api_key=decrypted_api_key,   
+        openai_api_version=api_version,   
+        temperature=1,   
+    )   
+  
+def col_letter_to_index(col_letter):   
+    try:   
+        return column_index_from_string(col_letter.upper()) - 1   
+    except Exception as e:   
+        logger.error(f"Invalid column letter: {col_letter} - {str(e)}")   
+        return None   
+  
+def parse_special_note_columns(special_note: str):   
+    """Extract column letters from special_note (e.g., 'column E' -> ['E'])."""   
+    if not special_note:   
+        return []   
+    matches = re.findall(r"[Cc]olumn\s+([A-Za-z])", special_note)   
+    return [m.upper() for m in matches]   
+  
+def extract_excel_data(file_path, sheet_name, source_col, logic_col, target_col, extra_cols=None):   
+    try:   
+        wb = openpyxl.load_workbook(file_path, data_only=True)   
+        sheet = wb[sheet_name]   
+        data = []   
+        for row in sheet.iter_rows(min_row=2, values_only=True):   
+            source = row[source_col] if source_col < len(row) else None   
+            logic = row[logic_col] if logic_col < len(row) else None   
+            target = row[target_col] if target_col < len(row) else None   
+  
+            extra_values = {}   
+            if extra_cols:   
+                for col_letter, col_idx in extra_cols.items():   
+                    extra_val = row[col_idx] if col_idx < len(row) else None   
+                    if extra_val:   
+                        extra_values[col_letter] = extra_val   
+  
+            if source and target:   
+                data.append({   
+                    "source": source,   
+                    "logic": logic or "",   
+                    "target": target,   
+                    "specials": extra_values   
+                })   
+            if len(data) >= max_rows:   
+                break   
+        return data   
+    except Exception as e:   
+        logger.error(f"Failed to extract Excel data: {e}")   
+        return []   
+  
+def build_dataweave_prompt(data, file_name, sheet_name, source_col, target_col, logic_col, special_note=None):   
+    prompt = (   
+        f"Write a DataWeave script referring to the uploaded Excel file named {file_name}, "   
+        f"specifically the sheet named {sheet_name}.\n"   
+        f"- Column {source_col} contains source field details.\n"   
+        f"- Column {target_col} contains target field details.\n"   
+        f"- Column {logic_col} contains business logic for transformations.\n"   
+    )   
+    if special_note:   
+        prompt += f"- Special Note: {special_note}\n"   
+  
+    for row in data:   
+        line = f"- Source: {row['source']}, Target: {row['target']}, Logic: {row['logic']}"   
+        if row.get("specials"):   
+            for col_letter, val in row["specials"].items():   
+                line += f", Special({col_letter}): {val}"   
+        prompt += line + "\n"   
+  
+    return prompt   
+  
+# Chat with OpenAI and track token usage and cost   
+def chat_with_agent(prompt, client):   
+    messages = [   
+        HumanMessage(content="""   
+You are a DataWeave agent. Your task is to generate a valid DataWeave 2.0 script based on an integration mapping Excel file.   
+Use the following rules:   
+  
+- Read and interpret each row of the Excel file.   
+- For each row, generate a mapping in the DataWeave script that transforms the source field into the target field using the specified logic.   
+- Start your script with output application/json or output application/xml — this sets the tone.   
+- Use map, filter, pluck, groupBy — these are DataWeave functions.   
+- Strictly follow Dataweave inbuilt functions syntax.   
+        """),   
+        HumanMessage(content=prompt),   
+        HumanMessage(content="Generate the DataWeave script.")   
+    ]   
+  
+    try:   
+        with get_openai_callback() as cb:   
+            result = client.invoke(messages)   
+            final_response = result.content.strip()   
+            final_response += "\n\n--- Token Usage ---"   
+            final_response += f"\nTotal Tokens: {cb.total_tokens}"   
+            final_response += f"\nPrompt Tokens: {cb.prompt_tokens}"   
+            final_response += f"\nCompletion Tokens: {cb.completion_tokens}"   
+            final_response += f"\nTotal Cost (USD): ${format(cb.total_cost, '.6f')}"   
+            return final_response   
+    except Exception as e:   
+        logger.error(f"Error during model invocation: {e}")   
+        raise   
+  
+# Azure Function main handler   
+def main(req: func.HttpRequest) -> func.HttpResponse:   
+    try:   
+        logger.info("DataWeave function triggered.")   
+  
+        file_name = req.params.get("file_name", "uploaded_file.xlsx")   
+        sheet_name = req.params.get("sheet_name")   
+        src_col = req.params.get("source_system_column")   
+        tgt_col = req.params.get("target_system_column")   
+        logic_col = req.params.get("business_logic_column")   
+        special_note = req.params.get("special_note")   # <-- NEW PARAM   
+  
+        logger.info(f"Parameters: file={file_name}, sheet={sheet_name}, src={src_col}, tgt={tgt_col}, logic={logic_col}, special_note={special_note}")   
+  
+        if not all([sheet_name, src_col, tgt_col, logic_col]):   
+            return func.HttpResponse("Missing one or more required query parameters.", status_code=400)   
+  
+        source_col_idx = col_letter_to_index(src_col)   
+        target_col_idx = col_letter_to_index(tgt_col)   
+        logic_col_idx = col_letter_to_index(logic_col)   
+  
+        if None in [source_col_idx, target_col_idx, logic_col_idx]:   
+            return func.HttpResponse("Invalid column letters provided.", status_code=400)   
+  
+        # Parse extra columns from special_note   
+        extra_cols = {}   
+        if special_note:   
+            col_letters = parse_special_note_columns(special_note)   
+            for letter in col_letters:   
+                idx = col_letter_to_index(letter)   
+                if idx is not None:   
+                    extra_cols[letter] = idx   
+  
+        body = req.get_body()   
+        if not body:   
+            return func.HttpResponse("No file content found in body.", status_code=400)   
+  
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as temp_file:   
+            temp_file.write(body)   
+            temp_file_path = temp_file.name   
+  
+        extracted_data = extract_excel_data(   
+            temp_file_path, sheet_name, source_col_idx, logic_col_idx, target_col_idx, extra_cols   
+        )   
+        if not extracted_data:   
+            return func.HttpResponse("No data extracted from Excel file.", status_code=400)   
+  
+        prompt = build_dataweave_prompt(   
+            extracted_data,   
+            file_name, sheet_name, src_col, tgt_col, logic_col, special_note   
+        )   
+  
+        client = get_openai_client()   
+        result = chat_with_agent(prompt, client)   
+  
+        return func.HttpResponse(result, status_code=200, mimetype="text/plain")   
+  
+    except Exception as e:   
+        logger.error(f"Unhandled error: {str(e)}", exc_info=True)   
+        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
 
 
 ---
 
-✅ Fixes applied:
+✅ Example Usage
 
-1. Two-phase flow
+Params in Postman:
 
-Step 1: Copy reference project “as-is”.
+file_name=testfile_complex_Mapping_sheet.xlsx
+sheet_name=v-complex
+source_system_column=C
+target_system_column=J
+business_logic_column=H
+special_note=please also use column M for business logic and column E for another target
 
-Step 2: Rename + rewrite after copy → avoids duplicate .project rename errors.
+Prompt row generated:
 
-
-
-2. Reverse traversal ([::-1])
-
-Ensures deepest files/folders renamed first → avoids conflicts with parent rename.
-
-
-
-3. Safe check before rename
-
-Skips renaming if target already exists (WinError 183 prevention).
-
-
-
+- Source: CustomerID, Target: CustNum, Logic: trim(), Special(M): someLogicValue, Special(E): targetFieldName
 
 
 ---
 
-Do you want me to also add AI detection of all package paths (com/example/.../old_name) → so that they get updated automatically, or keep only folder/class renaming for now?
+Do you also want me to make it interpret aliases like
+"use column E for target field name" → automatically rename it to ExtraTarget in prompt
+instead of just Special(E)?
 
