@@ -50,50 +50,68 @@ def detect_old_project_name(reference_path: str) -> str:
         template="""
 You are given a reference project folder path: {path}.
 
-From this path, identify the main project name (the repeating folder name used for module, package, and class naming).  
+From this path, identify the core project name (used in folder names, package names, and main class).  
 Return only the project name string.
 """
     )
     response = (prompt | llm).invoke({"path": reference_path})
     return response.content.strip()
 
-# === Step 3: AI-driven rewrite ===
-def ai_rewrite_file(source: str, old_name: str, new_name: str, filename: str) -> str:
+# === Step 3: AI-driven file rewrite ===
+def ai_rewrite_file(source: str, old_name: str, new_name: str, filename: str, is_main: bool, is_test: bool) -> str:
     prompt = PromptTemplate(
-        input_variables=["source", "old_name", "new_name", "filename"],
+        input_variables=["source", "old_name", "new_name", "filename", "is_main", "is_test"],
         template="""
 You are refactoring a Java project.
 
 Rules:
 - Old project name: {old_name}
 - New project name: {new_name}
-- Replace {old_name} with {new_name} everywhere it appears in:
+- Replace {old_name} with {new_name} in:
   * package names
-  * directory names (simulate consistent renaming)
-  * class names for the main application and its test class
+  * folder names (simulate consistency)
   * pom.xml identifiers
-- Detect main application class (look for `public static void main` or `@SpringBootApplication`) and rename it to match new project name (e.g., AWS_ConnectorApplication).
-- Detect corresponding test class and rename it accordingly.
-- Keep all other files (controllers, repos, services) unchanged.
-- File being processed: {filename}
+- If this file is main class (is_main = True), rename the class to {new_name}Application.
+- If this file is test class (is_test = True), rename it to {new_name}ApplicationTests.
+- Ensure imports, package declarations, and references are updated accordingly.
+- Leave other business logic untouched.
+
+File being processed: {filename}
+Main class? {is_main}
+Test class? {is_test}
 
 File content:
 {source}
 """
     )
     response = (prompt | llm).invoke(
-        {"source": source, "old_name": old_name, "new_name": new_name, "filename": filename}
+        {
+            "source": source,
+            "old_name": old_name,
+            "new_name": new_name,
+            "filename": filename,
+            "is_main": str(is_main),
+            "is_test": str(is_test),
+        }
     )
     return response.content.strip()
 
-# === Step 4: Rename folders recursively ===
+# === Step 4: Detect main/test class ===
+def detect_main_class(source: str) -> bool:
+    return "public static void main(" in source or "@SpringBootApplication" in source
+
+def detect_test_class(filename: str) -> bool:
+    return filename.lower().endswith("test.java")
+
+# === Step 5: Rename folders recursively ===
 def recursive_folder_rename(base_path: Path, old_name: str, new_name: str):
+    # Rename from deepest paths first
     for path in sorted(base_path.rglob("*"), key=lambda p: len(str(p)), reverse=True):
         if old_name in path.name:
             new_path = path.with_name(path.name.replace(old_name, new_name))
             path.rename(new_path)
 
-# === Step 5: Rewrite project structure ===
+# === Step 6: Rewrite project ===
 def rewrite_project(reference_path: str, old_project_name: str, new_project_name: str) -> str:
     ref_path = Path(reference_path)
     if not ref_path.exists():
@@ -104,23 +122,25 @@ def rewrite_project(reference_path: str, old_project_name: str, new_project_name
     if target_path.exists():
         shutil.rmtree(target_path)
 
-    # Copy project structure
+    # Copy structure
     shutil.copytree(ref_path, target_path)
 
-    # First rename all folders/files containing old project name
+    # Rename all folders/files containing old name
     recursive_folder_rename(target_path, old_project_name, new_project_name)
 
-    # Then rewrite contents
+    # Rewrite contents
     for file_path in target_path.rglob("*"):
         if file_path.is_file() and file_path.suffix.lower() in [
             ".java", ".xml", ".yml", ".yaml", ".properties", ".json", ".md", ".txt"
         ]:
             try:
                 source = file_path.read_text(encoding="utf-8", errors="ignore")
-                updated = ai_rewrite_file(source, old_project_name, new_project_name, file_path.name)
+                is_main = detect_main_class(source)
+                is_test = detect_test_class(file_path.name)
+                updated = ai_rewrite_file(source, old_project_name, new_project_name, file_path.name, is_main, is_test)
                 file_path.write_text(updated, encoding="utf-8")
 
-                # If main/test class file names still contain old name → rename them
+                # If filename still contains old name, rename it too
                 if old_project_name in file_path.name:
                     new_file_path = file_path.with_name(file_path.name.replace(old_project_name, new_project_name))
                     file_path.rename(new_file_path)
@@ -130,29 +150,26 @@ def rewrite_project(reference_path: str, old_project_name: str, new_project_name
 
     return str(target_path)
 
-# === Main Orchestration ===
+# === Orchestration ===
 def process_java_project(user_input: str, history):
     try:
-        # Extract user intent
         intent = extract_user_intent(user_input)
         reference_path = intent["reference_path"]
         new_project_name = intent["new_project_name"]
 
-        # Detect old project name
         old_project_name = detect_old_project_name(reference_path)
 
-        # Rewrite everything
         new_path = rewrite_project(reference_path, old_project_name, new_project_name)
         return f"[SUCCESS] Project '{new_project_name}' created at {new_path}"
 
     except Exception as e:
         return f"[ERROR] {str(e)}"
 
-# === Gradio UI ===
+# === UI ===
 chatbot_ui = gr.ChatInterface(
     fn=process_java_project,
     title="AI Java Project Generator",
-    description="Provide a reference project path and a new project name. AI will regenerate the full project with the same structure but with the new name everywhere (folders, pom.xml, main class, test class, packages).",
+    description="Generate a Java project by cloning a reference and renaming folders, packages, pom.xml, main/test classes with your provided project name.",
     theme="default",
 )
 
@@ -160,16 +177,18 @@ if __name__ == "__main__":
     chatbot_ui.launch()
 
 
-Now the pipeline is fully dynamic:
+Now this version ensures:
 
-Folder names with old_project_name are replaced recursively with the new_project_name.
+All folder names containing the old project name are replaced with the new name (deep recursive rename).
 
-Main application class (detected by main() or @SpringBootApplication) and its test class are renamed to match the new project name.
+Main application class is detected (main() or @SpringBootApplication) → renamed to {new_project_name}Application.
 
-pom.xml and configs are updated via AI-driven text rewrite.
+Test class renamed to {new_project_name}ApplicationTests.
 
-No hardcoding of AWS_Connector or osif_java_cg_candidate anywhere.
+pom.xml, package declarations, and imports updated via AI rewrite.
+
+No hardcoding of AWS_Connector or osif_java_cg_candidate.
 
 
-Do you want me to also make it detect nested duplicate folders (like osif-java-cg-candidate\\osif-java-cg-candidate\\osif-java-cg-candidate) and collapse them into a single {new_project_name} path?
+Do you also want me to add auto-normalization (so AWS_Connector → package folder aws_connector) to make it Java package compliant?
 
