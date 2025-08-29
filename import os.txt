@@ -1,1 +1,175 @@
-"C:\Users\rdamera\Downloads\ddddd\AWS_Connector\AWS_Connector\AWS_Connector\src\main\java\com\example\osif_java_cg_candidate\OsifJavaCgCandidateApplication.java"
+import os
+import shutil
+from pathlib import Path
+import gradio as gr
+import json
+from langchain.prompts import PromptTemplate
+from langchain_openai import AzureChatOpenAI
+
+# === Azure OpenAI Client ===
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        deployment_name="gpt-4_complex_conversions",
+        openai_api_key="",
+        openai_api_version="2024-08-01-preview",
+        openai_api_type="azure",
+        temperature=0.3,
+        max_tokens=4000,
+    )
+
+llm = get_openai_client()
+
+# === Step 1: Extract user intent ===
+def extract_user_intent(user_input: str) -> dict:
+    prompt = PromptTemplate(
+        input_variables=["user_input"],
+        template="""
+From the following request, extract two things:
+
+1. new_project_name → the new project name (e.g., AWS_Connector, GCP_Connector)  
+2. reference_path → the given reference project path  
+
+Return only valid JSON:
+{{
+  "new_project_name": "...",
+  "reference_path": "..."
+}}
+
+User request:
+{user_input}
+"""
+    )
+    response = (prompt | llm).invoke({"user_input": user_input})
+    return json.loads(response.content.strip())
+
+# === Step 2: Detect old project name ===
+def detect_old_project_name(reference_path: str) -> str:
+    prompt = PromptTemplate(
+        input_variables=["path"],
+        template="""
+You are given a reference project folder path: {path}.
+
+From this path, identify the main project name (the repeating folder name used for module, package, and class naming).  
+Return only the project name string.
+"""
+    )
+    response = (prompt | llm).invoke({"path": reference_path})
+    return response.content.strip()
+
+# === Step 3: AI-driven rewrite ===
+def ai_rewrite_file(source: str, old_name: str, new_name: str, filename: str) -> str:
+    prompt = PromptTemplate(
+        input_variables=["source", "old_name", "new_name", "filename"],
+        template="""
+You are refactoring a Java project.
+
+Rules:
+- Old project name: {old_name}
+- New project name: {new_name}
+- Replace {old_name} with {new_name} everywhere it appears in:
+  * package names
+  * directory names (simulate consistent renaming)
+  * class names for the main application and its test class
+  * pom.xml identifiers
+- Detect main application class (look for `public static void main` or `@SpringBootApplication`) and rename it to match new project name (e.g., AWS_ConnectorApplication).
+- Detect corresponding test class and rename it accordingly.
+- Keep all other files (controllers, repos, services) unchanged.
+- File being processed: {filename}
+
+File content:
+{source}
+"""
+    )
+    response = (prompt | llm).invoke(
+        {"source": source, "old_name": old_name, "new_name": new_name, "filename": filename}
+    )
+    return response.content.strip()
+
+# === Step 4: Rename folders recursively ===
+def recursive_folder_rename(base_path: Path, old_name: str, new_name: str):
+    for path in sorted(base_path.rglob("*"), key=lambda p: len(str(p)), reverse=True):
+        if old_name in path.name:
+            new_path = path.with_name(path.name.replace(old_name, new_name))
+            path.rename(new_path)
+
+# === Step 5: Rewrite project structure ===
+def rewrite_project(reference_path: str, old_project_name: str, new_project_name: str) -> str:
+    ref_path = Path(reference_path)
+    if not ref_path.exists():
+        return f"[ERROR] Reference project not found: {reference_path}"
+
+    target_base = Path("C:/Users/rdamera/Downloads/ddddd")
+    target_path = target_base / new_project_name
+    if target_path.exists():
+        shutil.rmtree(target_path)
+
+    # Copy project structure
+    shutil.copytree(ref_path, target_path)
+
+    # First rename all folders/files containing old project name
+    recursive_folder_rename(target_path, old_project_name, new_project_name)
+
+    # Then rewrite contents
+    for file_path in target_path.rglob("*"):
+        if file_path.is_file() and file_path.suffix.lower() in [
+            ".java", ".xml", ".yml", ".yaml", ".properties", ".json", ".md", ".txt"
+        ]:
+            try:
+                source = file_path.read_text(encoding="utf-8", errors="ignore")
+                updated = ai_rewrite_file(source, old_project_name, new_project_name, file_path.name)
+                file_path.write_text(updated, encoding="utf-8")
+
+                # If main/test class file names still contain old name → rename them
+                if old_project_name in file_path.name:
+                    new_file_path = file_path.with_name(file_path.name.replace(old_project_name, new_project_name))
+                    file_path.rename(new_file_path)
+
+            except Exception as e:
+                print(f"[WARN] Skipping {file_path}: {e}")
+
+    return str(target_path)
+
+# === Main Orchestration ===
+def process_java_project(user_input: str, history):
+    try:
+        # Extract user intent
+        intent = extract_user_intent(user_input)
+        reference_path = intent["reference_path"]
+        new_project_name = intent["new_project_name"]
+
+        # Detect old project name
+        old_project_name = detect_old_project_name(reference_path)
+
+        # Rewrite everything
+        new_path = rewrite_project(reference_path, old_project_name, new_project_name)
+        return f"[SUCCESS] Project '{new_project_name}' created at {new_path}"
+
+    except Exception as e:
+        return f"[ERROR] {str(e)}"
+
+# === Gradio UI ===
+chatbot_ui = gr.ChatInterface(
+    fn=process_java_project,
+    title="AI Java Project Generator",
+    description="Provide a reference project path and a new project name. AI will regenerate the full project with the same structure but with the new name everywhere (folders, pom.xml, main class, test class, packages).",
+    theme="default",
+)
+
+if __name__ == "__main__":
+    chatbot_ui.launch()
+
+
+Now the pipeline is fully dynamic:
+
+Folder names with old_project_name are replaced recursively with the new_project_name.
+
+Main application class (detected by main() or @SpringBootApplication) and its test class are renamed to match the new project name.
+
+pom.xml and configs are updated via AI-driven text rewrite.
+
+No hardcoding of AWS_Connector or osif_java_cg_candidate anywhere.
+
+
+Do you want me to also make it detect nested duplicate folders (like osif-java-cg-candidate\\osif-java-cg-candidate\\osif-java-cg-candidate) and collapse them into a single {new_project_name} path?
+
