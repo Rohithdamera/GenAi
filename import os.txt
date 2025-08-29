@@ -1,47 +1,3 @@
-update the below code , according to my requirements , if i ask question like (generate java project name as AWS_Connector by taking this path as a reference C:\Users\rdamera\Downloads\osif-java-cg-candidate) it need to generate the entire java project using reference path to generate the project the generated need to be stored in this path("C:/Users/rdamera/Downloads/ddddd"), do what ever changes need to change just change in the code , use less java code , keep more instruction and prompt , so the the generated java project structure remains to be same as the reference java project path, pom.xml , controllers , service etc everything need to be same , only change is to in the reference java  folders names, with actual provided name  for example if ask like  generate java project name as AWS_Connector it need to replace  reference project folder name (osif-java-cg-candidate) with the provided name by user  
-ex(AWS_Connector)
-
-reference project structure:-
-1. C:\Users\rdamera\Downloads\osif-java-cg-candidate\osif-java-cg-candidate\osif-java-cg-candidate\src\main\java\com\example\osif_java_cg_candidate\main_method(OsifJavaCgCandidateApplication)
-
-2. 1. C:\Users\rdamera\Downloads\osif-java-cg-candidate\osif-java-cg-candidate\osif-java-cg-candidate\src\main\test\com\example\osif_java_cg_candidate\main_method(OsifJavaCgCandidateApplicationTests)
-
-expected project structure:
-1.C:\Users\rdamera\Downloads\AWS_Connector\AWS_Connector\AWS_Connector\src\main\java\com\example\AWS_Connector\aws_connectorApplication_main
-
-2.C:\Users\rdamera\Downloads\AWS_Connector\AWS_Connector\AWS_Connector\src\test\java\com\example\AWS_Connector\aws_connectorApplication_mainTests
-
-
-
-the project structure will get changed for every project, so it need to identity reference folder names and its sub folders names and need to replace with user provided names where it need to declare , use tools if possible ,dont hard code anything , based on instruction, and prompt it need to generate the names based on user provided names like  ( AWS_Connector or gcp_connector), use tools if possible to identify  were ever project folders names to be replaced with user provided name, also dont generate the code inside of any folder, like controllers, repo etc , only main method need to be generated and main method name need to be replace with user provided name 
-
-
-
-dont follow below approach 
-
-
-    # Write main class
-    main_dir = target_path / "src" / "main" / "java" / "com" / "example" / new_project_name
-    main_dir.mkdir(parents=True, exist_ok=True)
-    (main_dir / f"{new_project_name}Application.java").write_text(code["main_class"], encoding="utf-8")
-
-    # Write test class
-    test_dir = target_path / "src" / "test" / "java" / "com" / "example" / new_project_name
-    test_dir.mkdir(parents=True, exist_ok=True)
-    (test_dir / f"{new_project_name}ApplicationTests.java").write_text(code["test_class"], encoding="utf-8")
-
-    return str(target_path), 
-
-
-AI only need to decide what to change to generate accurate java project , make this entire code as a agent based 
-
-
-
-
-code:-
-
-
-
 import os
 import shutil
 from pathlib import Path
@@ -49,7 +5,6 @@ import gradio as gr
 import json
 from langchain.prompts import PromptTemplate
 from langchain_openai import AzureChatOpenAI
-
 
 # === Azure OpenAI Client ===
 def get_openai_client():
@@ -63,9 +18,7 @@ def get_openai_client():
         max_tokens=4000,
     )
 
-
 llm = get_openai_client()
-
 
 # === Step 1: Extract user intent ===
 def extract_user_intent(user_input: str) -> dict:
@@ -90,7 +43,6 @@ User request:
     response = (prompt | llm).invoke({"user_input": user_input})
     return json.loads(response.content.strip())
 
-
 # === Step 2: Detect old project name ===
 def detect_old_project_name(reference_path: str) -> str:
     prompt = PromptTemplate(
@@ -98,40 +50,60 @@ def detect_old_project_name(reference_path: str) -> str:
         template="""
 You are given a reference project folder path: {path}.
 
-From this path, identify the project name (the last folder name).  
-Return only the project name, nothing else.
+From this path, identify the main project name (the repeating folder name used for module, package, and class naming).  
+Return only the project name string.
 """
     )
     response = (prompt | llm).invoke({"path": reference_path})
     return response.content.strip()
 
+# === Step 3: Detect main class filename ===
+def detect_main_class(file_text: str, filename: str) -> bool:
+    """Check if this file contains the Java main method."""
+    if "public static void main(String[] args)" in file_text:
+        return True
+    return False
 
-# === Step 3: AI rewrite file content ===
-def ai_rewrite_file(source: str, old_name: str, new_name: str) -> str:
+# === Step 4: AI decide file transformations ===
+def ai_rewrite_file(source: str, old_name: str, new_name: str, filename: str, is_main: bool, is_test: bool) -> str:
     prompt = PromptTemplate(
-        input_variables=["source", "old_name", "new_name"],
+        input_variables=["source", "old_name", "new_name", "filename", "is_main", "is_test"],
         template="""
 You are refactoring a Java project.
 
 Rules:
-- The old project name is {old_name}.
-- Replace it consistently with {new_name}.
-- This includes class names, package names, imports, configs, tests, comments.
-- Keep structure, formatting, and other logic intact.
-- Do not drop any content.
-- Only output the updated file text.
+- Old project name: {old_name}
+- New project name: {new_name}
+- Always replace {old_name} with {new_name} in:
+  * package names
+  * pom.xml identifiers (artifactId, groupId parts if relevant)
+- Only rename class names if:
+  * is_main = True → Rename main application class (e.g., OsifJavaCgCandidateApplication → AWS_ConnectorApplication)
+  * is_test = True → Rename test class accordingly (e.g., OsifJavaCgCandidateApplicationTests → AWS_ConnectorApplicationTests)
+- Do NOT rename controllers, services, repos, or other business classes.
+- Keep formatting, imports, and comments intact.
+
+File being processed: {filename}
+Main class? {is_main}
+Test class? {is_test}
 
 File content:
 {source}
 """
     )
     response = (prompt | llm).invoke(
-        {"source": source, "old_name": old_name, "new_name": new_name}
+        {
+            "source": source,
+            "old_name": old_name,
+            "new_name": new_name,
+            "filename": filename,
+            "is_main": str(is_main),
+            "is_test": str(is_test),
+        }
     )
     return response.content.strip()
 
-
-# === Step 4: Rewrite full project ===
+# === Step 5: Rewrite project structure ===
 def rewrite_project(reference_path: str, old_project_name: str, new_project_name: str) -> str:
     ref_path = Path(reference_path)
     if not ref_path.exists():
@@ -142,35 +114,48 @@ def rewrite_project(reference_path: str, old_project_name: str, new_project_name
     if target_path.exists():
         shutil.rmtree(target_path)
 
-    # Copy structure first
+    # Copy full structure first
     shutil.copytree(ref_path, target_path)
 
-    # Walk through and process
+    # Track main + test class detection
+    main_class_files = []
+
+    # First pass: detect main class
+    for file_path in target_path.rglob("*.java"):
+        try:
+            text = file_path.read_text(encoding="utf-8", errors="ignore")
+            if detect_main_class(text, file_path.name):
+                main_class_files.append(file_path)
+        except:
+            pass
+
+    # Walk through and transform files
     for file_path in target_path.rglob("*"):
-        # === 1. Rename folder names if they contain old project name ===
+        # 1. Rename directories/files containing old project name
         if old_project_name in file_path.name:
             new_file_path = file_path.with_name(file_path.name.replace(old_project_name, new_project_name))
             file_path.rename(new_file_path)
             file_path = new_file_path
 
-        # === 2. Rewrite file contents if text file ===
+        # 2. Rewrite file content (textual files only)
         if file_path.is_file() and file_path.suffix.lower() in [
             ".java", ".xml", ".yml", ".yaml", ".properties", ".json", ".md", ".txt"
         ]:
             try:
                 source = file_path.read_text(encoding="utf-8", errors="ignore")
-                updated = ai_rewrite_file(source, old_project_name, new_project_name)
+                is_main = file_path in main_class_files
+                is_test = file_path.suffix == ".java" and file_path.name.lower().endswith("test.java")
+                updated = ai_rewrite_file(source, old_project_name, new_project_name, file_path.name, is_main, is_test)
                 file_path.write_text(updated, encoding="utf-8")
             except Exception as e:
                 print(f"[WARN] Skipping {file_path}: {e}")
 
     return str(target_path)
 
-
 # === Main Orchestration ===
 def process_java_project(user_input: str, history):
     try:
-        # Extract what user asked
+        # Extract user intent
         intent = extract_user_intent(user_input)
         reference_path = intent["reference_path"]
         new_project_name = intent["new_project_name"]
@@ -185,15 +170,28 @@ def process_java_project(user_input: str, history):
     except Exception as e:
         return f"[ERROR] {str(e)}"
 
-
 # === Gradio UI ===
 chatbot_ui = gr.ChatInterface(
     fn=process_java_project,
     title="AI Java Project Generator",
-    description="Provide a reference project path and a new project name. AI will regenerate the full project with the same structure but with the new name everywhere.",
+    description="Provide a reference project path and a new project name. AI will regenerate the full project with the same structure but with the new name everywhere (pom.xml, main class, test class, packages).",
     theme="default",
 )
 
-
 if __name__ == "__main__":
     chatbot_ui.launch()
+
+
+✅ Updated:
+
+Detects the main class (file containing public static void main).
+
+Renames only the main application class and its test class with the new project name.
+
+Other classes (controllers, repos, services) remain untouched.
+
+Still replaces project references in pom.xml, package names, and config files.
+
+
+Do you also want me to make it detect Spring Boot @SpringBootApplication annotated class (sometimes the entrypoint), in case the main method isn’t the only indicator?
+
