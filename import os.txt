@@ -1,162 +1,153 @@
 import os
-import shutil
-import json
-from pathlib import Path
-from typing import Dict, Any, List
-
+import re
+import yaml
 import gradio as gr
-from langchain.prompts import PromptTemplate
+import boto3
+from typing import TypedDict, Optional, List, Tuple
+from difflib import get_close_matches
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_openai import AzureChatOpenAI
-
-# ================= OpenAI Client =================
-
-def get_openai_client():
-    endpoint = "https://testopenaiassets.openai.azure.com"
-    deployment = "gpt-4_complex_conversions"
-    api_key = ""  # 🔴 Ensure API key is set securely
-    api_version = "2024-08-01-preview"
-
-    if not (endpoint and deployment and api_key):
-        raise RuntimeError("Azure OpenAI configuration missing.")
-
-    return AzureChatOpenAI(
-        azure_endpoint=endpoint,
-        deployment_name=deployment,
-        openai_api_key=api_key,
-        openai_api_version=api_version,
-        openai_api_type="azure",
-        temperature=0.2,
-        max_tokens=4000,
-    )
-
-llm = get_openai_client()
-
-# ================= Helpers =================
-
-def _depth(p: Path) -> int:
-    return len(p.parts)
-
-def _as_posix_rel(path: Path, root: Path) -> str:
-    return path.relative_to(root).as_posix()
-
-# ================= AI Utilities =================
-
-def run_prompt(prompt: PromptTemplate, variables: Dict[str, str]) -> str:
-    return (prompt | llm).invoke(variables).content.strip()
-
-def extract_user_intent(user_input: str) -> Dict[str, str]:
-    prompt = PromptTemplate(
-        input_variables=["user_input"],
-        template=(
-            "From the request, extract strictly as JSON with keys: new_project_name, reference_path.\n"
-            "Rules: JSON only. If multiple paths are present, pick the most specific Java root.\n"
-            "User request: {user_input}"
-        ),
-    )
-    return json.loads(run_prompt(prompt, {"user_input": user_input}))
-
-def detect_old_project_name(reference_path: str) -> str:
-    prompt = PromptTemplate(
-        input_variables=["path"],
-        template="Given a Windows absolute path, return ONLY the final folder name. Path: {path}",
-    )
-    return run_prompt(prompt, {"path": reference_path})
-
-def ai_map_path(old_name: str, new_name: str, rel_path: str) -> Dict[str, Any]:
-    prompt = PromptTemplate(
-        input_variables=["old_name", "new_name", "rel"],
-        template=(
-            "We are cloning a Java project. Decide how to rename a relative path.\n"
-            "Old: {old_name}, New: {new_name}, Path: {rel}\n"
-            "Rules:\n"
-            "1. Rename only if path encodes old project identity.\n"
-            "2. Preserve com/cg/... packages, change only connector-specific parts.\n"
-            "3. Rename Application classes (Cg{{new_name}}Application.java).\n"
-            "Return JSON: {{ rename, new_rel_path, update_content }}"
-        ),
-    )
-    return json.loads(run_prompt(prompt, {"old_name": old_name, "new_name": new_name, "rel": rel_path}))
-
-def ai_rewrite_main(source: str, old_name: str, new_name: str) -> str:
-    prompt = PromptTemplate(
-        input_variables=["source", "old_name", "new_name"],
-        template=(
-            "Refactor ONLY if file is a Spring Boot Application or test.\n"
-            "Old: {old_name}, New: {new_name}.\n"
-            "Update package if needed, rename class to `Cg{new_name}Application`,\n"
-            "and adjust SpringApplication.run accordingly.\n"
-            "Return full file text only.\nFile:\n{source}"
-        ),
-    )
-    return run_prompt(prompt, {"source": source, "old_name": old_name, "new_name": new_name})
-
-# ================= File Operations =================
-
-def ensure_parent(path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-def move_any(src: Path, dst: Path):
-    if src.resolve() == dst.resolve():
-        return
-    ensure_parent(dst)
-    if dst.exists():
-        if src.is_dir() and dst.is_dir():
-            for child in src.iterdir():
-                move_any(child, dst / child.name)
-            try:
-                src.rmdir()
-            except OSError:
-                pass
-            return
-        if dst.is_file():
-            dst.unlink()
-    shutil.move(str(src), str(dst))
-
-# ================= Project Generator =================
-
-def generate_project(reference_path: str, old_name: str, new_name: str) -> str:
-    ref_path = Path(reference_path).resolve()
-    if not ref_path.exists():
-        return f"[ERROR] Reference not found: {reference_path}"
-
-    target_base = Path(os.getenv("TARGET_BASE_DIR", r"C:\\Users\\rdamera\\Downloads"))
-    target_path = target_base / new_name
-
-    if target_path.exists():
-        shutil.rmtree(target_path)
-    shutil.copytree(ref_path, target_path)
-
-    for p in sorted(target_path.rglob("*"), key=_depth, reverse=True):
-        try:
-            decision = ai_map_path(old_name, new_name, _as_posix_rel(p, target_path))
-            new_abs = target_path / decision.get("new_rel_path", p.name)
-
-            if decision.get("rename") and p.exists() and p.resolve() != new_abs.resolve():
-                move_any(p, new_abs)
-                p = new_abs
-
-            if decision.get("update_content") in {"main", "test"} and p.is_file() and p.suffix == ".java":
-                updated = ai_rewrite_main(p.read_text(encoding="utf-8", errors="ignore"), old_name, new_name)
-                p.write_text(updated, encoding="utf-8")
-        except Exception as e:
-            print(f"[WARN] Skipped {p}: {e}")
-
-    return str(target_path)
-
-# ================= Gradio Orchestration =================
-
-def process_java_project(user_input: str, history):
+from langchain_community.agent_toolkits.load_tools import load_tools
+from langgraph.prebuilt import create_react_agent
+from langgraph.graph import StateGraph, END
+from langgraph.graph import MessagesState
+ 
+# -------------------------
+# AWS S3 Utility
+# -------------------------
+def fetch_s3_file_content(arn: str) -> str:
+    print("Fetching S3 file content...")
+    match = re.match(r"^arn:aws:s3:::(.+?)/(.*)$", arn)
+    if not match:
+        raise ValueError("Invalid S3 ARN format")
+ 
+    bucket, key = match.groups()
+ 
+    s3 = boto3.client("s3",
+                      aws_access_key_id="AKIA6ODVATHCN52UKSRUO",
+                      aws_secret_access_key="N3+vw0XS4ZcdzqM0Zk6qflR7UbNy0ztQgdwWoiuEO",
+                      region_name="us-east-1")
+ 
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    content = obj["Body"].read().decode("utf-8")
+ 
+    if not content.strip():
+        raise ValueError("S3 file is empty or unreadable.")
+ 
+    print("S3 content fetched successfully.")
+    return content
+ 
+def get_connector_data_from_s3():
+    S3_ARN = "arn:aws:s3:::osif-files/OSIF_Dependency_req.txt"
     try:
-        intent = extract_user_intent(user_input)
-        old_name = detect_old_project_name(intent["reference_path"])
-        new_path = generate_project(intent["reference_path"], old_name, intent["new_project_name"])
-        return f"[SUCCESS] Project '{intent['new_project_name']}' created at {new_path}"
+        file_content = fetch_s3_file_content(S3_ARN)
+        parsed_yaml = yaml.safe_load(file_content)
+        connectors = parsed_yaml.get("core", {}).get("connectors", {})
+ 
+        # Build title-to-key mapping
+        title_to_key = {}
+        for key, value in connectors.items():
+            title = value.get("title", key)  # fallback to key if no title
+            title_to_key[title.lower()] = key
+ 
+        print("Connectors found:", list(connectors.keys()))
+        return connectors, file_content, title_to_key
     except Exception as e:
-        return f"[ERROR] {str(e)}"
-
-chatbot_ui = gr.ChatInterface(
-    fn=process_java_project,
-    title="AI Java Project Generator",
-    description=(
-        "Describe your intent, e.g. 'generate java project name as GCP_Connector by taking this path as reference...'.\n"
-        "The tool will clone the project, rename packages/folders, and rewrite Application classes."
+        print(f"Failed to load connector data: {e}")
+        return {}, "", {}
+ 
+# -------------------------
+# LangChain + Graph Setup
+# -------------------------
+class State(TypedDict):
+    messages: MessagesState
+ 
+llm = AzureChatOpenAI(
+    deployment_name="Fourth_Chatbot",
+    azure_endpoint="https://testopenaiassets.openai.azure.com",
+    openai_api_key="",
+    openai_api_version="2024-08-01-preview"
+)
+ 
+tools = load_tools(["llm-math"], llm=llm)
+agent_node = create_react_agent(llm, tools)
+ 
+graph = StateGraph(State)
+graph.add_node("react_agent", agent_node)
+graph.set_entry_point("react_agent")
+graph.add_edge("react_agent", END)
+agent_executor = graph.compile()
+ 
+# -------------------------
+# Chatbot Handler
+# -------------------------
+def chat_with_agent(message: str, history: Optional[List[Tuple[str, str]]] = None) -> str:
+    print("Received message:", message)
+ 
+    if history is None:
+        history = []
+ 
+    connector_data, file_content, title_to_key = get_connector_data_from_s3()
+    message_lower = message.lower()
+ 
+    if "property" in message_lower or "configuration" in message_lower:
+        all_possible_names = list(connector_data.keys()) + list(title_to_key.keys())
+        matched_keys = get_close_matches(message_lower, all_possible_names, n=1, cutoff=0.4)
+ 
+        if matched_keys:
+            matched = matched_keys[0]
+            connector_key = title_to_key.get(matched, matched)  # resolve title to key if needed
+            print(f"Matched connector: {matched} → key: {connector_key}")
+ 
+            lines = file_content.splitlines()
+            start_index = None
+            for i, line in enumerate(lines):
+                if re.match(rf"^{connector_key}:\s*$", line.strip()):
+                    start_index = i
+                    break
+ 
+            if start_index is not None:
+                block_lines = [lines[start_index]]
+                base_indent = len(lines[start_index]) - len(lines[start_index].lstrip())
+ 
+                for j in range(start_index + 1, len(lines)):
+                    current_line = lines[j]
+                    current_indent = len(current_line) - len(current_line.lstrip())
+                    if current_line.strip() == "":
+                        block_lines.append(current_line)
+                    elif current_indent > base_indent:
+                        block_lines.append(current_line)
+                    else:
+                        break
+ 
+                exact_block = "\n".join(block_lines)
+                response = f"**Exact configuration for `{connector_key}` connector:**\n```yaml\n{exact_block}\n```"
+                return response
+            else:
+                return f"Connector `{connector_key}` found, but exact formatting could not be extracted."
+ 
+        return "No matching connector found in the S3 file."
+ 
+    # Fallback to LangChain agent for general queries
+    messages = []
+    for user_msg, bot_msg in history:
+        messages.append(HumanMessage(content=user_msg))
+        messages.append(AIMessage(content=bot_msg))
+    messages.append(HumanMessage(content=message))
+ 
+    result = agent_executor.invoke({"messages": messages}, verbose=True)
+    return result["messages"][-1].content
+ 
+# -------------------------
+# Main Entry Point
+# -------------------------
+if __name__ == "__main__":
+    print("Launching Gradio interface...")
+    gr.Interface(
+        fn=chat_with_agent,
+        inputs="text",
+        outputs="text",
+        title="OSIF Agent Chat",
+        description="Ask about connector configurations or general queries."
+    ).launch()
+ 
