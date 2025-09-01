@@ -1,3 +1,32 @@
+update the below code remove unnecessary code , dont hard code anything, make the code more structured manner , 
+
+
+generated response as path 
+
+C:\Users\rdamera\Downloads\ddddd\GCP_Connector\GCP_Connector\src\main\java\com\cg\gcp
+cg
+  |-gcp
+   |-integrations
+
+inside gcp there is nothing , 
+
+but i need below kind response 
+
+"C:\Users\rdamera\Downloads\GCP_Connector\gcp_Connector\src\main\java\com\cg\integrations\salesforce\CgGCP_ConnectorApplication.java"
+
+salesforce
+|-CgGCP_ConnectorApplication .java
+   |-service
+    |-config
+    |-client
+    |-controller 
+     |-model
+
+
+
+code:-
+
+
 import os
 import shutil
 from pathlib import Path
@@ -8,30 +37,13 @@ from typing import Dict, Any, List
 from langchain.prompts import PromptTemplate
 from langchain_openai import AzureChatOpenAI
 
-"""
-AI‑driven Java project cloner/renamer
 
-What it does
-- Parses a free‑form user request to extract `new_project_name` and `reference_path` (AI).
-- Copies the reference project to the requested/target base directory.
-- Uses AI to decide how paths should be renamed across the entire tree
-  (including nested package folders like src/main/java/com/.../integrations/<domain>).
-- Only the main/test Application classes have their *file contents* updated.
-- Controllers/services/etc. are left as‑is content‑wise (paths can be renamed if AI says so).
-
-Notes
-- Target base directory defaults to `C:\Users\rdamera\Downloads\ddddd` but can be overridden via env var `TARGET_BASE_DIR`.
-- Azure OpenAI config is taken from env vars: `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_API_VERSION`.
-- No hardcoded replacements; AI decides rename/update actions per path.
-"""
-
-# === Azure OpenAI Client ===
 
 def get_openai_client():
-    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
-    api_key = os.getenv("AZURE_OPENAI_API_KEY")
-    api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
+    endpoint = "https://testopenaiassets.openai.azure.com"
+    deployment = "gpt-4_complex_conversions"
+    api_key = ""
+    api_version = "2024-08-01-preview"
 
     if not (endpoint and deployment and api_key):
         raise RuntimeError(
@@ -260,22 +272,4 @@ chatbot_ui = gr.ChatInterface(
 
 if __name__ == "__main__":
     chatbot_ui.launch()
-
-
-Got it — I rewired the logic so the AI maps every relative path (not just the top folder) and moves files/directories accordingly. It now:
-
-copies the reference project,
-
-asks AI how to rename each path under it (so .../salesforce/... → .../gcp/...),
-
-only rewrites main/test Application files’ contents,
-
-leaves controllers/services content untouched,
-
-and saves the new project to C:\Users\rdamera\Downloads\ddddd\<NEW_NAME> (configurable via TARGET_BASE_DIR env var).
-
-
-I’ve put the full updated code in the canvas.
-
-If you want, I can also add a quick “dry run / preview changes” mode that shows the proposed path mapping before applying it.
 
