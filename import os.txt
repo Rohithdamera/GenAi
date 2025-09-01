@@ -1,13 +1,154 @@
 
- core:
-  connectors:
-    sfdc:
-      title: sales-force-connector
-      authUrl: https://login.salesforce.com
-      username: your-username
-      password: your-password
-      client_id: your-client_id
-      client_secret: your-client-secret
-      grant_type: password
-      queryUrl: /
-      version: v53.0
+import os
+import re
+import yaml
+import gradio as gr
+import boto3
+from typing import Optional, List, Tuple, Dict
+from difflib import get_close_matches
+
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_openai import AzureChatOpenAI
+
+
+# -------------------------
+# AWS S3 Utility
+# -------------------------
+def fetch_s3_file_content(arn: str) -> str:
+    print("Fetching S3 file content...")
+    match = re.match(r"^arn:aws:s3:::(.+?)/(.*)$", arn)
+    if not match:
+        raise ValueError("Invalid S3 ARN format")
+
+    bucket, key = match.groups()
+
+    s3 = boto3.client("s3",
+                      aws_access_key_id="AKIA6ODVATHCN52UKSRUO",   # 🔒 Replace with env vars in prod
+                      aws_secret_access_key="N3+vw0XS4ZcdzqM0Zk6qflR7UbNy0ztQgdwWoiuEO",
+                      region_name="us-east-1")
+
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    content = obj["Body"].read().decode("utf-8")
+
+    if not content.strip():
+        raise ValueError("S3 file is empty or unreadable.")
+
+    print("✅ S3 content fetched successfully.")
+    return content
+
+
+def get_connector_data_from_s3() -> Tuple[Dict, str, Dict]:
+    S3_ARN = "arn:aws:s3:::osif-files/OSIF_Dependency_req.txt"
+    try:
+        file_content = fetch_s3_file_content(S3_ARN)
+        parsed_yaml = yaml.safe_load(file_content)
+        connectors = parsed_yaml.get("core", {}).get("connectors", {})
+
+        # Build title-to-key mapping
+        title_to_key = {}
+        for key, value in connectors.items():
+            title = value.get("title", key)  # fallback to key if no title
+            title_to_key[title.lower()] = key
+
+        print("🔎 Connectors found:", list(connectors.keys()))
+        return connectors, file_content, title_to_key
+    except Exception as e:
+        print(f"❌ Failed to load connector data: {e}")
+        return {}, "", {}
+
+
+# -------------------------
+# OpenAI Setup
+# -------------------------
+llm = AzureChatOpenAI(
+    deployment_name="Fourth_Chatbot",
+    azure_endpoint="https://testopenaiassets.openai.azure.com",
+    openai_api_key="YOUR_AZURE_OPENAI_KEY",  # 🔒 Replace with env var
+    openai_api_version="2024-08-01-preview"
+)
+
+
+def format_connector_for_llm(connector_key: str, connector_data: Dict) -> str:
+    """Convert connector properties into a readable text block."""
+    lines = [f"Connector `{connector_key}` properties:"]
+    for k, v in connector_data.items():
+        lines.append(f"- **{k}**: {v}")
+    return "\n".join(lines)
+
+
+# -------------------------
+# Chatbot Handler (S3 + OpenAI)
+# -------------------------
+def chat_with_agent(message: str, history: Optional[List[Tuple[str, str]]] = None) -> str:
+    print("💬 Received message:", message)
+
+    connector_data, file_content, title_to_key = get_connector_data_from_s3()
+    if not connector_data:
+        return "❌ Could not load connectors from S3."
+
+    message_lower = message.lower()
+
+    # Try to match connector from user query
+    all_possible_names = list(connector_data.keys()) + list(title_to_key.keys())
+    matched_keys = get_close_matches(message_lower, all_possible_names, n=1, cutoff=0.4)
+
+    if matched_keys:
+        matched = matched_keys[0]
+        connector_key = title_to_key.get(matched, matched)  # resolve title to key if needed
+        print(f"✅ Matched connector: {matched} → key: {connector_key}")
+
+        connector_info = connector_data.get(connector_key, {})
+        if not connector_info:
+            return f"⚠️ Connector `{connector_key}` found but has no properties."
+
+        # Format properties for AI
+        connector_text = format_connector_for_llm(connector_key, connector_info)
+
+        # Ask LLM to generate a nice response
+        user_prompt = f"User asked: '{message}'. Here are the connector details:\n{connector_text}\n\nGenerate a helpful response using these details."
+        response = llm.invoke([HumanMessage(content=user_prompt)])
+
+        return response.content
+
+    # If no connector matched, list all available ones
+    available = ", ".join(connector_data.keys())
+    return f"⚠️ No matching connector found. Available connectors in S3 are: {available}"
+
+
+# -------------------------
+# Main Entry Point
+# -------------------------
+if __name__ == "__main__":
+    print("🚀 Launching Gradio interface (S3 + OpenAI)...")
+    gr.Interface(
+        fn=chat_with_agent,
+        inputs="text",
+        outputs="text",
+        title="OSIF Agent Chat (S3 + OpenAI)",
+        description="Ask about connector configurations. Data is fetched from the S3 file and responses are generated with OpenAI."
+    ).launch()
+
+
+---
+
+🔑 What Changed
+
+Still fetches connectors from S3 (OSIF_Dependency_req.txt).
+
+Uses Azure OpenAI to generate natural answers based on connector properties.
+
+Supports any new connectors you add inside .txt under core → connectors.
+
+If user asks:
+
+“give Salesforce properties” → finds sfdc connector → LLM replies with formatted properties.
+
+“list connectors” → shows all available connectors.
+
+
+
+
+---
+
+👉 Do you also want me to make it extract the exact YAML block (like in your old code) and feed that into OpenAI, or is a clean property list (like above) enough for your use case?
+
