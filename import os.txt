@@ -1,54 +1,23 @@
-update the below code remove unnecessary code , dont hard code anything, make the code more structured manner , 
-
-
-generated response as path 
-
-C:\Users\rdamera\Downloads\ddddd\GCP_Connector\GCP_Connector\src\main\java\com\cg\gcp
-cg
-  |-gcp
-   |-integrations
-
-inside gcp there is nothing , 
-
-but i need below kind response 
-
-"C:\Users\rdamera\Downloads\GCP_Connector\gcp_Connector\src\main\java\com\cg\integrations\salesforce\CgGCP_ConnectorApplication.java"
-
-salesforce
-|-CgGCP_ConnectorApplication .java
-   |-service
-    |-config
-    |-client
-    |-controller 
-     |-model
-
-
-
-code:-
-
-
 import os
 import shutil
-from pathlib import Path
 import json
-import gradio as gr
+from pathlib import Path
 from typing import Dict, Any, List
 
+import gradio as gr
 from langchain.prompts import PromptTemplate
 from langchain_openai import AzureChatOpenAI
 
-
+# ================= OpenAI Client =================
 
 def get_openai_client():
     endpoint = "https://testopenaiassets.openai.azure.com"
     deployment = "gpt-4_complex_conversions"
-    api_key = ""
+    api_key = ""  # 🔴 Ensure API key is set securely
     api_version = "2024-08-01-preview"
 
     if not (endpoint and deployment and api_key):
-        raise RuntimeError(
-            "Missing Azure OpenAI configuration. Set AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT, AZURE_OPENAI_API_KEY."
-        )
+        raise RuntimeError("Azure OpenAI configuration missing.")
 
     return AzureChatOpenAI(
         azure_endpoint=endpoint,
@@ -62,7 +31,7 @@ def get_openai_client():
 
 llm = get_openai_client()
 
-# === Helpers ===
+# ================= Helpers =================
 
 def _depth(p: Path) -> int:
     return len(p.parts)
@@ -70,206 +39,124 @@ def _depth(p: Path) -> int:
 def _as_posix_rel(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
 
-# === Extract user intent ===
+# ================= AI Utilities =================
+
+def run_prompt(prompt: PromptTemplate, variables: Dict[str, str]) -> str:
+    return (prompt | llm).invoke(variables).content.strip()
 
 def extract_user_intent(user_input: str) -> Dict[str, str]:
     prompt = PromptTemplate(
         input_variables=["user_input"],
-        template=r"""
-From the request, extract strictly as JSON:
-- new_project_name (e.g., AWS_Connector, GCP_Connector)
-- reference_path (absolute folder path)
-
-Rules:
-- Return ONLY JSON (no backticks, no prose).
-- If multiple paths are present, pick the most specific Java project root.
-
-User request:
-{user_input}
-""",
+        template=(
+            "From the request, extract strictly as JSON with keys: new_project_name, reference_path.\n"
+            "Rules: JSON only. If multiple paths are present, pick the most specific Java root.\n"
+            "User request: {user_input}"
+        ),
     )
-    resp = (prompt | llm).invoke({"user_input": user_input})
-    data = json.loads(resp.content.strip())
-    return {
-        "new_project_name": data["new_project_name"].strip(),
-        "reference_path": data["reference_path"].strip(),
-    }
-
-# === Detect old/root project name (AI) ===
+    return json.loads(run_prompt(prompt, {"user_input": user_input}))
 
 def detect_old_project_name(reference_path: str) -> str:
     prompt = PromptTemplate(
         input_variables=["path"],
-        template=r"""
-Given a Windows absolute path to a reference Java project root, return ONLY the root project name (final folder name).
-Path: {path}
-""",
+        template="Given a Windows absolute path, return ONLY the final folder name. Path: {path}",
     )
-    resp = (prompt | llm).invoke({"path": reference_path})
-    return resp.content.strip()
+    return run_prompt(prompt, {"path": reference_path})
 
-# === AI path mapping: decide how a relative path should change ===
-
-def ai_map_path(old_name: str, new_name: str, rel_path_posix: str) -> Dict[str, Any]:
+def ai_map_path(old_name: str, new_name: str, rel_path: str) -> Dict[str, Any]:
     prompt = PromptTemplate(
         input_variables=["old_name", "new_name", "rel"],
-        template=r"""
-We are cloning a Java project and renaming it.
-
-Context:
-- Old project name: {old_name}
-- New project name: {new_name}
-- Input is a POSIX-style *relative* path within the project tree: {rel}
-- Standard Maven/Gradle layout can appear: src/main/java/... and src/test/java/...
-
-Rules for deciding the new relative path:
-1) If any folder/file name clearly encodes the old project identity (e.g., the leaf package or domain segment like `salesforce`), rename it to reflect the new project name `{{new_name}}` (e.g., to `gcp`).
-2) Preserve com/cg/... base packages. Only change the specific domain/connector segment(s) that represent the old project name/area.
-3) Application main/test class files should be renamed to include the new name (e.g., `Cg{{new_name}}Application.java` or `...Tests.java`).
-4) Other code (controllers/services/repos/etc.) should not have their file contents modified, but their *paths* may be renamed if it logically encodes the old project name.
-5) Always use forward slashes in the returned path.
-
-Return STRICT JSON only:
-{{
-  "rename": true/false,
-  "new_rel_path": "<new relative path or the same rel if no change>",
-  "update_content": "main" | "test" | "none"
-}}
-""",
+        template=(
+            "We are cloning a Java project. Decide how to rename a relative path.\n"
+            "Old: {old_name}, New: {new_name}, Path: {rel}\n"
+            "Rules:\n"
+            "1. Rename only if path encodes old project identity.\n"
+            "2. Preserve com/cg/... packages, change only connector-specific parts.\n"
+            "3. Rename Application classes (Cg{{new_name}}Application.java).\n"
+            "Return JSON: {{ rename, new_rel_path, update_content }}"
+        ),
     )
-    resp = (prompt | llm).invoke({"old_name": old_name, "new_name": new_name, "rel": rel_path_posix})
-    return json.loads(resp.content.strip())
-
-# === AI rewrite for Application main/test classes ===
+    return json.loads(run_prompt(prompt, {"old_name": old_name, "new_name": new_name, "rel": rel_path}))
 
 def ai_rewrite_main(source: str, old_name: str, new_name: str) -> str:
     prompt = PromptTemplate(
         input_variables=["source", "old_name", "new_name"],
-        template=r"""
-Refactor ONLY if the file is the main Spring Boot Application or its test.
-
-Requirements:
-- Old project marker/name: {old_name}
-- New project name: {new_name}
-- Update package declaration if the path indicates a renamed package segment.
-- Rename the class to clearly reflect the new project name (e.g., prefix with `Cg` and include `{new_name}`), and update `SpringApplication.run(<Class>.class, ...)` accordingly.
-- Keep annotations/imports/logic unchanged.
-- Return ONLY the full updated file text, no prose.
-
-File:
-{source}
-""",
+        template=(
+            "Refactor ONLY if file is a Spring Boot Application or test.\n"
+            "Old: {old_name}, New: {new_name}.\n"
+            "Update package if needed, rename class to `Cg{new_name}Application`,\n"
+            "and adjust SpringApplication.run accordingly.\n"
+            "Return full file text only.\nFile:\n{source}"
+        ),
     )
-    resp = (prompt | llm).invoke({"source": source, "old_name": old_name, "new_name": new_name})
-    return resp.content.strip()
+    return run_prompt(prompt, {"source": source, "old_name": old_name, "new_name": new_name})
 
-# === Filesystem operations ===
+# ================= File Operations =================
 
 def ensure_parent(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
-
 
 def move_any(src: Path, dst: Path):
     if src.resolve() == dst.resolve():
         return
     ensure_parent(dst)
-    # If destination exists and is a directory, merge src into it
     if dst.exists():
         if src.is_dir() and dst.is_dir():
             for child in src.iterdir():
                 move_any(child, dst / child.name)
-            # remove now-empty src dir
             try:
                 src.rmdir()
             except OSError:
                 pass
             return
-        else:
-            # overwrite existing file
-            if dst.is_file():
-                dst.unlink()
+        if dst.is_file():
+            dst.unlink()
     shutil.move(str(src), str(dst))
 
-
-# === Generate new project ===
+# ================= Project Generator =================
 
 def generate_project(reference_path: str, old_name: str, new_name: str) -> str:
     ref_path = Path(reference_path).resolve()
     if not ref_path.exists():
-        return f"[ERROR] Reference project not found: {reference_path}"
+        return f"[ERROR] Reference not found: {reference_path}"
 
-    target_base = Path(os.getenv("TARGET_BASE_DIR", r"C:\Users\rdamera\Downloads\ddddd"))
-    target_base.mkdir(parents=True, exist_ok=True)
-    target_path = (target_base / new_name).resolve()
+    target_base = Path(os.getenv("TARGET_BASE_DIR", r"C:\\Users\\rdamera\\Downloads"))
+    target_path = target_base / new_name
 
     if target_path.exists():
         shutil.rmtree(target_path)
-
-    # 1) Copy reference project as-is into the new root
     shutil.copytree(ref_path, target_path)
 
-    # 2) Collect all paths under target, deepest-first (so children move before parents)
-    all_paths: List[Path] = sorted(list(target_path.rglob("*")), key=_depth, reverse=True)
-
-    # 3) Rename/move paths based on AI mapping
-    for p in all_paths:
+    for p in sorted(target_path.rglob("*"), key=_depth, reverse=True):
         try:
-            rel_posix = _as_posix_rel(p, target_path)
-            decision = ai_map_path(old_name, new_name, rel_posix)
+            decision = ai_map_path(old_name, new_name, _as_posix_rel(p, target_path))
+            new_abs = target_path / decision.get("new_rel_path", p.name)
 
-            rename = decision.get("rename", False)
-            new_rel = Path(decision.get("new_rel_path", rel_posix))
-            update_kind = decision.get("update_content", "none")
+            if decision.get("rename") and p.exists() and p.resolve() != new_abs.resolve():
+                move_any(p, new_abs)
+                p = new_abs
 
-            # Handle path rename/move if AI requested
-            new_abs = (target_path / new_rel).resolve()
-            cur_abs = p.resolve()
-            if rename and cur_abs.exists() and cur_abs != new_abs:
-                move_any(cur_abs, new_abs)
-                p = new_abs  # update pointer for content step
-
-            # Update contents for Application main/test classes only
-            if update_kind in {"main", "test"} and p.is_file() and p.suffix == ".java":
-                try:
-                    src_text = p.read_text(encoding="utf-8", errors="ignore")
-                    updated = ai_rewrite_main(src_text, old_name, new_name)
-                    if updated and isinstance(updated, str):
-                        p.write_text(updated, encoding="utf-8")
-                except Exception as e:
-                    print(f"[WARN] Could not update file contents for {p}: {e}")
+            if decision.get("update_content") in {"main", "test"} and p.is_file() and p.suffix == ".java":
+                updated = ai_rewrite_main(p.read_text(encoding="utf-8", errors="ignore"), old_name, new_name)
+                p.write_text(updated, encoding="utf-8")
         except Exception as e:
-            print(f"[WARN] Decision step failed for {p}: {e}")
+            print(f"[WARN] Skipped {p}: {e}")
 
     return str(target_path)
 
-
-# === Orchestration for Gradio ===
+# ================= Gradio Orchestration =================
 
 def process_java_project(user_input: str, history):
     try:
         intent = extract_user_intent(user_input)
-        ref_path = intent["reference_path"]
-        new_name = intent["new_project_name"]
-
-        old_name = detect_old_project_name(ref_path)
-        new_path = generate_project(ref_path, old_name, new_name)
-
-        return f"[SUCCESS] Project '{new_name}' created at {new_path}"
+        old_name = detect_old_project_name(intent["reference_path"])
+        new_path = generate_project(intent["reference_path"], old_name, intent["new_project_name"])
+        return f"[SUCCESS] Project '{intent['new_project_name']}' created at {new_path}"
     except Exception as e:
         return f"[ERROR] {str(e)}"
 
-
-# === Gradio UI ===
 chatbot_ui = gr.ChatInterface(
     fn=process_java_project,
     title="AI Java Project Generator",
     description=(
-        "Describe your intent, e.g. 'generate java project name as GCP_Connector by taking this path as a reference "
-        r"C:\Users\rdamera\Downloads\cg-osif-salesforce-opportunity'. "
-        "The tool will copy the reference, AI‑rename packages/folders (including nested), and only rewrite main/test Application classes."
-    ),
-)
-
-if __name__ == "__main__":
-    chatbot_ui.launch()
-
+        "Describe your intent, e.g. 'generate java project name as GCP_Connector by taking this path as reference...'.\n"
+        "The tool will clone the project, rename packages/folders, and rewrite Application classes."
