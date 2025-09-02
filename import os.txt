@@ -1,21 +1,84 @@
+update the below  code except the azure credientails and aws credientails dont hard code anything 
+
+
+
+question : give me sales-force-connector properties,
+
+
+result :
+
+Title :sales-force-connector
+
+core:
+connectors:
+sfdc:
+
+but i need below kind response 
+
+
+Title :sales-force-connector
+
+ core:
+  connectors:
+    sfdc:
+      title: sales-force-connector
+      authUrl: https://login.salesforce.com
+      username: your-username
+      password: your-password
+      client_id: your-client_id
+      client_secret: your-client-secret
+      grant_type: password
+      queryUrl: /
+      version: v53.0
+
+
+in  s3 bucket inside  .txt file the data is like below 
+
+
+Title :sales-force-connector
+
+ core:
+  connectors:
+    sfdc:
+      title: sales-force-connector
+      authUrl: https://login.salesforce.com
+      username: your-username
+      password: your-password
+      client_id: your-client_id
+      client_secret: your-client-secret
+      grant_type: password
+      queryUrl: /
+      version: v53.0
+
+
+---------------------------------------------------------
+
+code:
+
 
 import gradio as gr
 import boto3
 import re
 from langchain_openai import AzureChatOpenAI
 
-# --- AWS S3 Config (no hardcoded credentials) ---
-s3 = boto3.client("s3")  # Uses env vars, profiles, or IAM role
-S3_BUCKET = "oosif-files"          # change if needed
-S3_KEY = "OSIF_Dependency_req.txt" # change if needed
+# --- AWS S3 Configuration ---
+s3 = boto3.client(
+    "s3",
+    aws_access_key_id="AKIA6ODVATHCN52UKSRUO",
+    aws_secret_access_key="N3+vw0XS4ZcdzqM0Zk6qflR7UbNy0ztQgdwWoiuEO",
+    region_name="us-east-1"
+)
+
+S3_BUCKET = "osif-files"
+S3_KEY = "OSIF_Dependency_req.txt"
 
 # --- Azure OpenAI Client ---
 def get_openai_client():
     return AzureChatOpenAI(
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="gpt-4_complex_conversions",
-        openai_api_key="",  # supply at runtime
-        openai_api_version="2024-08-01-preview",
+        openai_api_key="",  # <-- put your real API key
+        openai_api_version="2025-01-01-preview",
         openai_api_type="azure",
         temperature=0.3,
         max_tokens=2000,
@@ -30,8 +93,12 @@ def load_s3_file():
     return obj["Body"].read().decode("utf-8")
 
 
-# --- Identify connector title using AI ---
+# --- Identify connector name using AI ---
 def identify_connector(query, content):
+    """
+    Ask Azure OpenAI to map the query to one of the available connectors in the file.
+    """
+    # Extract all available connector titles from file
     titles = re.findall(r"Title\s*:\s*(.+)", content, flags=re.IGNORECASE)
     connector_list = "\n".join([t.strip() for t in titles])
 
@@ -52,16 +119,22 @@ Your task:
     return connector
 
 
-# --- Extract the block for the connector ---
+# --- Extract the block for that connector ---
 def extract_block(content, connector_title):
+    """
+    Extracts the block from file content starting with 'Title : connector_title'
+    until the next 'Title :' or end of file.
+    """
     if connector_title == "NOT_FOUND":
         return "Could not identify connector from your question."
 
-    # Regex to capture Title and everything until next Title or EOF
-    pattern = rf"(Title\s*:\s*{re.escape(connector_title)}[\s\S]*?)(?=Title\s*:|$)"
-    match = re.search(pattern, content, flags=re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
+    # Split into blocks
+    blocks = re.split(r"(?=Title\s*:)", content, flags=re.IGNORECASE)
+    for block in blocks:
+        if not block.strip():
+            continue
+        if re.search(rf"Title\s*:\s*{re.escape(connector_title)}", block, flags=re.IGNORECASE):
+            return block.strip()
 
     return f"Connector '{connector_title}' not found in file."
 
@@ -77,7 +150,7 @@ def chatbot_response(message, history):
         return f"Error: {str(e)}"
 
 
-# --- Gradio UI ---
+# --- Gradio Chat UI ---
 chatbot_ui = gr.ChatInterface(
     fn=chatbot_response,
     title="OSIF Connector Lookup",
@@ -87,46 +160,4 @@ chatbot_ui = gr.ChatInterface(
 
 if __name__ == "__main__":
     chatbot_ui.launch(debug=False)
-
-
----
-
-🔑 Key Fix
-
-Instead of splitting by lines, I use regex:
-
-(Title : <connector> ... until next Title : or EOF)
-
-This way the whole block with indentation is returned exactly as in .txt.
-
-
-
----
-
-🧪 Example
-
-Question:
-give me sales-force-connector properties
-
-Response:
-
-Title :sales-force-connector
-
- core:
-  connectors:
-    sfdc:
-      title: sales-force-connector
-      authUrl: https://login.salesforce.com
-      username: your-username
-      password: your-password
-      client_id: your-client_id
-      client_secret: your-client-secret
-      grant_type: password
-      queryUrl: /
-      version: v53.0
-
-
----
-
-👉 Do you also want me to make the AI normalize abbreviations like "sfdc" → "sales-force-connector" automatically?
 
