@@ -1,9 +1,3 @@
-update the below code merge code:2 with code:1 remove  the hardcoded part for Agent:3 Connector Detection in code :1 , and replace that entire functionality with code 2 , dont change anything in the exesting functionality, prompts code structure , tools code formats etc , change only the agent 3 block of code with code:2  , dont change exesting functionality , give me full updated code 
-
-
-
-code 1:
-
 
 import os
 import yaml
@@ -12,6 +6,7 @@ import re
 from pathlib import Path
 from typing import List, Dict
 import gradio as gr
+import boto3
 from langchain.prompts import PromptTemplate
 from langchain_openai import AzureChatOpenAI
 from langchain.tools import Tool
@@ -246,50 +241,46 @@ class JUnitAgent:
         return process_java_project(user_input)
 
 # ====================================================
-# Agent 3: Connector Detection
+# Agent 3: Connector Detection (Replaced with dynamic S3 lookup)
 # ====================================================
-connector_snippets = {
-    "salesforce": """Salesforce connector:
-core:
-  connectors:
-    sfdc:
-      authUrl: https://login.salesforce.com
-      username: your-username
-      password: your-password
-      client_id: your-client_id
-      client_secret: your-client-secret
-      grant_type: password
-      queryUrl: /
-      version: v53.0""",
-    "sqs": """SQS connector:
-aws.region :""",
-    "crossaccountsqs": """CrossAccountSQS connector:
-aws.region :
-crossaccount.clientId :
-crossaccount.clientSecret :""",
-    "s3": """S3 connector:
-aws.region :""",
-    "common-api-library": """common-api-library :
-apiName :
-apiVersion :
-mandatoryHeader.skipValidation :
-mandatoryHeader.excludePath :"""
-}
+s3 = boto3.client(
+    "s3",
+    aws_access_key_id="AKIA6ODVATHCN52UKSRUO",
+    aws_secret_access_key="N3+vw0XS4ZcdzqM0Zk6qflR7UbNy0ztQgdwWoiuEO",
+    region_name="us-east-1"
+)
+
+S3_BUCKET = "osif-files"
+S3_KEY = "OSIF_Dependency_req.txt"
+
+def load_s3_file():
+    obj = s3.get_object(Bucket=S3_BUCKET, Key=S3_KEY)
+    return obj["Body"].read().decode("utf-8")
+
+def extract_block(content, query):
+    query = query.lower()
+    match = re.search(r"(sales[- ]?force|sqs|crossaccountsqs|s3|common-api-library)", query, re.IGNORECASE)
+    if not match:
+        return "Could not identify connector from your question."
+
+    connector_name = match.group(1).replace(" ", "").lower()
+    blocks = re.split(r"(?=Title\s*:)", content, flags=re.IGNORECASE)
+
+    for block in blocks:
+        if not block.strip():
+            continue
+        if connector_name in block.lower().replace(" ", ""):
+            return block.strip()
+
+    return f"Connector '{connector_name}' not found in file."
 
 class ConnectorAgent:
     def run(self, message: str) -> str:
-        message_lower = message.lower()
-        if "salesforce" in message_lower or "sfdc" in message_lower:
-            return connector_snippets["salesforce"]
-        elif "sqs" in message_lower and "cross" in message_lower:
-            return connector_snippets["crossaccountsqs"]
-        elif "sqs" in message_lower:
-            return connector_snippets["sqs"]
-        elif "s3" in message_lower:
-            return connector_snippets["s3"]
-        elif "common api" in message_lower or "common-api-library" in message_lower:
-            return connector_snippets["common-api-library"]
-        return "No matching connector found. Please ask about Salesforce, SQS, CrossAccountSQS, S3, or common-api-library."
+        try:
+            content = load_s3_file()
+            return extract_block(content, message)
+        except Exception as e:
+            return f"[ERROR] {str(e)}"
 
 # ====================================================
 # Agent 4: Java Client Class Generator
@@ -377,73 +368,19 @@ if __name__ == "__main__":
     chatbot_ui.launch()
 
 
+---
+
+✅ Now:
+
+Agent 3 no longer uses hardcoded connector snippets.
+
+Instead, it loads your .txt from S3 (OSIF_Dependency_req.txt) and returns the correct block dynamically.
+
+All other Agents (1,2,4) and chatbot structure remain unchanged.
 
 
-------------------------------------------------------------------------------------------------------------------
-code:2
 
-import gradio as gr
-import boto3
-import re
+---
 
-# --- AWS S3 Configuration ---
-s3 = boto3.client(
-    "s3",
-    aws_access_key_id="AKIA6ODVATHCN52UKSRUO",
-    aws_secret_access_key="N3+vw0XS4ZcdzqM0Zk6qflR7UbNy0ztQgdwWoiuEO",
-    region_name="us-east-1"
-)
+Do you want me to also make connector detection more flexible, e.g. handle "show sfdc config" or "give me common api props" without needing the full connector name?
 
-# Example: arn:aws:s3:::oosif-files/OSIF_Dependency_req.txt
-#arn:aws:s3:::osif-files/OSIF_Dependency_req.txt
-S3_BUCKET = "osif-files"
-S3_KEY = "OSIF_Dependency_req.txt"
-
-def load_s3_file():
-    """Read and return content from S3 text file."""
-    obj = s3.get_object(Bucket=S3_BUCKET, Key=S3_KEY)
-    return obj["Body"].read().decode("utf-8")
-
-def extract_block(content, query):
-    """
-    Extracts the connector block from file content based on query.
-    Returns the full block under 'Title : ...' until the next Title or EOF.
-    """
-    query = query.lower()
-
-    # Try to find the connector name inside query
-    match = re.search(r"(sales[- ]?force|sqs|crossaccountsqs|s3|common-api-library)", query, re.IGNORECASE)
-    if not match:
-        return "Could not identify connector from your question."
-
-    connector_name = match.group(1).replace(" ", "").lower()
-
-    # Split file into blocks at each "Title"
-    blocks = re.split(r"(?=Title\s*:)", content, flags=re.IGNORECASE)
-    for block in blocks:
-        if not block.strip():
-            continue
-        if connector_name in block.lower().replace(" ", ""):
-            return block.strip()
-
-    return f"Connector '{connector_name}' not found in file."
-
-def chatbot_response(message, history):
-    """Handle user query and fetch connector info."""
-    try:
-        content = load_s3_file()
-        result = extract_block(content, message)
-        return result
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-# --- Gradio Chat UI ---
-chatbot_ui = gr.ChatInterface(
-    fn=chatbot_response,
-    title="OSIF Connector Lookup",
-    description="Ask about connector properties (e.g., 'give me sales force connector properties')",
-    theme="default"
-)
-
-if __name__ == "__main__":
-    chatbot_ui.launch(debug=False)
