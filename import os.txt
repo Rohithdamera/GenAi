@@ -1,3 +1,387 @@
+update the below code merge code:2 with code:1 remove  the hardcoded part for Agent:3 Connector Detection in code :1 , and replace that entire functionality with code 2 , dont change anything in the exesting functionality, prompts code structure , tools code formats etc , change only the agent 3 block of code with code:2  , dont change exesting functionality , give me full updated code 
+
+
+
+code 1:
+
+
+import os
+import yaml
+import json
+import re
+from pathlib import Path
+from typing import List, Dict
+import gradio as gr
+from langchain.prompts import PromptTemplate
+from langchain_openai import AzureChatOpenAI
+from langchain.tools import Tool
+from langchain.callbacks import get_openai_callback
+
+# ====================================================
+# Azure OpenAI Client
+# ====================================================
+def get_openai_client():
+    return AzureChatOpenAI(
+        azure_endpoint="https://testopenaiassets.openai.azure.com",
+        deployment_name="gpt-4_complex_conversions",
+        openai_api_key="",
+        openai_api_version="2025-01-01-preview",
+        openai_api_type="azure",
+        temperature=0.3,
+        max_tokens=2000,
+    )
+
+llm = get_openai_client()
+
+# ====================================================
+# Utility: Token Tracking Wrapper
+# ====================================================
+def run_with_token_tracking(func, *args, **kwargs):
+    aggregated_token_usage = {
+        "total_tokens": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_cost": 0.0,
+    }
+
+    with get_openai_callback() as cb:
+        result = func(*args, **kwargs)
+        aggregated_token_usage["total_tokens"] += cb.total_tokens
+        aggregated_token_usage["prompt_tokens"] += cb.prompt_tokens
+        aggregated_token_usage["completion_tokens"] += cb.completion_tokens
+        aggregated_token_usage["total_cost"] += cb.total_cost
+
+    usage_summary = "\n\n--- Token Usage ---"
+    usage_summary += f"\nTotal Tokens: {aggregated_token_usage['total_tokens']}"
+    usage_summary += f"\nPrompt Tokens: {aggregated_token_usage['prompt_tokens']}"
+    usage_summary += f"\nCompletion Tokens: {aggregated_token_usage['completion_tokens']}"
+    usage_summary += f"\nTotal Cost (USD): ${format(aggregated_token_usage['total_cost'], '.6f')}"
+
+    return result, usage_summary
+
+# ====================================================
+# Agent 1: YAML Model Class Generator
+# ====================================================
+def generate_model_from_yaml(prompt: str, yaml_file) -> str:
+    try:
+        with open(yaml_file.name, "r", encoding="utf-8") as f:
+            yaml_text = f.read()
+        yaml.safe_load(yaml_text)
+
+        full_prompt = (
+            "You are a senior Java developer. A developer will provide you with a YAML configuration file. "
+            "Your task is to generate Java model classes only for the fields that are explicitly marked or structured with class paths. "
+            "Each class path (e.g., `com.example.config.MyConfig`) should be used as the fully qualified name of the class. "
+            "Use nested classes or separate classes as needed based on the YAML structure. "
+            "Use lombok annotations to generate getters, setters and constructors. "
+            "Do not include explanations or comments. Output only the Java class code. "
+            "Whenever a class is end use this line ----------- and give a line break."
+            "Give the conclusion like which classes are created classes. "
+            f"\n\nPrompt: {prompt}\n\nHere is the YAML:\n\n{yaml_text}"
+        )
+
+        def _call_llm():
+            return llm.invoke(full_prompt)
+
+        response, usage = run_with_token_tracking(_call_llm)
+        return response.content.strip() + usage
+
+    except Exception as e:
+        return f"[ERROR] Failed to process YAML: {str(e)}"
+
+class ModelAgent:
+    def run(self, prompt, yaml_file):
+        return generate_model_from_yaml(prompt, yaml_file)
+
+# ====================================================
+# Agent 2: JUnit Generator
+# ====================================================
+def list_java_files(path: str) -> List[Path]:
+    base_path = Path(path)
+    if not base_path.exists():
+        raise FileNotFoundError(f"Path not found: {path}")
+    return list(base_path.rglob("*.java"))
+
+def extract_code_info(java_paths: List[Path]) -> List[Dict]:
+    prompt = PromptTemplate(
+        input_variables=["source"],
+        template="""
+Return ONLY compact JSON describing this Java class with these keys:
+class_name
+class_type (must be exactly: "Controller", "Service", "Repository", "Config", "Entity", "DTO", "Main")
+package_path
+methods: list of all public method names
+uses_repository: true/false
+If class_type == "Entity", also include:
+"entity_fields": list of {{"name": fieldName, "type": fieldType}}
+Rules:
+Do not explain.
+Do not invent other class_type values.
+Always valid JSON.
+Java Source:
+{source}
+"""
+    )
+    chain = prompt | llm
+    parsed = []
+
+    for file_path in java_paths:
+        try:
+            source = file_path.read_text(encoding="utf-8")
+            response = chain.invoke({"source": source})
+            data = json.loads(response.content.strip())
+            parsed.append(data)
+        except Exception as e:
+            print(f"[WARN] Failed to parse {file_path}: {e}")
+    return parsed
+
+def generate_junit_tests(parsed_info: List[Dict]) -> List[Dict]:
+    ALLOWED_TYPES = {"Controller", "Service"}
+    entity_map = {item["class_name"]: item.get("entity_fields", []) for item in parsed_info if item.get("class_type") == "Entity"}
+    prompt = PromptTemplate(
+        input_variables=[
+            "class_name", "class_type", "package_path", "methods", "uses_repository", "entity_map"
+        ],
+        template="""
+Write a complete JUnit 5 test class for:
+Class Name: {class_name}
+Type: {class_type}
+Package: {package_path}
+Public Methods:
+{methods}
+uses_repository: {uses_repository}
+Available Entities:
+{entity_map}
+Rules:
+1. Controllers
+Use @WebMvcTest, MockMvc, @MockBean, ObjectMapper.
+Test all endpoints, mock services, assert JSON with jsonPath.
+Check all fields, not just IDs.
+2. Services
+Use Mockito if repository exists (@ExtendWith, @Mock, @InjectMocks).
+Otherwise instantiate directly.
+Populate full entities in @BeforeEach.
+Assert with assertThat for all fields.
+3. Entity population
+Strings → "John Doe"
+UUID → UUID.randomUUID().toString()
+Lists → Arrays.asList("Java","Spring")
+LocalDateTime → "2025-07-25T10:00:00"
+int → 123
+boolean → true
+4. General
+One @Test per public method.
+Valid compilable Java code only.
+"""
+    )
+    chain = prompt | llm
+    test_classes = []
+
+    for item in parsed_info:
+        if item["class_type"] not in ALLOWED_TYPES:
+            print(f"[SKIP] {item['class_name']} ({item['class_type']})")
+            continue
+        try:
+            result = chain.invoke({
+                "class_name": item["class_name"],
+                "class_type": item["class_type"],
+                "package_path": item["package_path"],
+                "methods": "\n".join(item["methods"]),
+                "uses_repository": str(item.get("uses_repository", False)).lower(),
+                "entity_map": json.dumps(entity_map, indent=2),
+            })
+            test_classes.append({
+                "file_name": f"{item['class_name']}Test.java",
+                "package_path": item["package_path"],
+                "code": result.content.strip(),
+            })
+        except Exception as e:
+            print(f"[WARN] Could not generate test for {item['class_name']}: {e}")
+    return test_classes
+
+def save_and_print_tests(junit_tests: List[Dict]) -> str:
+    output = ""
+    for test in junit_tests:
+        folder = Path("generated_tests") / test["package_path"].replace(".", "/")
+        folder.mkdir(parents=True, exist_ok=True)
+        file_path = folder / test["file_name"]
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(test["code"])
+        output += f"\n===== {test['file_name']} =====\n{test['code']}\n===== End of {test['file_name']} =====\n"
+    return output.strip()
+
+tools = [
+    Tool(name="ListJavaFiles", func=list_java_files, description="Lists all Java files."),
+    Tool(name="ExtractCodeInfo", func=extract_code_info, description="Parses each Java file."),
+    Tool(name="GenerateJUnitTests", func=generate_junit_tests, description="Generates JUnit 5 test classes."),
+    Tool(name="SaveJUnitTests", func=save_and_print_tests, description="Saves tests to disk and prints them."),
+]
+
+def process_java_project(user_input: str) -> str:
+    try:
+        path_match = re.search(r"([A-Za-z]:[\\/\w\-. ]+)", user_input)
+        if not path_match:
+            return "[ERROR] Please provide a valid Windows file path."
+        project_path = path_match.group(1).strip()
+
+        def _process():
+            java_files = tools[0].func(project_path)
+            if not java_files:
+                return "[INFO] No Java files found."
+            parsed_info = tools[1].func(java_files)
+            if not parsed_info:
+                return "[INFO] No parsable Java classes found."
+            junit_tests = tools[2].func(parsed_info)
+            if not junit_tests:
+                return "[INFO] No JUnit tests could be generated for allowed types."
+            return tools[3].func(junit_tests)
+
+        output_code, usage_summary = run_with_token_tracking(_process)
+        return output_code + usage_summary
+    except Exception as e:
+        return f"[ERROR] {str(e)}"
+
+class JUnitAgent:
+    def run(self, user_input):
+        return process_java_project(user_input)
+
+# ====================================================
+# Agent 3: Connector Detection
+# ====================================================
+connector_snippets = {
+    "salesforce": """Salesforce connector:
+core:
+  connectors:
+    sfdc:
+      authUrl: https://login.salesforce.com
+      username: your-username
+      password: your-password
+      client_id: your-client_id
+      client_secret: your-client-secret
+      grant_type: password
+      queryUrl: /
+      version: v53.0""",
+    "sqs": """SQS connector:
+aws.region :""",
+    "crossaccountsqs": """CrossAccountSQS connector:
+aws.region :
+crossaccount.clientId :
+crossaccount.clientSecret :""",
+    "s3": """S3 connector:
+aws.region :""",
+    "common-api-library": """common-api-library :
+apiName :
+apiVersion :
+mandatoryHeader.skipValidation :
+mandatoryHeader.excludePath :"""
+}
+
+class ConnectorAgent:
+    def run(self, message: str) -> str:
+        message_lower = message.lower()
+        if "salesforce" in message_lower or "sfdc" in message_lower:
+            return connector_snippets["salesforce"]
+        elif "sqs" in message_lower and "cross" in message_lower:
+            return connector_snippets["crossaccountsqs"]
+        elif "sqs" in message_lower:
+            return connector_snippets["sqs"]
+        elif "s3" in message_lower:
+            return connector_snippets["s3"]
+        elif "common api" in message_lower or "common-api-library" in message_lower:
+            return connector_snippets["common-api-library"]
+        return "No matching connector found. Please ask about Salesforce, SQS, CrossAccountSQS, S3, or common-api-library."
+
+# ====================================================
+# Agent 4: Java Client Class Generator
+# ====================================================
+class ClientClassAgent:
+    def run(self, prompt: str, java_file) -> str:
+        try:
+            with open(java_file.name, "r", encoding="utf-8") as f:
+                java_code = f.read()
+            full_prompt = (
+                "You are a senior Java developer. A developer will provide you with a Java class. "
+                "Analyze the java code and create client class for that. Use constructor injection and annotations also. "
+                "Include the method which is there in the Java class it prints access token and instance URL, and handles exceptions. "
+                "Do not include explanations or comments. Output only the Java class code. "
+                f"\n\nPrompt: {prompt}\n\nHere is the Java class:\n\n{java_code}"
+            )
+            response = llm.invoke(full_prompt)
+            return response.content.strip()
+        except Exception as e:
+            return f"[ERROR] Failed to process Java file: {str(e)}"
+
+# ====================================================
+# Unified Chatbot Function
+# ====================================================
+model_agent = ModelAgent()
+junit_agent = JUnitAgent()
+connector_agent = ConnectorAgent()
+client_agent = ClientClassAgent()
+
+def unified_chatbot(prompt, history, yaml_file=None, java_file=None):
+    lower_prompt = prompt.lower()
+
+    # Case 1: JUnit generation
+    if "junit" in lower_prompt:
+        return junit_agent.run(prompt)
+
+    # Case 2: Model class generation
+    if "model" in lower_prompt or "model class" in lower_prompt:
+        if yaml_file is None:
+            return "[ERROR] Please upload a YAML file for model class generation."
+        return model_agent.run(prompt, yaml_file)
+
+    # Case 3: Client class generation
+    if "client class" in lower_prompt or java_file is not None:
+        if java_file is None:
+            return "[ERROR] Please upload a Java file for client class generation."
+        return client_agent.run(prompt, java_file)
+
+    # Case 4: Connector detection
+    if any(k in lower_prompt for k in ["salesforce", "sfdc", "sqs", "s3", "common api"]):
+        return connector_agent.run(prompt)
+
+    # Fallbacks
+    if yaml_file is not None:
+        return model_agent.run(prompt, yaml_file)
+    elif java_file is not None:
+        return client_agent.run(prompt, java_file)
+    elif re.search(r"([A-Za-z]:[\\/\w\-. ]+)", prompt):
+        return junit_agent.run(prompt)
+    else:
+        return "[ERROR] Please upload a YAML file with prompt for models, a Java file for client class, or provide a valid file path for JUnit generation."
+
+# ====================================================
+# Gradio Chat Interface
+# ====================================================
+chatbot_ui = gr.ChatInterface(
+    fn=unified_chatbot,
+    title="OSIF_Co-Developer",
+    description=(
+        "Options:\n"
+        "1. Upload a YAML file and enter a prompt like: `generate model class from this config`\n"
+        "2. Provide a Windows file path like: `C:\\Users\\project\\src` to generate JUnit tests.\n"
+        "3. Ask connector questions: e.g., `give connector properties of salesforce`\n"
+        "4. Upload a Java file and enter a prompt like: `create client class`"
+    ),
+    additional_inputs=[
+        gr.File(label="Upload YAML File", file_types=[".yaml", ".yml"]),
+        gr.File(label="Upload Java File", file_types=[".java"]),
+    ],
+    theme="default"
+)
+
+if __name__ == "__main__":
+    print("Starting Unified Generator...")
+    chatbot_ui.launch()
+
+
+
+
+------------------------------------------------------------------------------------------------------------------
+code:2
+
 import gradio as gr
 import boto3
 import re
@@ -11,7 +395,8 @@ s3 = boto3.client(
 )
 
 # Example: arn:aws:s3:::oosif-files/OSIF_Dependency_req.txt
-S3_BUCKET = "oosif-files"
+#arn:aws:s3:::osif-files/OSIF_Dependency_req.txt
+S3_BUCKET = "osif-files"
 S3_KEY = "OSIF_Dependency_req.txt"
 
 def load_s3_file():
