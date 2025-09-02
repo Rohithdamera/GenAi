@@ -1,201 +1,87 @@
-update the below code , as per my requirement , currently it will run in visual studio after running the code , it will open in ui box in that text box i will question like below , my requiremnt is to i had below data in s3 bucket  file inside file.txt  (
-
-
-
-expected result:
-
-
- core:
-  connectors:
-    sfdc:
-      title: sales-force-connector
-      authUrl: https://login.salesforce.com
-      username: your-username
-      password: your-password
-      client_id: your-client_id
-      client_secret: your-client-secret
-      grant_type: password
-      queryUrl: /
-      version: v53.0
-)
-
-
-suppose if i ask question like (give me sales force connector properties ) i am getting generated response , but i need expected result like above, AI generating  the response on its own, i dont want that using AI based on question , it need to give what data is present in .txt file , based on question in future i will add some more connnectors in that .txt file , except credientails of all , dont hard code anything , Using AI and question it need to get exact copy of that content in that s3 bucket, remove unnecessary code , give me full updated code 
-
-
-generated response :-
-
-Here are the properties for the Salesforce connector (`sfdc`):
-- **Title**: sales-force-connector
-- **Authentication URL**: https://login.salesforce.com
-- **Username**: your-username (Please replace this with your actual Salesforce username)
-- **Password**: your-password (Please replace this with your actual Salesforce password)
-- **Client ID**: your-client_id (Please replace this with your actual Salesforce client ID)
-- **Client Secret**: your-client-secret (Please replace this with your actual Salesforce client secret)
-- **Grant Type**: password (This is the authorization model being used)
-- **Query URL**: / (This is the base URL to append queries to)
-- **Version**: v53.0 (This is the API version number for the Salesforce API)
-
-Please ensure to replace placeholder credentials with your actual Salesforce credentials to establish a connection successfully.
-
-
-
-
-
-
-code:-
-
 import os
 import re
 import yaml
 import gradio as gr
 import boto3
-from typing import TypedDict, Optional, List, Tuple
+from typing import Optional, List, Tuple
 from difflib import get_close_matches
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain_openai import AzureChatOpenAI
-from langchain_community.agent_toolkits.load_tools import load_tools
-from langgraph.prebuilt import create_react_agent
-from langgraph.graph import StateGraph, END
-from langgraph.graph import MessagesState
- 
-# -------------------------
-# AWS S3 Utility
-# -------------------------
+
+# Utility: Fetch the contents of your S3 .txt file
 def fetch_s3_file_content(arn: str) -> str:
-    print("Fetching S3 file content...")
     match = re.match(r"^arn:aws:s3:::(.+?)/(.*)$", arn)
     if not match:
         raise ValueError("Invalid S3 ARN format")
- 
     bucket, key = match.groups()
- 
-    s3 = boto3.client("s3",
-                      aws_access_key_id="AKIA6ODVATHCN52UKSRUO",
-                      aws_secret_access_key="N3+vw0XS4ZcdzqM0Zk6qflR7UbNy0ztQgdwWoiuEO",
-                      region_name="us-east-1")
- 
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),  # Use env vars for security!
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        region_name="us-east-1"
+    )
     obj = s3.get_object(Bucket=bucket, Key=key)
     content = obj["Body"].read().decode("utf-8")
- 
     if not content.strip():
         raise ValueError("S3 file is empty or unreadable.")
- 
-    print("S3 content fetched successfully.")
     return content
- 
+
+# Gets (dict) connector data AND (str) raw file.txt, plus title/name mapping
 def get_connector_data_from_s3():
-    S3_ARN = "arn:aws:s3:::osif-files/OSIF_Dependency_req.txt"
-    try:
-        file_content = fetch_s3_file_content(S3_ARN)
-        parsed_yaml = yaml.safe_load(file_content)
-        connectors = parsed_yaml.get("core", {}).get("connectors", {})
- 
-        # Build title-to-key mapping
-        title_to_key = {}
-        for key, value in connectors.items():
-            title = value.get("title", key)  # fallback to key if no title
-            title_to_key[title.lower()] = key
- 
-        print("Connectors found:", list(connectors.keys()))
-        return connectors, file_content, title_to_key
-    except Exception as e:
-        print(f"Failed to load connector data: {e}")
-        return {}, "", {}
- 
-# -------------------------
-# LangChain + Graph Setup
-# -------------------------
-class State(TypedDict):
-    messages: MessagesState
- 
-llm = AzureChatOpenAI(
-    deployment_name="Fourth_Chatbot",
-    azure_endpoint="https://testopenaiassets.openai.azure.com",
-    openai_api_key="",
-    openai_api_version="2024-08-01-preview"
-)
- 
-tools = load_tools(["llm-math"], llm=llm)
-agent_node = create_react_agent(llm, tools)
- 
-graph = StateGraph(State)
-graph.add_node("react_agent", agent_node)
-graph.set_entry_point("react_agent")
-graph.add_edge("react_agent", END)
-agent_executor = graph.compile()
- 
-# -------------------------
-# Chatbot Handler
-# -------------------------
-def chat_with_agent(message: str, history: Optional[List[Tuple[str, str]]] = None) -> str:
-    print("Received message:", message)
- 
-    if history is None:
-        history = []
- 
-    connector_data, file_content, title_to_key = get_connector_data_from_s3()
-    message_lower = message.lower()
- 
-    if "property" in message_lower or "configuration" in message_lower:
-        all_possible_names = list(connector_data.keys()) + list(title_to_key.keys())
-        matched_keys = get_close_matches(message_lower, all_possible_names, n=1, cutoff=0.4)
- 
-        if matched_keys:
-            matched = matched_keys[0]
-            connector_key = title_to_key.get(matched, matched)  # resolve title to key if needed
-            print(f"Matched connector: {matched} → key: {connector_key}")
- 
-            lines = file_content.splitlines()
-            start_index = None
-            for i, line in enumerate(lines):
-                if re.match(rf"^{connector_key}:\s*$", line.strip()):
-                    start_index = i
-                    break
- 
-            if start_index is not None:
-                block_lines = [lines[start_index]]
-                base_indent = len(lines[start_index]) - len(lines[start_index].lstrip())
- 
-                for j in range(start_index + 1, len(lines)):
-                    current_line = lines[j]
-                    current_indent = len(current_line) - len(current_line.lstrip())
-                    if current_line.strip() == "":
-                        block_lines.append(current_line)
-                    elif current_indent > base_indent:
-                        block_lines.append(current_line)
-                    else:
-                        break
- 
-                exact_block = "\n".join(block_lines)
-                response = f"**Exact configuration for `{connector_key}` connector:**\n```yaml\n{exact_block}\n```"
-                return response
-            else:
-                return f"Connector `{connector_key}` found, but exact formatting could not be extracted."
- 
+    S3_ARN = "arn:aws:s3:::osif-files/OSIF_Dependency_req.txt"  # or your actual bucket/key
+    file_content = fetch_s3_file_content(S3_ARN)
+    parsed_yaml = yaml.safe_load(file_content)
+    connectors = parsed_yaml.get("core", {}).get("connectors", {})
+    # Support for search by title or key
+    title_to_key = {
+        (v.get("title") or k).lower(): k
+        for k, v in connectors.items()
+    }
+    return connectors, file_content, title_to_key
+
+# Core: given user question, return exact YAML from .txt file
+def get_connector_block(question: str, file_content: str, connectors: dict, title_to_key: dict) -> str:
+    question_lower = question.lower()
+    # List all connector keys and their titles for approximate matching
+    all_names = list(connectors.keys()) + list(title_to_key.keys())
+    # Try to match user's input
+    matched = get_close_matches(question_lower, all_names, n=1, cutoff=0.35)
+    if not matched:
         return "No matching connector found in the S3 file."
- 
-    # Fallback to LangChain agent for general queries
-    messages = []
-    for user_msg, bot_msg in history:
-        messages.append(HumanMessage(content=user_msg))
-        messages.append(AIMessage(content=bot_msg))
-    messages.append(HumanMessage(content=message))
- 
-    result = agent_executor.invoke({"messages": messages}, verbose=True)
-    return result["messages"][-1].content
- 
-# -------------------------
-# Main Entry Point
-# -------------------------
+    # Find the connector key (could be via title or key)
+    connector_key = title_to_key.get(matched[0], matched[0])
+    # Find YAML block for that connector in the raw txt file
+    lines = file_content.splitlines()
+    # Scan for the core: → connectors: → {connector_key}:
+    start = None
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*%s\s*:\s*$" % re.escape(connector_key), line):
+            start = i
+            break
+    if start is not None:
+        # Capture the block by indentation
+        base_indent = len(lines[start]) - len(lines[start].lstrip())
+        block_lines = [lines[start]]
+        for j in range(start + 1, len(lines)):
+            curr = lines[j]
+            curr_indent = len(curr) - len(curr.lstrip())
+            if curr.strip() == "":
+                block_lines.append(curr)
+            elif curr_indent > base_indent:
+                block_lines.append(curr)
+            else:
+                break
+        return "\n".join(block_lines)
+    return "Connector found, but could not extract its YAML from file."
+
+# Gradio UI: Only show the exact snippet from S3 (no extra formatting)
+def chat_ui(message: str, history: Optional[List[Tuple[str, str]]] = None) -> str:
+    connectors, file_content, title_to_key = get_connector_data_from_s3()
+    return get_connector_block(message, file_content, connectors, title_to_key)
+
 if __name__ == "__main__":
-    print("Launching Gradio interface...")
     gr.Interface(
-        fn=chat_with_agent,
+        fn=chat_ui,
         inputs="text",
         outputs="text",
-        title="OSIF Agent Chat",
-        description="Ask about connector configurations or general queries."
+        title="Connector YAML Lookup",
+        description="Ask for any connector by name or title. The exact configuration will be shown from S3."
     ).launch()
- 
- 
