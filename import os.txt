@@ -1,3 +1,4 @@
+
 import gradio as gr
 import boto3
 import re
@@ -11,7 +12,7 @@ s3 = boto3.client(
     region_name="us-east-1"
 )
 
-S3_BUCKET = "osif-files"
+S3_BUCKET = "oosif-files"
 S3_KEY = "OSIF_Dependency_req.txt"
 
 # --- Azure OpenAI Client ---
@@ -20,7 +21,7 @@ def get_openai_client():
         azure_endpoint="https://testopenaiassets.openai.azure.com",
         deployment_name="gpt-4_complex_conversions",
         openai_api_key="",  # <-- put your real API key
-        openai_api_version="2025-01-01-preview",
+        openai_api_version="2024-08-01-preview",
         openai_api_type="azure",
         temperature=0.3,
         max_tokens=2000,
@@ -61,16 +62,16 @@ Your task:
     return connector
 
 
-# --- Extract the full connector block ---
+# --- Extract the block for that connector ---
 def extract_block(content, connector_title):
     """
-    Extracts the full YAML-like block from file content starting with 'Title : connector_title'
+    Extracts the block from file content starting with 'Title : connector_title'
     until the next 'Title :' or end of file.
     """
     if connector_title == "NOT_FOUND":
         return "Could not identify connector from your question."
 
-    # Split into blocks by Title
+    # Split into blocks
     blocks = re.split(r"(?=Title\s*:)", content, flags=re.IGNORECASE)
     for block in blocks:
         if not block.strip():
@@ -104,11 +105,47 @@ if __name__ == "__main__":
     chatbot_ui.launch(debug=False)
 
 
-Now, when you ask:
+---
 
-give me sales-force-connector properties
+🔑 How It Works
 
-the chatbot will pull the entire Salesforce connector block (with authUrl, username, password, client_id, etc.) from the .txt file in S3, instead of returning only the short stub.
+1. Reads all connector titles from .txt in S3.
 
-Do you also want me to normalize indentation in the returned YAML block so it’s always formatted cleanly for display?
+
+2. Uses Azure OpenAI to match user’s query to the closest title.
+
+"sales force connector" → "sales-force-connector"
+
+"common api library" → "common-api-library"
+
+
+
+3. Once the connector title is found, it extracts the entire block from the file.
+
+
+4. Returns the raw block, no AI-generated properties.
+
+
+
+
+---
+
+🧪 Example Outputs
+
+Q1: give me sales-force-connector properties
+➡ Returns the full block starting with Title :sales-force-connector.
+
+Q2: give me sales force connector
+➡ Still maps → sales-force-connector and returns only that block.
+
+Q3: give me common api library properties
+➡ Now it will correctly map to common-api-library and return its block.
+
+Q4: give me common-api-library properties
+➡ Same result as Q3.
+
+
+---
+
+⚡ Would you like me to also make it tolerant of abbreviations (e.g., "sfdc" → sales-force-connector automatically)?
 
