@@ -1,105 +1,7 @@
-import gradio as gr
-import boto3
-import re
-import yaml
 
-# --- AWS S3 Configuration ---
-s3 = boto3.client(
-    "s3",
-    aws_access_key_id="AKIA6ODVATHCN52UKSRUO",
-    aws_secret_access_key="N3+vw0XS4ZcdzqM0Zk6qflR7UbNy0ztQgdwWoiuEO",
-    region_name="us-east-1"
-)
+Title :sales-force-connector
 
-# Example: arn:aws:s3:::oosif-files/OSIF_Dependency_req.txt
-S3_BUCKET = "oosif-files"
-S3_KEY = "OSIF_Dependency_req.txt"
-
-def load_s3_file():
-    """Read and return content from S3 text file."""
-    obj = s3.get_object(Bucket=S3_BUCKET, Key=S3_KEY)
-    return obj["Body"].read().decode("utf-8")
-
-def extract_connector(content, query):
-    """
-    Extract connector block from YAML-like text file based on query.
-    Example query: 'give me sales force connector properties'
-    """
-    # Normalize query -> connector key
-    query = query.lower()
-    if "sales" in query and "force" in query:
-        connector_key = "sfdc"
-    else:
-        # Try to extract by last word in query (connector name)
-        match = re.search(r"(\w+)\s*connector", query)
-        connector_key = match.group(1) if match else None
-
-    if not connector_key:
-        return "Could not identify connector from your question."
-
-    try:
-        data = yaml.safe_load(content)  # Parse YAML
-        connectors = data.get("core", {}).get("connectors", {})
-        if connector_key in connectors:
-            # Return exact block for the connector as YAML string
-            return yaml.dump(
-                {"core": {"connectors": {connector_key: connectors[connector_key]}}},
-                sort_keys=False
-            )
-        else:
-            return f"Connector '{connector_key}' not found in file."
-    except Exception as e:
-        return f"Error parsing file: {e}"
-
-def chatbot_response(message, history):
-    """Handle user query and fetch connector info."""
-    try:
-        content = load_s3_file()
-        result = extract_connector(content, message)
-        return result
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-# --- Gradio Chat UI ---
-chatbot_ui = gr.ChatInterface(
-    fn=chatbot_response,
-    title="OSIF Connector Lookup",
-    description="Ask about connector properties (e.g., 'give me sales force connector properties')",
-    theme="default"
-)
-
-if __name__ == "__main__":
-    chatbot_ui.launch(debug=False)
-
-
----
-
-🔑 Key Changes
-
-1. Removed AI generation → No AzureChatOpenAI, langgraph, agent, etc.
-
-
-2. Direct S3 fetch → Always pulls OSIF_Dependency_req.txt from your bucket.
-
-
-3. Exact copy output → Returns the connector’s block exactly as in file (YAML).
-
-
-4. Scalable → When you add more connectors in file.txt, the chatbot will handle them without code changes.
-
-
-
-
----
-
-👉 Example:
-
-You ask: “give me sales force connector properties”
-
-Response:
-
-
-core:
+ core:
   connectors:
     sfdc:
       title: sales-force-connector
@@ -113,7 +15,30 @@ core:
       version: v53.0
 
 
----
+Title : SQS connector
 
-Do you want me to also make it smart enough so you can ask in different ways (like “show me sfdc config” or “list Salesforce connector”) without exact keywords?
+ SQS connector:
+       aws.region :
+ 
+Title: CrossAccountSQS connector
 
+ CrossAccountSQS connector :
+      aws.region :
+      crossaccount.clientId :
+      crossaccount.clientSecret :
+
+
+Title : s3 connector
+ 
+ s3 connector :
+     aws.region :
+ 
+
+Title:  common-api-library
+
+  common-api-library :
+    apiName :
+    apiVersion :
+    mandatoryHeader.skipValidation :
+    mandatoryHeader.excludePath :
+ 
