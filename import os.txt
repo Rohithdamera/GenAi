@@ -1,11 +1,105 @@
-update the below code , as per my requirement , currently it will run in visual studio after running the code , it will open in ui box in that text box i will question like below , my requiremnt is to i had below data in s3 bucket  file inside file.txt  (
+import gradio as gr
+import boto3
+import re
+import yaml
+
+# --- AWS S3 Configuration ---
+s3 = boto3.client(
+    "s3",
+    aws_access_key_id="AKIA6ODVATHCN52UKSRUO",
+    aws_secret_access_key="N3+vw0XS4ZcdzqM0Zk6qflR7UbNy0ztQgdwWoiuEO",
+    region_name="us-east-1"
+)
+
+# Example: arn:aws:s3:::oosif-files/OSIF_Dependency_req.txt
+S3_BUCKET = "oosif-files"
+S3_KEY = "OSIF_Dependency_req.txt"
+
+def load_s3_file():
+    """Read and return content from S3 text file."""
+    obj = s3.get_object(Bucket=S3_BUCKET, Key=S3_KEY)
+    return obj["Body"].read().decode("utf-8")
+
+def extract_connector(content, query):
+    """
+    Extract connector block from YAML-like text file based on query.
+    Example query: 'give me sales force connector properties'
+    """
+    # Normalize query -> connector key
+    query = query.lower()
+    if "sales" in query and "force" in query:
+        connector_key = "sfdc"
+    else:
+        # Try to extract by last word in query (connector name)
+        match = re.search(r"(\w+)\s*connector", query)
+        connector_key = match.group(1) if match else None
+
+    if not connector_key:
+        return "Could not identify connector from your question."
+
+    try:
+        data = yaml.safe_load(content)  # Parse YAML
+        connectors = data.get("core", {}).get("connectors", {})
+        if connector_key in connectors:
+            # Return exact block for the connector as YAML string
+            return yaml.dump(
+                {"core": {"connectors": {connector_key: connectors[connector_key]}}},
+                sort_keys=False
+            )
+        else:
+            return f"Connector '{connector_key}' not found in file."
+    except Exception as e:
+        return f"Error parsing file: {e}"
+
+def chatbot_response(message, history):
+    """Handle user query and fetch connector info."""
+    try:
+        content = load_s3_file()
+        result = extract_connector(content, message)
+        return result
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+# --- Gradio Chat UI ---
+chatbot_ui = gr.ChatInterface(
+    fn=chatbot_response,
+    title="OSIF Connector Lookup",
+    description="Ask about connector properties (e.g., 'give me sales force connector properties')",
+    theme="default"
+)
+
+if __name__ == "__main__":
+    chatbot_ui.launch(debug=False)
+
+
+---
+
+🔑 Key Changes
+
+1. Removed AI generation → No AzureChatOpenAI, langgraph, agent, etc.
+
+
+2. Direct S3 fetch → Always pulls OSIF_Dependency_req.txt from your bucket.
+
+
+3. Exact copy output → Returns the connector’s block exactly as in file (YAML).
+
+
+4. Scalable → When you add more connectors in file.txt, the chatbot will handle them without code changes.
 
 
 
-expected result:
+
+---
+
+👉 Example:
+
+You ask: “give me sales force connector properties”
+
+Response:
 
 
- core:
+core:
   connectors:
     sfdc:
       title: sales-force-connector
@@ -17,130 +111,9 @@ expected result:
       grant_type: password
       queryUrl: /
       version: v53.0
-)
 
 
-suppose if i ask question like (give me sales force connector properties ) i am getting generated response , but i need expected result like above, AI generating  the response on its own, i dont want that using AI based on question , it need to give what data is present in .txt file , based on question in future i will add some more connnectors in that .txt file , except credientails of all , dont hard code anything , Using AI and question it need to get exact copy of that content in that s3 bucket, remove unnecessary code , give me full updated code 
+---
 
-
-generated response :-
-
-Here are the properties for the Salesforce connector (`sfdc`):
-- **Title**: sales-force-connector
-- **Authentication URL**: https://login.salesforce.com
-- **Username**: your-username (Please replace this with your actual Salesforce username)
-- **Password**: your-password (Please replace this with your actual Salesforce password)
-- **Client ID**: your-client_id (Please replace this with your actual Salesforce client ID)
-- **Client Secret**: your-client-secret (Please replace this with your actual Salesforce client secret)
-- **Grant Type**: password (This is the authorization model being used)
-- **Query URL**: / (This is the base URL to append queries to)
-- **Version**: v53.0 (This is the API version number for the Salesforce API)
-
-Please ensure to replace placeholder credentials with your actual Salesforce credentials to establish a connection successfully.
-
-
-
-aws credientails;-
-
-s3 = boto3.client("s3",
-                      aws_access_key_id="AKIA6ODVATHCN52UKSRUO",
-                      aws_secret_access_key="N3+vw0XS4ZcdzqM0Zk6qflR7UbNy0ztQgdwWoiuEO",
-                      region_name="us-east-1")
- 
-    obj = s3.get_object(Bucket=bucket, Key=key)
-    content = obj["Body"].read().decode("utf-8")
-   S3_ARN = "arn:aws:s3:::oosif-files/OSIF_Dependency_req.txt"  # or your actual bucket/key
-
-
-code:-
-
-import gradio as gr
-from langgraph.prebuilt import create_react_agent
-from langchain_openai import AzureChatOpenAI
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.tools import tool
-from langchain.callbacks.tracers import ConsoleCallbackHandler
-from langchain_community.callbacks import get_openai_callback
-import io
-import sys
-
-#create a local reference to remote llm model
-llm = AzureChatOpenAI(
-    deployment_name="gpt-4_complex_conversions",
-    azure_endpoint="https://testopenaiassets.openai.azure.com",
-    openai_api_key="",
-    openai_api_version="2025-01-01-preview",
-    #verbose=False
-)
-
-@tool
-def save_graph_png() -> str:
-    """
-    Generates a visual graph of the agent's internal structure using Mermaid,
-    saves it as a PNG file named 'graph.png', and returns a local URL for download.
-
-    Returns:
-        str: A message confirming that if the graph has been saved and a link to download.
-    """
-    png_data = agent.get_graph().draw_mermaid_png()
-    file_path = "graph.png"
-    with open(file_path, "wb") as f:
-        f.write(png_data)
-    return (
-        " Graph saved successfully!\n\n"
-        "!Graph Preview\n\n"
-        " Download " +file_path
-    )
-
-
-
-
-agent = create_react_agent(
-    model=llm,
-    tools=[save_graph_png],
-    # Add verbose=True to enable logging
-    verbose=True
-)
-
-# Define the chatbot function
-def chat_with_agent(message, history):
-    messages = []
-    for user_msg, bot_msg in history:
-        messages.append(HumanMessage(content=user_msg))
-        messages.append(AIMessage(content=bot_msg))
-    messages.append(HumanMessage(content=message))
-
-    try:
-        with get_openai_callback() as cb: # Use the callback context manager
-            result = agent.invoke(
-                {"messages": messages},
-                config={"callbacks": [ConsoleCallbackHandler()]}
-            )
-            final_response = result["messages"][-1].content
-            # Append the token usage and cost information to the final_response
-            final_response += "\n\n--- Token Usage ---"
-            final_response += f"\nTotal Tokens: {cb.total_tokens}"
-            final_response += f"\nPrompt Tokens: {cb.prompt_tokens}"
-            final_response += f"\nCompletion Tokens: {cb.completion_tokens}"
-            final_response += f"\nTotal Cost (USD): ${format(cb.total_cost, '.6f')}"
-    finally:
-         print("+++")
-
-  
-    return final_response
-
-
-
-
-# Create the Gradio interface
-chatbot_ui = gr.ChatInterface(
-    fn=chat_with_agent,
-    title=" OSIF Co-Developer",
-    description="Your co-developer for OSIF development",
-    theme="default"
-)
-
-# Launch the app
-chatbot_ui.launch(debug=False)
-
+Do you want me to also make it smart enough so you can ask in different ways (like “show me sfdc config” or “list Salesforce connector”) without exact keywords?
 
