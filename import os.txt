@@ -1,44 +1,64 @@
+import gradio as gr
+import boto3
+import re
 
-Title :sales-force-connector
+# --- AWS S3 Configuration ---
+s3 = boto3.client(
+    "s3",
+    aws_access_key_id="AKIA6ODVATHCN52UKSRUO",
+    aws_secret_access_key="N3+vw0XS4ZcdzqM0Zk6qflR7UbNy0ztQgdwWoiuEO",
+    region_name="us-east-1"
+)
 
- core:
-  connectors:
-    sfdc:
-      title: sales-force-connector
-      authUrl: https://login.salesforce.com
-      username: your-username
-      password: your-password
-      client_id: your-client_id
-      client_secret: your-client-secret
-      grant_type: password
-      queryUrl: /
-      version: v53.0
+# Example: arn:aws:s3:::oosif-files/OSIF_Dependency_req.txt
+S3_BUCKET = "oosif-files"
+S3_KEY = "OSIF_Dependency_req.txt"
 
+def load_s3_file():
+    """Read and return content from S3 text file."""
+    obj = s3.get_object(Bucket=S3_BUCKET, Key=S3_KEY)
+    return obj["Body"].read().decode("utf-8")
 
-Title : SQS connector
+def extract_block(content, query):
+    """
+    Extracts the connector block from file content based on query.
+    Returns the full block under 'Title : ...' until the next Title or EOF.
+    """
+    query = query.lower()
 
- SQS connector:
-       aws.region :
- 
-Title: CrossAccountSQS connector
+    # Try to find the connector name inside query
+    match = re.search(r"(sales[- ]?force|sqs|crossaccountsqs|s3|common-api-library)", query, re.IGNORECASE)
+    if not match:
+        return "Could not identify connector from your question."
 
- CrossAccountSQS connector :
-      aws.region :
-      crossaccount.clientId :
-      crossaccount.clientSecret :
+    connector_name = match.group(1).replace(" ", "").lower()
 
+    # Split file into blocks at each "Title"
+    blocks = re.split(r"(?=Title\s*:)", content, flags=re.IGNORECASE)
+    for block in blocks:
+        if not block.strip():
+            continue
+        if connector_name in block.lower().replace(" ", ""):
+            return block.strip()
 
-Title : s3 connector
- 
- s3 connector :
-     aws.region :
- 
+    return f"Connector '{connector_name}' not found in file."
 
-Title:  common-api-library
+def chatbot_response(message, history):
+    """Handle user query and fetch connector info."""
+    try:
+        content = load_s3_file()
+        result = extract_block(content, message)
+        return result
+    except Exception as e:
+        return f"Error: {str(e)}"
 
-  common-api-library :
-    apiName :
-    apiVersion :
-    mandatoryHeader.skipValidation :
-    mandatoryHeader.excludePath :
- 
+# --- Gradio Chat UI ---
+chatbot_ui = gr.ChatInterface(
+    fn=chatbot_response,
+    title="OSIF Connector Lookup",
+    description="Ask about connector properties (e.g., 'give me sales force connector properties')",
+    theme="default"
+)
+
+if __name__ == "__main__":
+    chatbot_ui.launch(debug=False)
