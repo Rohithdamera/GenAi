@@ -1,151 +1,532 @@
+update the below code according to my requirements, 
+my requirement is to based on the below code prompt what ever the response it will get generate it need to validate with this validate prompt either the response is generate accurate or not based on validate prompt it need to generate the response , dont change anything just add that validate prompt in that code and give me full updated code 
 
-import gradio as gr
-import boto3
-import re
-from langchain_openai import AzureChatOpenAI
 
-# --- AWS S3 Configuration ---
-s3 = boto3.client(
-    "s3",
-    aws_access_key_id="AKIA6ODVATHCN52UKSRUO",
-    aws_secret_access_key="N3+vw0XS4ZcdzqM0Zk6qflR7UbNy0ztQgdwWoiuEO",
-    region_name="us-east-1"
-)
+code:-
 
-S3_BUCKET = "oosif-files"
-S3_KEY = "OSIF_Dependency_req.txt"
 
-# --- Azure OpenAI Client ---
-def get_openai_client():
-    return AzureChatOpenAI(
-        azure_endpoint="https://testopenaiassets.openai.azure.com",
-        deployment_name="gpt-4_complex_conversions",
-        openai_api_key="",  # <-- put your real API key
-        openai_api_version="2024-08-01-preview",
-        openai_api_type="azure",
-        temperature=0.3,
-        max_tokens=2000,
+import os
+import json
+import logging
+from base64 import b64decode
+from Crypto.Cipher import AES
+from langchain_community.chat_models import AzureChatOpenAI
+from langchain.schema import HumanMessage, SystemMessage
+
+logging.basicConfig(level=logging.INFO)
+
+def unpad(data):
+    padding_length = data[-1]
+    return data[:-padding_length]
+
+def decrypt(data, key):
+    cipher = AES.new(b64decode(key), AES.MODE_ECB)
+    decrypted_data = cipher.decrypt(b64decode(data))
+    return unpad(decrypted_data).decode()
+
+def get_openai_client(model_instance_name):
+    try:
+        aes_key_base64 = os.environ['AES_KEY']
+        encrypted_api_base = os.environ['ENCRYPTED_API_BASE']
+        encrypted_api_key = os.environ['ENCRYPTED_API_KEY']
+        api_version = os.environ['AZURE_API_VERSION']
+
+        decrypted_api_base = decrypt(encrypted_api_base, aes_key_base64)
+        decrypted_api_key = decrypt(encrypted_api_key, aes_key_base64)
+
+        if not decrypted_api_base.endswith('/'):
+            decrypted_api_base += '/'
+
+        return AzureChatOpenAI(
+            deployment_name=model_instance_name,
+            openai_api_base=decrypted_api_base,
+            openai_api_key=decrypted_api_key,
+            openai_api_version=api_version,
+            temperature=0.0,
+            max_tokens=4096,
+            model_kwargs={"top_p": 0.95, "frequency_penalty": 0, "presence_penalty": 0}
+        )
+    except Exception as e:
+        logging.error(f"Error initializing OpenAI client: {e}")
+        raise ValueError(f"Error initializing OpenAI client: {e}")
+
+def generate_script(client, file_content, agent_name):
+    conversion_prompt = {
+
+        
+        "xslt_to_dwl": (
+             '''
+You are a **MuleSoft DataWeave (DWL) script generator**.  
+Your job: **convert the provided XSLT into an equivalent Dataweave script** that reproduces the same transformation.
+
+## Output Requirements
+- Return **only** the DWL script.**No comments**, **no explanations**,**no extra text**.
+- Please format the code using a fenced code block with triple backticks (```) before and after the code. Specify the language after the opening backticks for syntax highlighting (e.g., ```Dataweave).
+- Start with:
+  - '%dw 2.0'
+  - After '%dw 2.0' specify output application/json or output application/xml, based on <xsl:output>.
+    **Do not use** unsupported MIME types like 'text/html'. If <xsl:output method="html"/> is detected, treat it as **output** `application/xml` and generate HTML tags as XML elements.
+
+## General Rules
+- **Follow DataWeave syntax strictly**; use only supported built-ins.
+- Use **only DataWeave built-in functions**. No external modules, Java calls, or custom functions unless defined inline.
+- Use map, filter, groupBy, mapObject, reduce, pluck, orderBy, distinctBy, etc.
+- For string operations, use trim, upper, lower, substring, contains, startsWith, replace, etc.
+- For date operations, use now, as Date, as String {format: ...}, duration, etc.
+- For math, use round, floor, ceil, abs, sum, avg, etc.
+- For null/missing handling, use default, ?, isEmpty, isNull, etc.
+- For conditional logic, use if/else
+- **Namespaces:**  
+  - If XSLT uses a namespace prefix (e.g., `h:table`), declare it via `ns` in DWL and keep the same prefix when addressing elements.  
+  - Avoid undeclared prefixes.
+- **Attributes:**
+    Access with @attr; write attributes using @(attrName: value) or @("attr-name": value).
+    Important: When creating an element with attributes inside a map, wrap the element in an object and use mapObject if needed.
+    **Invalid**: element: items map (i) -> @(attr: i.value)
+    **Valid**: element: items map (i) -> { element @(attr: i.value): { ... } }
+- **Text nodes:** use `.text()` when needed; otherwise element access returns children.
+- **Iteration & selection:**  
+  - `xsl:for-each` â‡’ `map` (with optional `filter`)  
+  - `xsl:apply-templates select="path"` â‡’ iterate (map) over that selection; produce elements accordingly.
+  -  **Always use** `.*element` **instead of** `.element` **when mapping**, to ensure compatibility with both arrays and single objects.
+  -  **Always write** `filter` **using full parameter syntax**: `filter ((filterItem, filterIndex) -> ...)`.
+- **Conditionals:**  
+  - `xsl:if test="..."/xsl:when` â‡’ `if (...) ... else null`.  
+  - `xsl:choose` â‡’ `if/else if/else`.
+- **GroupBy + mapObject
+  - When grouping elements by a derived key (e.g., month from a date), use `groupBy` to produce an **object**, then iterate using mapObject.
+  - **Do not use** `map` **directly on the result** of `groupBy` â€” it returns an object, not an array.
+
+        Example pattern:
+        dwl
+        var grouped = items groupBy ((item) -> item.key)
+        ---
+        result: grouped mapObject ((value, key) -> {
+          key: value map ((v) -> ...)
+        })
+
+        For date-based grouping:
+        dwl
+        var report = payload.root.*node map ((item) -> {
+          Amount: item.Amount,
+          Date: item.Date as Date {format:'yyyy-MM-dd'} as String {format:'yyyy-MM'}
+        })
+
+        var groupedReport = report groupBy ((item) -> item.Date)
+
+        ---
+        MonthlyReport: groupedReport mapObject ((value, key) -> {
+          Month @("name": key): {
+            Total: sum(value.Amount)
+          }
+        })
+
+- **Variables/params:**  
+  - `xsl:variable name="v" select="expr"` â‡’ `var v = (expr in DW)` at the header section, or inline `let`.
+- **String ops:**  
+  - `concat(a,b)` â‡’ `a ++ b`;
+  - `normalize-space(.)` â‡’ `(value default "") as String {class:"plain"} trim`;
+  -  for `substring` use **slicing** syntax: value[start to end], Example: Phone[0 to 4] extracts the first 5 characters.
+  - `contains`, `starts-with`, `ends-with` â‡’ DataWeave equivalents.
+- **Numbers/dates:** cast where needed: `(node as Number)`, `(node as Date {format:"yyyy-MM-dd"})`.
+- **Missing/null:** use `default` and safe navigation `?`: e.g., `(emp.name.first default "")`.
+- **Repeating elements:** when producing multiple same-name elements under a parent, create an array with that field name (e.g., `book: (items map ...)`).
+- **Order:** preserve output field/element order implied by XSLT templates.
+- **No HTML tags with undeclared `html:` prefix.** Use plain `html`/`body`/`table` unless namespaces are explicitly required.
+- Use the DWL functions listed in the reference documentation: https://docs.mulesoft.com/dataweave/latest/dw-core
+
+## XPath â†’ DataWeave Cheat Sheet
+- `@attr` â‡’ `.@attr` (read) / `@(attr: value)` (write)
+- `node/text()` â‡’ `node.text()`
+- `path/to/node` â‡’ `payload.root.path.to.node`
+- `*` (any element) â‡’ `.*` (wildcard)
+- Predicates: `book[year > 2020]` â‡’ `.*book filter ((b) -> (b.year as Number) > 2020)`
+- `position()` â‡’ `$$ + 1` inside `map`
+- `concat(a, ' ', b)` â‡’ `(a as String) ++ " " ++ (b as String)`
+
+## Step-by-Step Conversion Plan (follow implicitly; do not print)
+1. Detect `<xsl:output>` to choose DW `output ...`.
+2. Identify root template match (`/` or `/<root>`). This defines the DW body root element/object.
+3. Convert each template:
+   - Static element creation â‡’ object fields/elements.
+   - `<xsl:attribute>` â‡’ `@(name: value)` within the element object.
+   - `<xsl:value-of select="expr"/>` â‡’ inline value with correct casts/defaults.
+   - `<xsl:for-each>` / `<xsl:apply-templates>` â‡’ `map` over the selection.
+   - `<xsl:if>` / `<xsl:choose>` â‡’ DW `if/else`.
+4. Ensure arrays for repeating siblings; scalars for singletons.
+5. Add `ns` declarations if prefixes are present in XSLT.
+6. Use `default` and `?` to guard against missing input.
+
+## Few-Shot Examples
+
+### Example 1 â€” Root + attributes + nested mapping
+**XSLT:**
+"<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="1.0"
+    xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+    <xsl:output method="xml" indent="yes"/>
+    <xsl:template match="/ImportExportItems">
+        <ImportExportItems>
+            <xsl:apply-templates select="Item"/>
+        </ImportExportItems>
+    </xsl:template>
+    <xsl:template match="Item">
+        <Item>
+            <ID><xsl:value-of select="ItemID"/></ID>
+            <Name><xsl:value-of select="Name"/></Name>
+            <Category><xsl:value-of select="Category"/></Category>
+            <Quantity><xsl:value-of select="Quantity"/></Quantity>
+            <Unit><xsl:value-of select="Unit"/></Unit>
+            <OriginCountry><xsl:value-of select="OriginCountry"/></OriginCountry>
+            <DestinationCountry><xsl:value-of select="DestinationCountry"/></DestinationCountry>
+            <ImportDate><xsl:value-of select="ImportDate"/></Date>
+        </Item>
+    </xsl:template>
+</xsl:stylesheet>"
+
+
+**DWL:**
+%dw 2.0
+output application/xml
+---
+ImportExportItems : {
+   Item: payload.ImportExportItems.*Item map (i) -> {
+    ID:i.ItemID,
+    Name: i.Name,
+    Category: i.Category,
+    Quantity: i.Quantity,
+    OriginCountry: i.OriginCountry,
+    DestinationCountry: i.DestinationCountry,
+    ImportDate: i.ImportDate
+   }
+}
+
+### Example 2 â€” Filtering with predicate
+**XSLT:**
+"<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="3.0"
+    xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+
+    <xsl:output method="xml" indent="yes"/>
+
+    <xsl:template match="/library">
+        <recentBooks>
+            <xsl:for-each select="book[year > 2020]">
+                <bookEntry>
+                    <bookTitle><xsl:value-of select="title"/></bookTitle>
+                    <bookAuthor><xsl:value-of select="author"/></bookAuthor>
+                    <bookYear><xsl:value-of select="year"/></bookYear>
+                </bookEntry>
+            </xsl:for-each>
+        </recentBooks>
+    </xsl:template>
+
+</xsl:stylesheet>"
+
+**Expected DWL:**
+%dw 2.0
+output application/xml
+---
+"recentBooks": {
+    "bookEntry" : payload.library.*book filter ((filterItem, filterIndex) -> filterItem.year > 2020 ) map ((item, index) -> {
+        "bookTitle": item.title,
+        "bookAuthor": item.author,
+        "bookYear": item.year
+    } )
+}
+
+### Example 3
+**XSLT:**
+"<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="1.0"
+    xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+
+    <!-- Ensure XML declaration is included in output -->
+    <xsl:output method="xml" version="1.0" encoding="UTF-8" indent="yes"/>
+
+    <xsl:key name="deptKey" match="employee" use="department"/>
+
+    <xsl:template match="/company">
+        <departments>
+            <xsl:for-each select="employee[generate-id() = generate-id(key('deptKey', department)[1])]">
+                <department name="{department}">
+                    <xsl:for-each select="key('deptKey', department)">
+                        <employee>
+                            <id><xsl:value-of select="id"/></id>
+                            <name><xsl:value-of select="name"/></name>
+                            <performanceScore><xsl:value-of select="performanceScore"/></performanceScore>
+                            <grade>
+                                <xsl:choose>
+                                    <xsl:when test="performanceScore &gt; 90">A</xsl:when>
+                                    <xsl:when test="performanceScore &gt; 75">B</xsl:when>
+                                    <xsl:otherwise>D</xsl:otherwise>
+                                </xsl:choose>
+                            </grade>
+                        </employee>
+                    </xsl:for-each>
+                </department>
+            </xsl:for-each>
+        </departments>
+    </xsl:template>
+</xsl:stylesheet>"
+
+**DWL:**
+%dw 2.0
+output application/xml
+
+fun getGrade(score) = do {
+    var scoreNum = score as Number
+    ---
+    if (scoreNum >= 90) "A"
+    else if (scoreNum >= 80) "B"
+    else if (scoreNum >= 70) "C"
+    else "D"
+}
+
+---
+{
+    departments: {
+        (payload.company.*employee groupBy $.department mapObject ((employees, deptName) -> {
+            department @(name: deptName): {
+                employee: employees map {
+                    id: $.id,
+                    name: $.name,
+                    performanceScore: $.performanceScore,
+                    grade: getGrade($.performanceScore)
+                }
+            }
+        }))
+    }
+}
+
+## Your Task
+For the given:
+
+**XSLT:**  
+{{XSLT}}
+
+**Generate the equivalent DWL script** following all rules above. Output **only** the DWL.
+'''.strip()
+        ),
+        
+    }
+
+    prompt = conversion_prompt.get(agent_name,
+        "Convert the given input into a structured script.\n"
+        "Ensure proper indentation and line breaks.\n"
+        "Do not add any programming language annotations like ```python, ```ruby, or ```javascript.\n"
+        "It should have a return statement and also the response should be a compatible Workato JavaScript/Python/Ruby snippet.\n"
     )
 
-llm = get_openai_client()
+    response = client.invoke([
+        SystemMessage(content=prompt),
+        HumanMessage(content=file_content)
+    ])
 
+    return response.content.strip()
 
-# --- Load file from S3 ---
-def load_s3_file():
-    obj = s3.get_object(Bucket=S3_BUCKET, Key=S3_KEY)
-    return obj["Body"].read().decode("utf-8")
-
-
-# --- Identify connector name using AI ---
-def identify_connector(query, content):
-    """
-    Ask Azure OpenAI to map the query to one of the available connectors in the file.
-    """
-    # Extract all available connector titles from file
-    titles = re.findall(r"Title\s*:\s*(.+)", content, flags=re.IGNORECASE)
-    connector_list = "\n".join([t.strip() for t in titles])
-
-    prompt = f"""
-You are given a list of connector titles from a file:
-{connector_list}
-
-User asked: "{query}"
-
-Your task:
-- Identify which connector title best matches the user's request.
-- Only return the exact connector title string from the list above.
-- If nothing matches, return "NOT_FOUND".
-"""
-
-    response = llm.invoke(prompt)
-    connector = response.content.strip()
-    return connector
-
-
-# --- Extract the block for that connector ---
-def extract_block(content, connector_title):
-    """
-    Extracts the block from file content starting with 'Title : connector_title'
-    until the next 'Title :' or end of file.
-    """
-    if connector_title == "NOT_FOUND":
-        return "Could not identify connector from your question."
-
-    # Split into blocks
-    blocks = re.split(r"(?=Title\s*:)", content, flags=re.IGNORECASE)
-    for block in blocks:
-        if not block.strip():
-            continue
-        if re.search(rf"Title\s*:\s*{re.escape(connector_title)}", block, flags=re.IGNORECASE):
-            return block.strip()
-
-    return f"Connector '{connector_title}' not found in file."
-
-
-# --- Chatbot handler ---
-def chatbot_response(message, history):
+def lambda_handler(event, context):
     try:
-        content = load_s3_file()
-        connector_title = identify_connector(message, content)
-        result = extract_block(content, connector_title)
-        return result
+        if 'body' not in event or not event['body']:
+            raise ValueError("Missing or empty request body.")
+
+        headers = event.get('headers', {})
+        model_instance_name = headers.get('model_instance_name', 'Default_Model')
+        query_params = event.get('queryStringParameters', {})
+
+        agent_name_param = query_params.get('Agent_name', '')
+
+        agent_names = [name.strip() for name in agent_name_param.split(',') if name.strip()]
+        if len(agent_names) != 1:
+            raise ValueError("Exactly one Agent_name must be provided in query parameters.")
+
+        agent_name = agent_names[0]
+
+        if event.get('isBase64Encoded', False):
+            file_content = b64decode(event['body']).decode('utf-8')
+        else:
+            file_content = event['body']
+
+        client = get_openai_client(model_instance_name)
+        processed_result = generate_script(client, file_content, agent_name)
+
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "text/plain"},
+            "body": processed_result
+        }
     except Exception as e:
-        return f"Error: {str(e)}"
+        logging.error(f"An error occurred: {e}")
+        return {
+            "statusCode": 400,
+            "body": json.dumps({"error": str(e)})
+        }
 
+----------------------------------------------------------------------------------------------------------------------------------
 
-# --- Gradio Chat UI ---
-chatbot_ui = gr.ChatInterface(
-    fn=chatbot_response,
-    title="OSIF Connector Lookup",
-    description="Ask about connector properties (e.g., 'give me sales force connector properties')",
-    theme="default"
-)
+validateprompt = '''
+You are a **MuleSoft DataWeave (DWL) script generator**.  
+Your job: **remove the syntax errors found in the provided DataWeave (DWL) script and produce an error free DataWeave (DWL) script**
 
-if __name__ == "__main__":
-    chatbot_ui.launch(debug=False)
-
-
+## Input Requirement
+Please provide the following two pieces of information:
+1. Input DataWeave Script
+	- Paste the full DataWeave code that you're working with.
+	- Ensure it includes all relevant expressions, mappings, and transformations.
+2. Syntax Error Message
+	- Include the exact error message you received when executing the script.
+    - Enclose the error message within square braces
+	- If available, specify the line number or section where the error occurred.
+Example format
+[Input DataWeave Script]
+%dw 2.0
+output application/json
 ---
+{ message: payload.text }
 
-🔑 How It Works
+[Syntax Error Message]
+"Syntax error on line 3: 'payload.text' is undefined"
 
-1. Reads all connector titles from .txt in S3.
+## Output Requirements
+- Return **only** the DWL script.**No comments**, **no explanations**,**no extra text**.
+- Please format the code using a fenced code block with triple backticks (```) before and after the code. Specify the language after the opening backticks for syntax highlighting (e.g., ```Dataweave).
 
+## General Rules
+- **Follow DataWeave syntax strictly**; use only supported built-ins.
+- Use **only DataWeave built-in functions**. No external modules, Java calls, or custom functions unless defined inline.
+- Use map, filter, groupBy, mapObject, reduce, pluck, orderBy, distinctBy, etc.
+- For string operations, use trim, upper, lower, substring, contains, startsWith, replace, etc.
+- For date operations, use now, as Date, as String {format: ...}, duration, etc.
+- For math, use round, floor, ceil, abs, sum, avg, etc.
+- For null/missing handling, use default, ?, isEmpty, isNull, etc.
+- For conditional logic, use if/else etc.
+- For array operations, use sizeOf
+Example
+dwl
+sizeOf(payload.items filter (i) -> i.type == 'book')
+- Use the DWL functions listed in the reference documentation: https://docs.mulesoft.com/dataweave/latest/dw-core
+- In Dataweave, object needs to be enclosed with curly braces - {}, and it should have a key and value pair.
 
-2. Uses Azure OpenAI to match user’s query to the closest title.
+## Few-Shot Examples
 
-"sales force connector" → "sales-force-connector"
-
-"common api library" → "common-api-library"
-
-
-
-3. Once the connector title is found, it extracts the entire block from the file.
-
-
-4. Returns the raw block, no AI-generated properties.
-
-
-
-
+### Example 1 â€” for-each logic with sorting
+**Input Dataweave Script**
+%dw 2.0
+output application/xml
 ---
+{
+  html: {
+ head: {
+   title: "CD Catalog",
+   style: """
+     body { font-family: Arial, sans-serif; }
+     table { border-collapse: collapse; width: 80%; margin: 20px auto; }
+     th, td { border: 1px solid #999; padding: 8px; text-align: left; }
+     th { background-color: #f2f2f2; }
+     h2 { text-align: center; }
+   """
+ },
+ body: {
+   h2: "CD Catalog",
+   table: {
+     tr: [
+       {
+         th: ["Title", "Artist", "Country", "Company"]
+       }
+     ] ++ (payload.catalog.*cd orderBy $.title map (i) -> {
+       tr: {
+         td: [i.title, i.artist, i.country, i.price]
+       }
+     })
+   }
+ }
+  }
+}
+**Syntax Error Message**
+[Invalid input '"', expected } or ',' for the object expression. (line 8, column 16):
 
-🧪 Example Outputs
+8| style: """
+^
+Location:
+anonymous (line: 8, column:16)]
 
-Q1: give me sales-force-connector properties
-➡ Returns the full block starting with Title :sales-force-connector.
-
-Q2: give me sales force connector
-➡ Still maps → sales-force-connector and returns only that block.
-
-Q3: give me common api library properties
-➡ Now it will correctly map to common-api-library and return its block.
-
-Q4: give me common-api-library properties
-➡ Same result as Q3.
-
-
+**Output Dataweave Script**
+%dw 2.0
+output application/xml
 ---
+{
+  html: {
+    head: {
+      title: "CD Catalog",
+      style: "body { font-family: Arial, sans-serif; } table { border-collapse: collapse; width: 80%; margin: 20px auto; } th, td { border: 1px solid #999; padding: 8px; text-align: left; } th { background-color: #f2f2f2; } h2 { text-align: center; }"
+    },
+    body: {
+      h2: "CD Catalog",
+      table: {
+        tr: [
+          {
+            th: ["Title", "Artist", "Country", "Company"]
+          }
+        ] ++ (payload.catalog.*cd orderBy $.title map (i) -> {
+          tr: {
+            td: [i.title, i.artist, i.country, i.price]
+          }
+        })
+      }
+    }
+  }
+}
 
-⚡ Would you like me to also make it tolerant of abbreviations (e.g., "sfdc" → sales-force-connector automatically)?
+### Example 2 â€” for-each logic with sorting
+**Input Dataweave Script**
+%dw 2.0
+output application/xml
+var today = now() as Date {format: "yyyy-MM-dd"}
+---
+EMPData: {
+ Employee: payload.Records.*Candidate map (c) -> {
+     EMPID: generateId(),
+     FullName: (c.FirstName ++ " " ++ c.LastName),
+     Mobile: c.Mobile,
+     Address: (c.HouseNo ++ " " ++ c.City ++ " " ++ c.State ++ " " ++ c.Country),
+     PersonalEmail: c.Email,
+     OfficialEmail: (lower(c.FirstName) ++ "." ++ lower(c.LastName) ++ "@cap.com"),
+     OfficialEmail1: lower(c.FirstName),
+     status: if ((as Date {format: "yyyy-MM-dd"}(c.DOJ) <= today)) "active" else "inactive"
+ }
+}
+**Syntax Error Message**
+[Invalid input 'a', expected ')' for the enclosed expression. (line 14, column 22):
 
+14| status: if ((as Date {format: "yyyy-MM-dd"}(c.DOJ) <= today)) "active" else "inactive"
+^
+Location:
+anonymous (line: 14, column:22)]
+
+**Output Dataweave Script**
+%dw 2.0
+output application/xml
+var today = now() as Date {format: "yyyy-MM-dd"}
+---
+EMPData: {
+    Employee: payload.Records.*Candidate map (c) -> {
+        EMPID: generateId(),
+        FullName: (c.FirstName ++ " " ++ c.LastName),
+        Mobile: c.Mobile,
+        Address: (c.HouseNo ++ " " ++ c.City ++ " " ++ c.State ++ " " ++ c.Country),
+        PersonalEmail: c.Email,
+        OfficialEmail: (lower(c.FirstName) ++ "." ++ lower(c.LastName) ++ "@cap.com"),
+        OfficialEmail1: lower(c.FirstName),
+        status: if ((c.DOJ as Date {format: "yyyy-MM-dd"}) <= today) "active" else "inactive"
+    }
+}
+
+## Your Task
+For the given:
+**Dataweave Script:**  
+{{Dataweave Script}}
+**Syntax Error Message**
+{{Syntax Error Message}}
+
+**Generate the DWL script** following all rules above. Output **error free** the DWL.
+'''.strip()
