@@ -1,10 +1,39 @@
+i am getting this response for the below code, but it is there in data base , i think it is not fetching from data base , give me full updated code according to my requirement 
+
+response:-
+
+how many debug logs are there
+
+There are no DEBUG logs present. Total DEBUG logs: 0.
+
+--- Token Usage ---
+Total Tokens: 92
+Prompt Tokens: 78
+Completion Tokens: 14
+Total Cost (USD): $0.001200
+
+how many logs are there
+
+There are no DEBUG logs in the summary provided.
+
+--- Token Usage ---
+Total Tokens: 87
+Prompt Tokens: 77
+Completion Tokens: 10
+Total Cost (USD): $0.001070
+
+
+
+
+
+code:-
+
 import gradio as gr
 import mysql.connector
 import json
 from langchain_openai import AzureChatOpenAI
 from langchain.callbacks import get_openai_callback
-from langchain.callbacks.base import ConsoleCallbackHandler
-
+from langchain_core.tracers.stdout import ConsoleCallbackHandler
 
 # -------------------------------
 # Configure Azure OpenAI
@@ -12,43 +41,51 @@ from langchain.callbacks.base import ConsoleCallbackHandler
 llm = AzureChatOpenAI(
     deployment_name="gpt-4_complex_conversions",
     azure_endpoint="https://testopenaiassets.openai.azure.com",
-    openai_api_key="",  # <-- Put your API Key here
+    openai_api_key="",
     openai_api_version="2025-01-01-preview"
 )
-
 
 # -------------------------------
 # Configure MySQL
 # -------------------------------
 config = {
     "host": "localhost",
-    "user": "root",        # your MySQL user
-    "password": "Admin",   # your MySQL password
+    "user": "root",
+    "password": "Admin",
     "database": "test_data"
 }
-
 
 def fetch_logs():
     """Fetch logs or API performance data from MySQL."""
     conn = mysql.connector.connect(**config)
     cursor = conn.cursor(dictionary=True)
 
-    cursor.execute("SELECT * FROM api_logs LIMIT 50")  # adjust table & query as needed
-    results = cursor.fetchall()
+    try:
+        cursor.execute("SELECT * FROM api_logs LIMIT 50")  # Adjust table name if needed
+        results = cursor.fetchall()
+    except Exception as e:
+        results = [{"error": str(e)}]
 
     cursor.close()
     conn.close()
     return results
 
-
 # -------------------------------
 # Chat Function
 # -------------------------------
-def chat_with_agent(user_prompt):
+def chat_with_agent(user_prompt, history):
     try:
         # Fetch logs from DB
         results = fetch_logs()
-        results_str = json.dumps(results, indent=2)
+
+        # Analyze logs before sending to LLM
+        level_counts = {}
+        for log in results:
+            level = log.get("level", "UNKNOWN").upper()
+            level_counts[level] = level_counts.get(level, 0) + 1
+
+        summary = "\n".join([f"{level}: {count}" for level, count in level_counts.items()])
+        debug_count = level_counts.get("DEBUG", 0)
 
         # Construct final prompt for LLM
         messages = [
@@ -63,7 +100,10 @@ def chat_with_agent(user_prompt):
             },
             {
                 "role": "user",
-                "content": f"{user_prompt}\n\nHere are the logs:\n{results_str}"
+                "content": (
+                    f"{user_prompt}\n\nHere is a summary of log levels:\n{summary}\n\n"
+                    f"Total DEBUG logs: {debug_count}"
+                )
             },
         ]
 
@@ -82,7 +122,7 @@ def chat_with_agent(user_prompt):
         return final_response
 
     except Exception as e:
-        return f"❌ Error: {str(e)}"
+        return f" Error: {str(e)}"
 
 
 # -------------------------------
