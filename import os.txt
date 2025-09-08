@@ -1,81 +1,100 @@
+import gradio as gr
+import mysql.connector
+import json
+from langchain_openai import AzureChatOpenAI
+from langchain.callbacks import get_openai_callback
+from langchain.callbacks.base import ConsoleCallbackHandler
 
-combine the code 1 and code 2 into one , i will run the code in visual studio after code running in UI it will open box there i will enter the prompt , based on prompt , it will give result , but my requirement is to (give me how many debugs happened (or) what things are in log file etc , give me full updated code 
 
-code 1:-
-
-create a local reference to remote llm model
+# -------------------------------
+# Configure Azure OpenAI
+# -------------------------------
 llm = AzureChatOpenAI(
     deployment_name="gpt-4_complex_conversions",
     azure_endpoint="https://testopenaiassets.openai.azure.com",
-    openai_api_key="",
-    openai_api_version="2025-01-01-preview",
-    #verbose=False
+    openai_api_key="",  # <-- Put your API Key here
+    openai_api_version="2025-01-01-preview"
 )
 
 
- try:
-        with get_openai_callback() as cb: # Use the callback context manager
-            result = agent.invoke(
-                {"messages": messages},
-                config={"callbacks": [ConsoleCallbackHandler()]}
-            )
-            final_response = result["messages"][-1].content
-            # Append the token usage and cost information to the final_response
+# -------------------------------
+# Configure MySQL
+# -------------------------------
+config = {
+    "host": "localhost",
+    "user": "root",        # your MySQL user
+    "password": "Admin",   # your MySQL password
+    "database": "test_data"
+}
+
+
+def fetch_logs():
+    """Fetch logs or API performance data from MySQL."""
+    conn = mysql.connector.connect(**config)
+    cursor = conn.cursor(dictionary=True)
+
+    cursor.execute("SELECT * FROM api_logs LIMIT 50")  # adjust table & query as needed
+    results = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+    return results
+
+
+# -------------------------------
+# Chat Function
+# -------------------------------
+def chat_with_agent(user_prompt):
+    try:
+        # Fetch logs from DB
+        results = fetch_logs()
+        results_str = json.dumps(results, indent=2)
+
+        # Construct final prompt for LLM
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a senior data analyst. Analyze API/system logs. "
+                    "Answer questions like 'how many debugs happened' or "
+                    "'what errors are present in the logs'. "
+                    "Be concise and structured in your response."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"{user_prompt}\n\nHere are the logs:\n{results_str}"
+            },
+        ]
+
+        # Call Azure LLM with callback to track token usage
+        with get_openai_callback() as cb:
+            result = llm.invoke(messages, config={"callbacks": [ConsoleCallbackHandler()]})
+            final_response = result.content
+
+            # Append token usage details
             final_response += "\n\n--- Token Usage ---"
             final_response += f"\nTotal Tokens: {cb.total_tokens}"
             final_response += f"\nPrompt Tokens: {cb.prompt_tokens}"
             final_response += f"\nCompletion Tokens: {cb.completion_tokens}"
             final_response += f"\nTotal Cost (USD): ${format(cb.total_cost, '.6f')}"
-    finally:
-         print("+++")
+
+        return final_response
+
+    except Exception as e:
+        return f"❌ Error: {str(e)}"
 
 
-
-# Create the Gradio interface
+# -------------------------------
+# Gradio UI
+# -------------------------------
 chatbot_ui = gr.ChatInterface(
     fn=chat_with_agent,
-    title=" OSIF Co-Developer",
-    description="Your co-developer for OSIF development",
+    title="OSIF Co-Developer",
+    description="Query system/API logs with natural language",
     theme="default"
 )
 
-# Launch the app
-chatbot_ui.launch(debug=False)
-
-
-code:2
-
-
-import json
-import mysql.connector
-
-# MySQL connection configuration
-config = {
-    "host": "localhost",
-    "user": "root",         # 
-    "password": "Admin",    # 
-    "database": "test_data" # 
-}
-
-
-
-# Connect to MySQL
-conn = mysql.connector.connect(**config)
-cursor = conn.cursor()
-
-
-
-prompt = (
-    f"You are a senior data analyst. Analyze the following API performance data collected over the last {time_interval.lower()}.\n"
-    f"Each row contains detailed metrics for the API '{api_name}'.\n"
-    "Your tasks are:\n"
-    "1. Provide an overall summary of the API's health.\n"
-    "2. Identify any performance issues, anomalies, or error patterns.\n"
-    "3. Explain potential causes for each issue.\n"
-    "4. Suggest practical, data-driven solutions to improve performance.\n"
-    "5. Include any trends or patterns you observe.\n\n"
-    "results_str is the given data."
-)
-
-
-
+# Launch UI
+if __name__ == "__main__":
+    chatbot_ui.launch(debug=False)
