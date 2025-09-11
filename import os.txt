@@ -4,115 +4,53 @@ from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain.callbacks.tracers import ConsoleCallbackHandler
 from langchain_community.callbacks import get_openai_callback
-import os
-import re
 
-# Create a local reference to remote llm model
+# Create a local reference to remote LLM model
 llm = AzureChatOpenAI(
     deployment_name="gpt-4_complex_conversions",
     azure_endpoint="https://testopenaiassets.openai.azure.com",
-    openai_api_key="",  # put your key
+    openai_api_key="",  # put your API key
     openai_api_version="2025-01-01-preview",
 )
 
-# Optional: tools if you want
+# Agent
 agent = create_react_agent(
     model=llm,
     tools=[],
     verbose=True
 )
 
-# --------------------
-# Helper: Parse logs
-# --------------------
-def parse_logs(log_text: str):
-    logs_by_level = {"INFO": [], "WARN": [], "ERROR": [], "DEBUG": [], "OTHER": []}
-    for line in log_text.splitlines():
-        line_upper = line.upper()
-        if "ERROR" in line_upper:
-            logs_by_level["ERROR"].append(line)
-        elif "WARN" in line_upper:
-            logs_by_level["WARN"].append(line)
-        elif "INFO" in line_upper:
-            logs_by_level["INFO"].append(line)
-        elif "DEBUG" in line_upper:
-            logs_by_level["DEBUG"].append(line)
-        else:
-            logs_by_level["OTHER"].append(line)
-    return logs_by_level
-
-# --------------------
-# Main chatbot function
-# --------------------
+# Chatbot function
 def chat_with_agent(message, history, file=None):
     messages = []
 
-    # ✅ Handle history=None
+    # Ensure history exists
     if history is not None:
         for user_msg, bot_msg in history:
             messages.append(HumanMessage(content=user_msg))
             messages.append(AIMessage(content=bot_msg))
 
+    # If a file is uploaded, read its contents
     file_content = ""
-    logs_by_level = None
-
-    # If a file is uploaded, read it
     if file is not None:
         try:
             with open(file.name, "r", encoding="utf-8", errors="ignore") as f:
                 file_content = f.read()
-
-            # If file looks like a log file, parse it
-            if file.name.endswith(".log") or "ERROR" in file_content.upper() or "WARN" in file_content.upper():
-                logs_by_level = parse_logs(file_content)
-
         except Exception as e:
             file_content = f"[Error reading file: {e}]"
 
-    # --------------------
-    # Handle log-specific queries
-    # --------------------
-    if logs_by_level:
-        query = message.lower()
-
-        if "error" in query and "count" in query:
-            return f"Total ERROR logs: {len(logs_by_level['ERROR'])}"
-
-        elif "error" in query and ("list" in query or "show" in query):
-            errors = logs_by_level["ERROR"][:50]  # limit output
-            return "First 50 ERROR logs:\n" + "\n".join(errors)
-
-        elif "warn" in query and "count" in query:
-            return f"Total WARN logs: {len(logs_by_level['WARN'])}"
-
-        elif "warn" in query and ("list" in query or "show" in query):
-            warns = logs_by_level["WARN"][:50]
-            return "First 50 WARN logs:\n" + "\n".join(warns)
-
-        elif "info" in query and "count" in query:
-            return f"Total INFO logs: {len(logs_by_level['INFO'])}"
-
-        elif "info" in query and ("list" in query or "show" in query):
-            infos = logs_by_level["INFO"][:50]
-            return "First 50 INFO logs:\n" + "\n".join(infos)
-
-        # Default fallback: Ask LLM with logs
-        else:
-            user_message = f"{message}\n\n--- Log File Content (truncated) ---\n{file_content[:5000]}..."
-            messages.append(HumanMessage(content=user_message))
+    # Construct user message (question + file if present)
+    if file_content:
+        user_message = (
+            f"User question:\n{message}\n\n"
+            f"Attached file content:\n{file_content}\n"
+        )
     else:
-        # If not logs, proceed normally
-        if file_content:
-            user_message = (
-                f"{message}\n\n--- File Content Start ---\n{file_content}\n--- File Content End ---"
-            )
-        else:
-            user_message = message
-        messages.append(HumanMessage(content=user_message))
+        user_message = message
 
-    # --------------------
-    # Normal LLM response
-    # --------------------
+    messages.append(HumanMessage(content=user_message))
+
+    # Call agent
     try:
         with get_openai_callback() as cb:
             result = agent.invoke(
@@ -121,7 +59,7 @@ def chat_with_agent(message, history, file=None):
             )
             final_response = result["messages"][-1].content
 
-            # Token usage info
+            # Add usage info
             final_response += "\n\n--- Token Usage ---"
             final_response += f"\nTotal Tokens: {cb.total_tokens}"
             final_response += f"\nPrompt Tokens: {cb.prompt_tokens}"
@@ -132,7 +70,7 @@ def chat_with_agent(message, history, file=None):
 
     return final_response
 
-# ✅ Keep ChatInterface with file upload
+# Gradio Chat Interface
 chatbot_ui = gr.ChatInterface(
     fn=chat_with_agent,
     additional_inputs=[
@@ -142,9 +80,9 @@ chatbot_ui = gr.ChatInterface(
         )
     ],
     title="OSIF Co-Developer",
-    description="Ask coding questions, paste code, or upload files (source code or log files) for analysis.",
+    description="Ask coding or log-related questions, paste code, or upload files. The AI will analyze and answer based on your prompt and the file content.",
     theme="default"
 )
 
-# Launch the app
+# Launch app
 chatbot_ui.launch(debug=False)
