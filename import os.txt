@@ -6,68 +6,77 @@ from langchain_core.tools import tool
 from langchain.callbacks.tracers import ConsoleCallbackHandler
 from langchain_community.callbacks import get_openai_callback
 import io
-import sys
+import os
 
-#create a local reference to remote llm model
+# Create a local reference to remote llm model
 llm = AzureChatOpenAI(
     deployment_name="gpt-4_complex_conversions",
     azure_endpoint="https://testopenaiassets.openai.azure.com",
-    openai_api_key="",
+    openai_api_key="",  # ⚠️ fill in your key
     openai_api_version="2025-01-01-preview",
-    #verbose=False
 )
 
-
-
-
-
-
+# Optional: add tools here if needed
 agent = create_react_agent(
     model=llm,
-    tools=[save_graph_png],
-    # Add verbose=True to enable logging
+    tools=[],
     verbose=True
 )
 
-# Define the chatbot function
-def chat_with_agent(message, history):
+# Define chatbot function
+def chat_with_agent(message, history, file=None):
     messages = []
     for user_msg, bot_msg in history:
         messages.append(HumanMessage(content=user_msg))
         messages.append(AIMessage(content=bot_msg))
-    messages.append(HumanMessage(content=message))
+
+    # If a file is uploaded, read its contents
+    file_content = ""
+    if file is not None:
+        try:
+            with open(file.name, "r", encoding="utf-8", errors="ignore") as f:
+                file_content = f.read()
+        except Exception as e:
+            file_content = f"[Error reading file: {e}]"
+
+    # Construct the full user message (question + optional file content)
+    if file_content:
+        user_message = f"{message}\n\n--- File Content Start ---\n{file_content}\n--- File Content End ---"
+    else:
+        user_message = message
+
+    messages.append(HumanMessage(content=user_message))
 
     try:
-        with get_openai_callback() as cb: # Use the callback context manager
+        with get_openai_callback() as cb:
             result = agent.invoke(
                 {"messages": messages},
                 config={"callbacks": [ConsoleCallbackHandler()]}
             )
             final_response = result["messages"][-1].content
-            # Append the token usage and cost information to the final_response
+
+            # Token usage info
             final_response += "\n\n--- Token Usage ---"
             final_response += f"\nTotal Tokens: {cb.total_tokens}"
             final_response += f"\nPrompt Tokens: {cb.prompt_tokens}"
             final_response += f"\nCompletion Tokens: {cb.completion_tokens}"
             final_response += f"\nTotal Cost (USD): ${format(cb.total_cost, '.6f')}"
     finally:
-         print("+++")
+        print("Interaction completed")
 
-  
     return final_response
 
-
-
-
-# Create the Gradio interface
-chatbot_ui = gr.ChatInterface(
+# Gradio UI with both text + file upload
+chatbot_ui = gr.Interface(
     fn=chat_with_agent,
-    title=" OSIF Co-Developer",
-    description="Your co-developer for OSIF development",
-    theme="default"
+    inputs=[
+        gr.Textbox(lines=5, label="Your Question / Code"),
+        gr.File(label="Upload a file (optional)", file_types=[".txt", ".java", ".py", ".js", ".cpp", ".md", "*"])
+    ],
+    outputs=gr.Textbox(label="AI Response", lines=20),
+    title="OSIF Co-Developer",
+    description="Ask coding questions, paste code, or upload a file (.txt, .java, .py, etc.) for analysis."
 )
 
 # Launch the app
 chatbot_ui.launch(debug=False)
-
-
