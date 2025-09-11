@@ -1,82 +1,116 @@
-import gradio as gr
-from langgraph.prebuilt import create_react_agent
-from langchain_openai import AzureChatOpenAI
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.tools import tool
-from langchain.callbacks.tracers import ConsoleCallbackHandler
-from langchain_community.callbacks import get_openai_callback
-import io
-import os
-
-# Create a local reference to remote llm model
-llm = AzureChatOpenAI(
-    deployment_name="gpt-4_complex_conversions",
-    azure_endpoint="https://testopenaiassets.openai.azure.com",
-    openai_api_key="",  # ⚠️ fill in your key
-    openai_api_version="2025-01-01-preview",
-)
-
-# Optional: add tools here if needed
-agent = create_react_agent(
-    model=llm,
-    tools=[],
-    verbose=True
-)
-
-# Define chatbot function
-def chat_with_agent(message, history, file=None):
-    messages = []
+               ^^^^^^^^^^^^^^^^^^
+  File "c:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\error_handler.py", line 30, in chat_with_agent
     for user_msg, bot_msg in history:
-        messages.append(HumanMessage(content=user_msg))
-        messages.append(AIMessage(content=bot_msg))
-
-    # If a file is uploaded, read its contents
-    file_content = ""
-    if file is not None:
-        try:
-            with open(file.name, "r", encoding="utf-8", errors="ignore") as f:
-                file_content = f.read()
-        except Exception as e:
-            file_content = f"[Error reading file: {e}]"
-
-    # Construct the full user message (question + optional file content)
-    if file_content:
-        user_message = f"{message}\n\n--- File Content Start ---\n{file_content}\n--- File Content End ---"
-    else:
-        user_message = message
-
-    messages.append(HumanMessage(content=user_message))
-
-    try:
-        with get_openai_callback() as cb:
-            result = agent.invoke(
-                {"messages": messages},
-                config={"callbacks": [ConsoleCallbackHandler()]}
-            )
-            final_response = result["messages"][-1].content
-
-            # Token usage info
-            final_response += "\n\n--- Token Usage ---"
-            final_response += f"\nTotal Tokens: {cb.total_tokens}"
-            final_response += f"\nPrompt Tokens: {cb.prompt_tokens}"
-            final_response += f"\nCompletion Tokens: {cb.completion_tokens}"
-            final_response += f"\nTotal Cost (USD): ${format(cb.total_cost, '.6f')}"
-    finally:
-        print("Interaction completed")
-
-    return final_response
-
-# Gradio UI with both text + file upload
-chatbot_ui = gr.Interface(
-    fn=chat_with_agent,
-    inputs=[
-        gr.Textbox(lines=5, label="Your Question / Code"),
-        gr.File(label="Upload a file (optional)", file_types=[".txt", ".java", ".py", ".js", ".cpp", ".md", "*"])
-    ],
-    outputs=gr.Textbox(label="AI Response", lines=20),
-    title="OSIF Co-Developer",
-    description="Ask coding questions, paste code, or upload a file (.txt, .java, .py, etc.) for analysis."
-)
-
-# Launch the app
-chatbot_ui.launch(debug=False)
+TypeError: 'NoneType' object is not iterable
+Traceback (most recent call last):
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\queueing.py", line 626, in process_events
+    response = await route_utils.call_process_api(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\route_utils.py", line 350, in call_process_api
+    output = await app.get_blocks().process_api(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\blocks.py", line 2239, in process_api
+    result = await self.call_function(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\blocks.py", line 1746, in call_function
+    prediction = await anyio.to_thread.run_sync(  # type: ignore
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\anyio\to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\anyio\_backends\_asyncio.py", line 2470, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\anyio\_backends\_asyncio.py", line 967, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\utils.py", line 917, in wrapper
+    response = f(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^
+  File "c:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\error_handler.py", line 30, in chat_with_agent
+    for user_msg, bot_msg in history:
+TypeError: 'NoneType' object is not iterable
+Traceback (most recent call last):
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\queueing.py", line 626, in process_events
+    response = await route_utils.call_process_api(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\route_utils.py", line 350, in call_process_api
+    output = await app.get_blocks().process_api(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\blocks.py", line 2239, in process_api
+    result = await self.call_function(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\blocks.py", line 1746, in call_function
+    prediction = await anyio.to_thread.run_sync(  # type: ignore
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\anyio\to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\anyio\_backends\_asyncio.py", line 2470, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\anyio\_backends\_asyncio.py", line 967, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\utils.py", line 917, in wrapper
+    response = f(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^
+  File "c:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\error_handler.py", line 30, in chat_with_agent
+    for user_msg, bot_msg in history:
+TypeError: 'NoneType' object is not iterable
+Traceback (most recent call last):
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\queueing.py", line 626, in process_events
+    response = await route_utils.call_process_api(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\route_utils.py", line 350, in call_process_api
+    output = await app.get_blocks().process_api(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\blocks.py", line 2239, in process_api
+    result = await self.call_function(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\blocks.py", line 1746, in call_function
+    prediction = await anyio.to_thread.run_sync(  # type: ignore
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\anyio\to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\anyio\_backends\_asyncio.py", line 2470, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\anyio\_backends\_asyncio.py", line 967, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\utils.py", line 917, in wrapper
+    response = f(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^
+  File "c:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\error_handler.py", line 30, in chat_with_agent
+    for user_msg, bot_msg in history:
+TypeError: 'NoneType' object is not iterable
+Traceback (most recent call last):
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\queueing.py", line 626, in process_events
+    response = await route_utils.call_process_api(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\route_utils.py", line 350, in call_process_api
+    output = await app.get_blocks().process_api(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\blocks.py", line 2239, in process_api
+    result = await self.call_function(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\blocks.py", line 1746, in call_function
+    prediction = await anyio.to_thread.run_sync(  # type: ignore
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\anyio\to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\anyio\_backends\_asyncio.py", line 2470, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\anyio\_backends\_asyncio.py", line 967, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\.venv\Lib\site-packages\gradio\utils.py", line 917, in wrapper
+    response = f(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^
+  File "c:\Users\rdamera\OneDrive - Capgemini\Documents\React_workspace\gen-ai-utils-local-agent\gen-ai-utils-local-agent\local-osif-agent\error_handler.py", line 30, in chat_with_agent
+    for user_msg, bot_msg in history:
+TypeError: 'NoneType' object is not iterable
