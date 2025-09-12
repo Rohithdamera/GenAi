@@ -1,252 +1,184 @@
-can you merge the bothcode 1 and code 2 into one as two individual agents in the same code , and do not change anything exesting code , prompts , code flow , structure need to remain same , just change the code according to my requirement , and give me fully working code 
-
-example;-
-# ====================================================
-# Agent 4: Java Client Class Generator
-# ====================================================
-class ClientClassAgent:
-
-
-
-code 1:
-
-
 import gradio as gr
 import mysql.connector
 import json
+from pathlib import Path
 from langchain_openai import AzureChatOpenAI
-from langchain.callbacks import get_openai_callback
+from langchain_core.messages import HumanMessage, AIMessage
+from langgraph.prebuilt import create_react_agent
 from langchain_core.tracers.stdout import ConsoleCallbackHandler
+from langchain.callbacks.tracers import ConsoleCallbackHandler as LegacyConsoleCallbackHandler
+from langchain_community.callbacks import get_openai_callback
 
-# -------------------------------
-# Configure Azure OpenAI
-# -------------------------------
+# ====================================================
+# Shared: Azure OpenAI Client
+# ====================================================
 llm = AzureChatOpenAI(
     deployment_name="gpt-4_complex_conversions",
     azure_endpoint="https://testopenaiassets.openai.azure.com",
-    openai_api_key="",  
-    openai_api_version="2025-01-01-preview"
+    openai_api_key="",  # Supply key
+    openai_api_version="2025-01-01-preview",
 )
 
-# -------------------------------
-# Configure MySQL (EC2)
-# -------------------------------
+# ====================================================
+# Shared: Token Tracker
+# ====================================================
+class TokenTracker:
+    """Centralized token usage tracker."""
+
+    @staticmethod
+    def run_with_tracking(func, *args, **kwargs):
+        with get_openai_callback() as cb:
+            result = func(*args, **kwargs)
+
+            usage_summary = "\n\n--- Token Usage ---"
+            usage_summary += f"\nTotal Tokens: {cb.total_tokens}"
+            usage_summary += f"\nPrompt Tokens: {cb.prompt_tokens}"
+            usage_summary += f"\nCompletion Tokens: {cb.completion_tokens}"
+            usage_summary += f"\nTotal Cost (USD): ${format(cb.total_cost, '.6f')}"
+
+        return result, usage_summary
+
+# ====================================================
+# Agent 1: Log Analysis (Code 1)
+# ====================================================
 config = {
-    "host": "34.224.108.183",  
+    "host": "34.224.108.183",
     "user": "OSIF",
     "password": "123456@Cap",
     "database": "OSIF"
 }
 
 def fetch_logs():
-    """Fetch logs or API performance data from MySQL."""
     conn = mysql.connector.connect(**config)
     cursor = conn.cursor(dictionary=True)
-
     try:
-        # Adjust table/columns here if needed
         cursor.execute("SELECT * FROM log_entries ORDER BY id DESC LIMIT 100")
         results = cursor.fetchall()
     except Exception as e:
         results = [{"error": str(e)}]
-
     cursor.close()
     conn.close()
     return results
 
-# -------------------------------
-# Chat Function
-# -------------------------------
-def chat_with_agent(user_prompt, history):
-    try:
-        # Fetch logs from DB
-        results = fetch_logs()
+class LogAnalysisAgent:
+    def run(self, user_prompt, history):
+        try:
+            results = fetch_logs()
+            if not results or "error" in results[0]:
+                return f"Could not fetch logs from DB: {results}"
 
-        if not results or "error" in results[0]:
-            return f" Could not fetch logs from DB: {results}"
+            # Build log summary
+            level_counts = {}
+            for log in results:
+                level = log.get("level", "UNKNOWN").upper()
+                level_counts[level] = level_counts.get(level, 0) + 1
 
-        # Create log summary (count per level)
-        level_counts = {}
-        for log in results:
-            level = log.get("level", "UNKNOWN").upper()
-            level_counts[level] = level_counts.get(level, 0) + 1
+            summary = "\n".join([f"{level}: {count}" for level, count in level_counts.items()])
+            debug_count = level_counts.get("DEBUG", 0)
+            logs_str = json.dumps(results, indent=2, default=str)
 
-        summary = "\n".join([f"{level}: {count}" for level, count in level_counts.items()])
-        debug_count = level_counts.get("DEBUG", 0)
-
-        # Convert logs to JSON string (so LLM sees actual log rows)
-        logs_str = json.dumps(results, indent=2, default=str)
-
-        # Construct final prompt for LLM
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                   """
+            # Prepare messages
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        """
 You are a highly experienced data analyst specializing in system and API log analysis.
-
-Your task is to analyze structured log data provided to you. These logs may contain information such as:
-- Log levels (e.g., DEBUG, INFO, ERROR)
-- Timestamps
-- Thread identifiers
-- Class names
-- Correlation IDs
-- Request identifiers
-- API names and versions
-- Messages and stack traces
-
-You will be asked questions related to:
-- Log frequency and distribution by level (e.g., how many DEBUG logs)
-- Error detection and categorization
-- Anomaly identification or unusual patterns
-- API performance insights
-- Request or thread-level tracing
-- Any other insights that can be derived from the logs
-Instructions:
-- Always base your answers strictly on the provided log data.
-- If the requested information is not present in the logs, clearly state that it is unavailable.
-- Avoid making assumptions beyond the data.
-- Provide concise, structured, and insightful responses.
-- When summarizing, include counts, patterns, and relevant metadata where applicable.
-
+...
 Your goal is to help users understand the behavior and performance of their systems based on the logs they provide.
 """
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"{user_prompt}\n\n"
+                        f"--- Log Summary ---\n{summary}\n\n"
+                        f"Total DEBUG logs: {debug_count}\n\n"
+                        f"--- Raw Logs (latest 100 rows) ---\n{logs_str}"
+                    )
+                },
+            ]
 
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"{user_prompt}\n\n"
-                    f"--- Log Summary ---\n{summary}\n\n"
-                    f"Total DEBUG logs: {debug_count}\n\n"
-                    f"--- Raw Logs (latest 100 rows) ---\n{logs_str}"
-                )
-            },
-        ]
+            def _call_llm():
+                return llm.invoke(messages, config={"callbacks": [LegacyConsoleCallbackHandler()]})
 
-        # Call Azure LLM with callback to track token usage
-        with get_openai_callback() as cb:
-            result = llm.invoke(messages, config={"callbacks": [ConsoleCallbackHandler()]})
-            final_response = result.content
+            result, usage = TokenTracker.run_with_tracking(_call_llm)
+            return result.content + usage
 
-            # Append token usage details
-            final_response += "\n\n--- Token Usage ---"
-            final_response += f"\nTotal Tokens: {cb.total_tokens}"
-            final_response += f"\nPrompt Tokens: {cb.prompt_tokens}"
-            final_response += f"\nCompletion Tokens: {cb.completion_tokens}"
-            final_response += f"\nTotal Cost (USD): ${format(cb.total_cost, '.6f')}"
+        except Exception as e:
+            return f"Error: {str(e)}"
 
-        return final_response
-
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-# -------------------------------
-# Gradio UI
-# -------------------------------
-chatbot_ui = gr.ChatInterface(
-    fn=chat_with_agent,
-    title="OSIF Co-Developer",
-    description="Query system/API logs with natural language",
-    theme="default"
-)
-
-# Launch UI
-if __name__ == "__main__":
-    chatbot_ui.launch(debug=False)
-
-
-
-----------------------------------------------------------------------------
-
-code:2
-
-import gradio as gr
-from langgraph.prebuilt import create_react_agent
-from langchain_openai import AzureChatOpenAI
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain.callbacks.tracers import ConsoleCallbackHandler
-from langchain_community.callbacks import get_openai_callback
-
-# Create a local reference to remote LLM model
-llm = AzureChatOpenAI(
-    deployment_name="gpt-4_complex_conversions",
-    azure_endpoint="https://testopenaiassets.openai.azure.com",
-    openai_api_key="", 
-    openai_api_version="2025-01-01-preview",
-)
-
-# Agent
+# ====================================================
+# Agent 2: File/Code Analysis (Code 2)
+# ====================================================
 agent = create_react_agent(
     model=llm,
     tools=[],
     verbose=True
 )
 
-# Chatbot function
-def chat_with_agent(message, history, file=None):
-    messages = []
+class FileAnalysisAgent:
+    def run(self, message, history, file=None):
+        messages = []
 
-    # Ensure history exists
-    if history is not None:
-        for user_msg, bot_msg in history:
-            messages.append(HumanMessage(content=user_msg))
-            messages.append(AIMessage(content=bot_msg))
+        if history is not None:
+            for user_msg, bot_msg in history:
+                messages.append(HumanMessage(content=user_msg))
+                messages.append(AIMessage(content=bot_msg))
 
-    # If a file is uploaded, read its contents
-    file_content = ""
-    if file is not None:
-        try:
-            with open(file.name, "r", encoding="utf-8", errors="ignore") as f:
-                file_content = f.read()
-        except Exception as e:
-            file_content = f"[Error reading file: {e}]"
+        file_content = ""
+        if file is not None:
+            try:
+                with open(file.name, "r", encoding="utf-8", errors="ignore") as f:
+                    file_content = f.read()
+            except Exception as e:
+                file_content = f"[Error reading file: {e}]"
 
-    # Construct user message (question + file if present)
-    if file_content:
-        user_message = (
-            f"User question:\n{message}\n\n"
-            f"Attached file content:\n{file_content}\n"
-        )
-    else:
-        user_message = message
+        user_message = f"User question:\n{message}\n\nAttached file content:\n{file_content}" if file_content else message
+        messages.append(HumanMessage(content=user_message))
 
-    messages.append(HumanMessage(content=user_message))
-
-    # Call agent
-    try:
-        with get_openai_callback() as cb:
-            result = agent.invoke(
+        def _call_agent():
+            return agent.invoke(
                 {"messages": messages},
                 config={"callbacks": [ConsoleCallbackHandler()]}
             )
-            final_response = result["messages"][-1].content
 
-            # Add usage info
-            final_response += "\n\n--- Token Usage ---"
-            final_response += f"\nTotal Tokens: {cb.total_tokens}"
-            final_response += f"\nPrompt Tokens: {cb.prompt_tokens}"
-            final_response += f"\nCompletion Tokens: {cb.completion_tokens}"
-            final_response += f"\nTotal Cost (USD): ${format(cb.total_cost, '.6f')}"
-    finally:
-        print("Interaction completed")
+        result, usage = TokenTracker.run_with_tracking(_call_agent)
+        final_response = result["messages"][-1].content
+        return final_response + usage
 
-    return final_response
+# ====================================================
+# Gradio UI
+# ====================================================
+log_agent = LogAnalysisAgent()
+file_agent = FileAnalysisAgent()
 
-# Gradio Chat Interface
-chatbot_ui = gr.ChatInterface(
-    fn=chat_with_agent,
-    additional_inputs=[
-        gr.File(
-            label="Upload a file (optional)",
-            file_types=[".txt", ".java", ".py", ".js", ".cpp", ".md", ".log", "*"]
+with gr.Blocks(theme="default") as demo:
+    gr.Markdown("## OSIF Co-Developer (Unified Agents)")
+
+    with gr.Tab("Log Analysis Agent"):
+        gr.ChatInterface(
+            fn=log_agent.run,
+            title="Log Analysis Agent",
+            description="Query system/API logs from MySQL with natural language",
         )
-    ],
-    title="OSIF Co-Developer",
-    description="Ask coding or log-related questions, paste code, or upload files. The AI will analyze and answer based on your prompt and the file content.",
-    theme="default"
-)
 
-# Launch app
-chatbot_ui.launch(debug=False)
+    with gr.Tab("File/Code Agent"):
+        gr.ChatInterface(
+            fn=file_agent.run,
+            additional_inputs=[
+                gr.File(
+                    label="Upload a file (optional)",
+                    file_types=[".txt", ".java", ".py", ".js", ".cpp", ".md", ".log", "*"]
+                )
+            ],
+            title="File Analysis Agent",
+            description="Ask coding or log-related questions, paste code, or upload files. The AI will analyze and answer.",
+        )
+
+# ====================================================
+# Launch
+# ====================================================
+if __name__ == "__main__":
+    demo.launch(debug=False)
