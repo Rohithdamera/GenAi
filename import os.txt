@@ -7,40 +7,31 @@ from langchain_core.tracers.stdout import ConsoleCallbackHandler
 from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain.callbacks.tracers import ConsoleCallbackHandler as ConsoleHandler2
-from langchain_community.callbacks import get_openai_callback as get_openai_callback2
+from langchain_community.callbacks import get_openai_callback as get_openai_callback_2
 
-# ====================================================
-# Shared Token Tracker
-# ====================================================
-class TokenTracker:
-    def __init__(self):
-        self.total_tokens = 0
-        self.prompt_tokens = 0
-        self.completion_tokens = 0
-        self.total_cost = 0.0
 
-    def track(self, llm_call):
+# -------------------------------
+# Token Usage Handler (Single Class)
+# -------------------------------
+class TokenUsageHandler:
+    @staticmethod
+    def track_and_invoke(func, *args, **kwargs):
+        """Wraps LLM/Agent calls with token usage tracking."""
         with get_openai_callback() as cb:
-            result = llm_call()
-            self.total_tokens = cb.total_tokens
-            self.prompt_tokens = cb.prompt_tokens
-            self.completion_tokens = cb.completion_tokens
-            self.total_cost = cb.total_cost
-        return result
-
-    def usage_summary(self):
-        return (
-            "\n\n--- Token Usage ---"
-            f"\nTotal Tokens: {self.total_tokens}"
-            f"\nPrompt Tokens: {self.prompt_tokens}"
-            f"\nCompletion Tokens: {self.completion_tokens}"
-            f"\nTotal Cost (USD): ${format(self.total_cost, '.6f')}"
-        )
+            result = func(*args, **kwargs)
+            usage_summary = (
+                "\n\n--- Token Usage ---"
+                f"\nTotal Tokens: {cb.total_tokens}"
+                f"\nPrompt Tokens: {cb.prompt_tokens}"
+                f"\nCompletion Tokens: {cb.completion_tokens}"
+                f"\nTotal Cost (USD): ${format(cb.total_cost, '.6f')}"
+            )
+        return result, usage_summary
 
 
-# ====================================================
-# Configure Azure OpenAI (Shared)
-# ====================================================
+# -------------------------------
+# Configure Azure OpenAI (shared)
+# -------------------------------
 llm = AzureChatOpenAI(
     deployment_name="gpt-4_complex_conversions",
     azure_endpoint="https://testopenaiassets.openai.azure.com",
@@ -48,10 +39,9 @@ llm = AzureChatOpenAI(
     openai_api_version="2025-01-01-preview"
 )
 
-
-# ====================================================
-# Agent 1: Log Analyzer (Code 1)
-# ====================================================
+# -------------------------------
+# Configure MySQL (Code 1 part)
+# -------------------------------
 config = {
     "host": "34.224.108.183",
     "user": "OSIF",
@@ -59,24 +49,34 @@ config = {
     "database": "OSIF"
 }
 
+
 def fetch_logs():
+    """Fetch logs or API performance data from MySQL."""
     conn = mysql.connector.connect(**config)
     cursor = conn.cursor(dictionary=True)
+
     try:
         cursor.execute("SELECT * FROM log_entries ORDER BY id DESC LIMIT 100")
         results = cursor.fetchall()
     except Exception as e:
         results = [{"error": str(e)}]
+
     cursor.close()
     conn.close()
     return results
 
+
+# -------------------------------
+# Chat Function (Code 1)
+# -------------------------------
 def chat_with_agent_logs(user_prompt, history):
     try:
         results = fetch_logs()
-        if not results or "error" in results[0]:
-            return f" Could not fetch logs from DB: {results}"
 
+        if not results or "error" in results[0]:
+            return f"Could not fetch logs from DB: {results}"
+
+        # Create log summary
         level_counts = {}
         for log in results:
             level = log.get("level", "UNKNOWN").upper()
@@ -84,8 +84,11 @@ def chat_with_agent_logs(user_prompt, history):
 
         summary = "\n".join([f"{level}: {count}" for level, count in level_counts.items()])
         debug_count = level_counts.get("DEBUG", 0)
+
+        # Logs to JSON
         logs_str = json.dumps(results, indent=2, default=str)
 
+        # Construct final prompt
         messages = [
             {
                 "role": "system",
@@ -93,31 +96,12 @@ def chat_with_agent_logs(user_prompt, history):
                     """
 You are a highly experienced data analyst specializing in system and API log analysis.
 
-Your task is to analyze structured log data provided to you. These logs may contain information such as:
-- Log levels (e.g., DEBUG, INFO, ERROR)
-- Timestamps
-- Thread identifiers
-- Class names
-- Correlation IDs
-- Request identifiers
-- API names and versions
-- Messages and stack traces
-
-You will be asked questions related to:
-- Log frequency and distribution by level (e.g., how many DEBUG logs)
-- Error detection and categorization
-- Anomaly identification or unusual patterns
-- API performance insights
-- Request or thread-level tracing
-- Any other insights that can be derived from the logs
+Your task is to analyze structured log data provided to you.
 Instructions:
 - Always base your answers strictly on the provided log data.
 - If the requested information is not present in the logs, clearly state that it is unavailable.
-- Avoid making assumptions beyond the data.
+- Avoid assumptions.
 - Provide concise, structured, and insightful responses.
-- When summarizing, include counts, patterns, and relevant metadata where applicable.
-
-Your goal is to help users understand the behavior and performance of their systems based on the logs they provide.
 """
                 ),
             },
@@ -128,41 +112,42 @@ Your goal is to help users understand the behavior and performance of their syst
                     f"--- Log Summary ---\n{summary}\n\n"
                     f"Total DEBUG logs: {debug_count}\n\n"
                     f"--- Raw Logs (latest 100 rows) ---\n{logs_str}"
-                )
+                ),
             },
         ]
 
-        tracker = TokenTracker()
-        result = tracker.track(lambda: llm.invoke(messages, config={"callbacks": [ConsoleCallbackHandler()]}))
-        final_response = result.content + tracker.usage_summary()
+        # Call LLM with shared token handler
+        def invoke_llm():
+            return llm.invoke(messages, config={"callbacks": [ConsoleCallbackHandler()]})
+
+        result, usage_summary = TokenUsageHandler.track_and_invoke(invoke_llm)
+        final_response = result.content + usage_summary
         return final_response
+
     except Exception as e:
         return f"Error: {str(e)}"
 
-chatbot_ui_logs = gr.ChatInterface(
-    fn=chat_with_agent_logs,
-    title="OSIF Co-Developer (Log Analyzer)",
-    description="Query system/API logs with natural language",
-    theme="default"
-)
 
-
-# ====================================================
-# Agent 2: React Agent (Code 2)
-# ====================================================
+# -------------------------------
+# Agent Function (Code 2)
+# -------------------------------
 agent = create_react_agent(
     model=llm,
     tools=[],
     verbose=True
 )
 
-def chat_with_agent_react(message, history, file=None):
+
+def chat_with_agent_files(message, history, file=None):
     messages = []
+
+    # Ensure history exists
     if history is not None:
         for user_msg, bot_msg in history:
             messages.append(HumanMessage(content=user_msg))
             messages.append(AIMessage(content=bot_msg))
 
+    # If a file is uploaded
     file_content = ""
     if file is not None:
         try:
@@ -171,6 +156,7 @@ def chat_with_agent_react(message, history, file=None):
         except Exception as e:
             file_content = f"[Error reading file: {e}]"
 
+    # Construct user message
     if file_content:
         user_message = (
             f"User question:\n{message}\n\n"
@@ -181,53 +167,42 @@ def chat_with_agent_react(message, history, file=None):
 
     messages.append(HumanMessage(content=user_message))
 
-    tracker = TokenTracker()
-    try:
-        result = tracker.track(
-            lambda: agent.invoke(
-                {"messages": messages},
-                config={"callbacks": [ConsoleHandler2()]}
-            )
-        )
-        final_response = result["messages"][-1].content + tracker.usage_summary()
-    finally:
-        print("Interaction completed")
+    # Call agent with shared token handler
+    def invoke_agent():
+        return agent.invoke({"messages": messages}, config={"callbacks": [ConsoleHandler2()]})
 
+    result, usage_summary = TokenUsageHandler.track_and_invoke(invoke_agent)
+    final_response = result["messages"][-1].content + usage_summary
     return final_response
 
-chatbot_ui_react = gr.ChatInterface(
-    fn=chat_with_agent_react,
+
+# -------------------------------
+# Gradio Interfaces
+# -------------------------------
+chatbot_logs = gr.ChatInterface(
+    fn=chat_with_agent_logs,
+    title="OSIF Co-Developer (Logs)",
+    description="Query system/API logs with natural language",
+    theme="default"
+)
+
+chatbot_files = gr.ChatInterface(
+    fn=chat_with_agent_files,
     additional_inputs=[
         gr.File(
             label="Upload a file (optional)",
             file_types=[".txt", ".java", ".py", ".js", ".cpp", ".md", ".log", "*"]
         )
     ],
-    title="OSIF Co-Developer (React Agent)",
-    description="Ask coding or log-related questions, paste code, or upload files. The AI will analyze and answer based on your prompt and the file content.",
+    title="OSIF Co-Developer (Files)",
+    description="Ask coding or log-related questions, paste code, or upload files.",
     theme="default"
 )
 
 
-# ====================================================
-# Launch Both Agents
-# ====================================================
+# -------------------------------
+# Launch both UIs
+# -------------------------------
 if __name__ == "__main__":
-    demo = gr.TabbedInterface(
-        [chatbot_ui_logs, chatbot_ui_react],
-        ["Log Analyzer Agent", "React Agent"]
-    )
-    demo.launch(debug=False)
-
-
-I’ve merged both codes into one file with two agents (Log Analyzer + React Agent).
-
-Token usage is now handled by a single TokenTracker class.
-
-Both agents keep their own prompts, flow, and structure unchanged.
-
-The UI is launched with two tabs so you can switch between them.
-
-
-Would you like me to also add a shared configuration block for DB and LLM credentials (so you don’t edit them in multiple places), or keep them exactly as in your original code?
-
+    chatbot_logs.launch(debug=False, share=False)
+    chatbot_files.launch(debug=False, share=False)
