@@ -274,37 +274,6 @@ def extract_block(content, query):
 
     return f"Connector '{connector_name}' not found in file."
 
-
-
-# def normalize(text):
-#     return re.sub(r"\s|-", "", text).lower()
-
-# def extract_block(content, query, connector_list):
-#     normalized_query = normalize(query)
-
-#     # Try to find a matching connector from the list
-#     matched_connector = None
-#     for connector in connector_list:
-#         if normalize(connector) in normalized_query:
-#             matched_connector = connector
-#             break
-
-#     if not matched_connector:
-#         return "Could not identify connector from your question."
-
-#     # Split content into blocks
-#     blocks = re.split(r"(?=Title\s*:)", content, flags=re.IGNORECASE)
-
-#     # Search for the block that contains the matched connector
-#     for block in blocks:
-#         if not block.strip():
-#             continue
-#         if normalize(matched_connector) in normalize(block):
-#             return block.strip()
-
-#     return f"Connector '{matched_connector}' not found in file."
-
-
 class ConnectorAgent:
     def run(self, message: str) -> str:
         try:
@@ -341,8 +310,35 @@ junit_agent = JUnitAgent()
 connector_agent = ConnectorAgent()
 client_agent = ClientClassAgent()
 
-def unified_chatbot(prompt, history, yaml_file=None, java_file=None):
+def unified_chatbot(prompt, history, uploaded_files=None):
+    """
+    Note: uploaded_files may be:
+      - None
+      - a single file-like object
+      - a list of file-like objects (when file_count='multiple' and user uploads multiple files)
+    We map those to yaml_file / java_file to preserve existing code expectations.
+    """
     lower_prompt = prompt.lower()
+
+    # Normalize uploaded_files into yaml_file / java_file variables expected by downstream logic
+    yaml_file = None
+    java_file = None
+    if uploaded_files is not None:
+        # If a single file object is passed (not a list), convert to list for uniform handling
+        uploaded_list = uploaded_files if isinstance(uploaded_files, list) else [uploaded_files]
+        for f in uploaded_list:
+            try:
+                suffix = Path(f.name).suffix.lower()
+            except Exception:
+                # If there is no name attribute or unexpected object, skip
+                continue
+            if suffix in (".yml", ".yaml") and yaml_file is None:
+                yaml_file = f
+            elif suffix == ".java" and java_file is None:
+                java_file = f
+            # If both found, break early
+            if yaml_file is not None and java_file is not None:
+                break
 
     # Case 1: JUnit generation
     if "junit" in lower_prompt:
@@ -388,8 +384,8 @@ chatbot_ui = gr.ChatInterface(
         "4. Upload a Java file and enter a prompt like: `create client class`"
     ),
     additional_inputs=[
-        gr.File(label="Upload YAML File", file_types=[".yaml", ".yml"]),
-        gr.File(label="Upload Java File", file_types=[".java"]),
+        # Single upload box for both YAML and Java files. Allows multiple files but shows only one box in browser.
+        gr.File(label="Upload File (YAML or Java)", file_types=[".yaml", ".yml", ".java"], file_count="multiple"),
     ],
     theme="default"
 )
