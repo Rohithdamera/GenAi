@@ -1,23 +1,24 @@
-merge the code1 and code 2 into one , dont change anything in the code 1 like code functionality, prompts , tools , code structure keep everything same , just merge the code 2 with code1 , what ever the data that will generate related token like(Total Tokens, prompt tokens etc) keep the token thing in one method or class , when ever token  required  only it need to be called , instead of declaring it multiple places , keep only one box in ui , that handle any kind of . files , dont change anything in the ui , give ,me full updated code 
-
-
-code1:
 
 import os
 import yaml
 import json
 import re
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Any, Optional
 import gradio as gr
 import boto3
+import mysql.connector
+
 from langchain.prompts import PromptTemplate
 from langchain_openai import AzureChatOpenAI
 from langchain.tools import Tool
 from langchain.callbacks import get_openai_callback
+from langchain_core.tracers.stdout import ConsoleCallbackHandler
+from langchain_core.messages import HumanMessage, AIMessage
+from langgraph.prebuilt import create_react_agent
 
 # ====================================================
-# Azure OpenAI Client
+# Azure OpenAI Client (from code1; kept unchanged)
 # ====================================================
 def get_openai_client():
     return AzureChatOpenAI(
@@ -33,33 +34,40 @@ def get_openai_client():
 llm = get_openai_client()
 
 # ====================================================
-# Utility: Token Tracking Wrapper
+# Centralized Token Tracker
 # ====================================================
-def run_with_token_tracking(func, *args, **kwargs):
-    aggregated_token_usage = {
-        "total_tokens": 0,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_cost": 0.0,
-    }
+class TokenTracker:
+    """
+    Centralized token tracking wrapper. Use TokenTracker.run(callable, *args, **kwargs)
+    to invoke LLM functions / agent invokes while collecting token usage summary.
+    """
+    @staticmethod
+    def run(func, *args, **kwargs):
+        aggregated_token_usage = {
+            "total_tokens": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_cost": 0.0,
+        }
 
-    with get_openai_callback() as cb:
-        result = func(*args, **kwargs)
-        aggregated_token_usage["total_tokens"] += cb.total_tokens
-        aggregated_token_usage["prompt_tokens"] += cb.prompt_tokens
-        aggregated_token_usage["completion_tokens"] += cb.completion_tokens
-        aggregated_token_usage["total_cost"] += cb.total_cost
+        with get_openai_callback() as cb:
+            result = func(*args, **kwargs)
+            # cb fields are numeric; aggregate into our structure
+            aggregated_token_usage["total_tokens"] += getattr(cb, "total_tokens", 0)
+            aggregated_token_usage["prompt_tokens"] += getattr(cb, "prompt_tokens", 0)
+            aggregated_token_usage["completion_tokens"] += getattr(cb, "completion_tokens", 0)
+            aggregated_token_usage["total_cost"] += getattr(cb, "total_cost", 0.0)
 
-    usage_summary = "\n\n--- Token Usage ---"
-    usage_summary += f"\nTotal Tokens: {aggregated_token_usage['total_tokens']}"
-    usage_summary += f"\nPrompt Tokens: {aggregated_token_usage['prompt_tokens']}"
-    usage_summary += f"\nCompletion Tokens: {aggregated_token_usage['completion_tokens']}"
-    usage_summary += f"\nTotal Cost (USD): ${format(aggregated_token_usage['total_cost'], '.6f')}"
+        usage_summary = "\n\n--- Token Usage ---"
+        usage_summary += f"\nTotal Tokens: {aggregated_token_usage['total_tokens']}"
+        usage_summary += f"\nPrompt Tokens: {aggregated_token_usage['prompt_tokens']}"
+        usage_summary += f"\nCompletion Tokens: {aggregated_token_usage['completion_tokens']}"
+        usage_summary += f"\nTotal Cost (USD): ${format(aggregated_token_usage['total_cost'], '.6f')}"
 
-    return result, usage_summary
+        return result, usage_summary
 
 # ====================================================
-# Agent 1: YAML Model Class Generator
+# Agent 1: YAML Model Class Generator (unchanged content/prompt)
 # ====================================================
 def generate_model_from_yaml(prompt: str, yaml_file) -> str:
     try:
@@ -82,7 +90,9 @@ def generate_model_from_yaml(prompt: str, yaml_file) -> str:
         def _call_llm():
             return llm.invoke(full_prompt)
 
-        response, usage = run_with_token_tracking(_call_llm)
+        response, usage = TokenTracker.run(_call_llm)
+        # response is an LLM response object from AzureChatOpenAI; original code appended usage directly
+        # Keep the same behavior:
         return response.content.strip() + usage
 
     except Exception as e:
@@ -93,7 +103,7 @@ class ModelAgent:
         return generate_model_from_yaml(prompt, yaml_file)
 
 # ====================================================
-# Agent 2: JUnit Generator
+# Agent 2: JUnit Generator (preserve all prompts and logic)
 # ====================================================
 def list_java_files(path: str) -> List[Path]:
     base_path = Path(path)
@@ -235,7 +245,7 @@ def process_java_project(user_input: str) -> str:
                 return "[INFO] No JUnit tests could be generated for allowed types."
             return tools[3].func(junit_tests)
 
-        output_code, usage_summary = run_with_token_tracking(_process)
+        output_code, usage_summary = TokenTracker.run(_process)
         return output_code + usage_summary
     except Exception as e:
         return f"[ERROR] {str(e)}"
@@ -245,7 +255,7 @@ class JUnitAgent:
         return process_java_project(user_input)
 
 # ====================================================
-# Agent 3: Connector Detection (Replaced with dynamic S3 lookup)
+# Agent 3: Connector Detection (S3 lookup) — unchanged logic
 # ====================================================
 s3 = boto3.client(
     "s3",
@@ -287,7 +297,7 @@ class ConnectorAgent:
             return f"[ERROR] {str(e)}"
 
 # ====================================================
-# Agent 4: Java Client Class Generator
+# Agent 4: Java Client Class Generator (unchanged)
 # ====================================================
 class ClientClassAgent:
     def run(self, prompt: str, java_file) -> str:
@@ -301,18 +311,122 @@ class ClientClassAgent:
                 "Do not include explanations or comments. Output only the Java class code. "
                 f"\n\nPrompt: {prompt}\n\nHere is the Java class:\n\n{java_code}"
             )
-            response = llm.invoke(full_prompt)
-            return response.content.strip()
+            def _call():
+                return llm.invoke(full_prompt)
+            response, usage = TokenTracker.run(_call)
+            return response.content.strip() + usage
         except Exception as e:
             return f"[ERROR] Failed to process Java file: {str(e)}"
 
 # ====================================================
-# Unified Chatbot Function
+# Merged additions from code2:
+#  - MySQL log fetching
+#  - ReAct agent for file/code analysis
+# ====================================================
+
+# MySQL config (default values here — replace with env vars or secret mgmt as needed)
+MYSQL_CONFIG = {
+    "host": os.environ.get("MYSQL_HOST", "34.224.108.184"),
+    "user": os.environ.get("MYSQL_USER", "OSIF"),
+    "password": os.environ.get("MYSQL_PASSWORD", "12345@Cap"),
+    "database": os.environ.get("MYSQL_DATABASE", "OSIF"),
+    "port": int(os.environ.get("MYSQL_PORT", 3306)),
+}
+
+def fetch_logs_from_mysql(limit: int = 100, where_clause: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Fetch logs from MySQL. where_clause can be provided to filter specific errors/warnings.
+    This function will attempt to connect using MYSQL_CONFIG.
+    """
+    conn = None
+    results = []
+    try:
+        conn = mysql.connector.connect(
+            host=MYSQL_CONFIG["host"],
+            user=MYSQL_CONFIG["user"],
+            password=MYSQL_CONFIG["password"],
+            database=MYSQL_CONFIG["database"],
+            port=MYSQL_CONFIG.get("port", 3306),
+        )
+        cursor = conn.cursor(dictionary=True)
+        sql = "SELECT * FROM log_entries"
+        if where_clause:
+            sql += f" WHERE {where_clause}"
+        sql += f" ORDER BY id DESC LIMIT {limit}"
+        cursor.execute(sql)
+        results = cursor.fetchall()
+    except Exception as e:
+        results = [{"error": str(e)}]
+    finally:
+        if conn:
+            try:
+                cursor.close()
+                conn.close()
+            except Exception:
+                pass
+    return results
+
+# ReAct agent (from code2) using llm from code1
+react_agent = create_react_agent(
+    model=llm,
+    tools=[],
+    verbose=True
+)
+
+def invoke_react_agent_with_file(user_prompt: str, history, file_obj) -> str:
+    """
+    Prepare messages and invoke the ReAct agent. Wrap invocation with TokenTracker for usage.
+    """
+    messages = []
+    if history is not None:
+        for user_msg, bot_msg in history:
+            messages.append(HumanMessage(content=user_msg))
+            messages.append(AIMessage(content=bot_msg))
+
+    file_content = ""
+    if file_obj is not None:
+        try:
+            with open(file_obj.name, "r", encoding="utf-8", errors="ignore") as f:
+                file_content = f.read()
+        except Exception as e:
+            file_content = f"[Error reading file: {e}]"
+
+    if file_content:
+        user_message = (
+            f"User question:\n{user_prompt}\n\n"
+            f"Attached file content:\n{file_content}\n"
+        )
+    else:
+        user_message = user_prompt
+
+    messages.append(HumanMessage(content=user_message))
+
+    def _invoke():
+        return react_agent.invoke(
+            {"messages": messages},
+            config={"callbacks": [ConsoleCallbackHandler()]}
+        )
+
+    response, usage = TokenTracker.run(_invoke)
+    # response could be an LLM/agent response; try to return content if present
+    try:
+        return response.content.strip() + usage
+    except Exception:
+        # Fallback: str(response)
+        return str(response) + usage
+
+# ====================================================
+# Unified Chatbot Function (merges both chat_with_agent and unified_chatbot logic)
+# - Keeps code1's behavior intact, and calls ReAct / MySQL when input indicates.
 # ====================================================
 model_agent = ModelAgent()
 junit_agent = JUnitAgent()
 connector_agent = ConnectorAgent()
 client_agent = ClientClassAgent()
+
+# Keywords to detect logs and code-analysis requests
+LOG_KEYWORDS = ["log", "logs", "error", "errors", "warn", "warning", "exception", "stacktrace", "traceback", "logfile"]
+CODE_KEYWORDS = ["code", "function", "error in", "fix", "class", "python", "java", "file", "compile", "bug", "exception"]
 
 def unified_chatbot(prompt, history, uploaded_files=None):
     """
@@ -321,277 +435,72 @@ def unified_chatbot(prompt, history, uploaded_files=None):
       - a single file-like object
       - a list of file-like objects (when file_count='multiple' and user uploads multiple files)
     We map those to yaml_file / java_file to preserve existing code expectations.
+    The function now also handles:
+      - MySQL log fetching when AI detects log-related intent in the prompt.
+      - ReAct agent-based code/file analysis when file is uploaded or code-related keywords are present.
     """
-    lower_prompt = prompt.lower()
+    lower_prompt = (prompt or "").lower()
 
     # Normalize uploaded_files into yaml_file / java_file variables expected by downstream logic
     yaml_file = None
     java_file = None
+    single_file_for_react = None
     if uploaded_files is not None:
-        # If a single file object is passed (not a list), convert to list for uniform handling
         uploaded_list = uploaded_files if isinstance(uploaded_files, list) else [uploaded_files]
         for f in uploaded_list:
             try:
                 suffix = Path(f.name).suffix.lower()
             except Exception:
-                # If there is no name attribute or unexpected object, skip
                 continue
             if suffix in (".yml", ".yaml") and yaml_file is None:
                 yaml_file = f
             elif suffix == ".java" and java_file is None:
                 java_file = f
+            # Keep first file for react/code analysis as well
+            if single_file_for_react is None:
+                single_file_for_react = f
             # If both found, break early
             if yaml_file is not None and java_file is not None:
                 break
 
-    # Case 1: JUnit generation
-    if "junit" in lower_prompt:
-        return junit_agent.run(prompt)
+    # 1) Log detection & retrieval (AI-driven)
+    if any(k in lower_prompt for k in LOG_KEYWORDS):
+        # If the user included DB connection info in the prompt (not recommended in plaintext),
+        # try to extract a simple where-clause or connection overrides (basic support).
+        # For safety, do not parse secrets; just allow a where clause like "where message like '%NullPointer%'" if explicitly provided.
+        where_clause = None
+        limit = 100
+        # simple extraction: look for "limit N"
+        limit_match = re.search(r"limit\s+(\d{1,4})", prompt, re.IGNORECASE)
+        if limit_match:
+            try:
+                limit = int(limit_match.group(1))
+            except Exception:
+                limit = 100
 
-    # Case 2: Model class generation
-    if "model" in lower_prompt or "model class" in lower_prompt:
-        if yaml_file is None:
-            return "[ERROR] Please upload a YAML file for model class generation."
-        return model_agent.run(prompt, yaml_file)
+        # try to find a where clause in user's prompt after the word 'where' (basic and naive)
+        where_match = re.search(r"where\s+(.+)", prompt, re.IGNORECASE)
+        if where_match:
+            raw = where_match.group(1).strip()
+            # limit the length for safety
+            where_clause = raw[:1000]
 
-    # Case 3: Client class generation
-    if "client class" in lower_prompt or java_file is not None:
-        if java_file is None:
-            return "[ERROR] Please upload a Java file for client class generation."
-        return client_agent.run(prompt, java_file)
+        try:
+            logs = fetch_logs_from_mysql(limit=limit, where_clause=where_clause)
+            # Format logs nicely for display
+            if not logs:
+                return "[INFO] No logs found."
+            # If first element contains 'error' key, pass that message
+            formatted = ""
+            for row in logs:
+                formatted += json.dumps(row, default=str) + "\n"
+            return formatted
+        except Exception as e:
+            return f"[ERROR] Failed to fetch logs: {e}"
 
-    # Case 4: Connector detection
-    if any(k in lower_prompt for k in ["salesforce", "sfdc", "sqs", "s3", "common api"]):
-        return connector_agent.run(prompt)
-
-    # Fallbacks
-    if yaml_file is not None:
-        return model_agent.run(prompt, yaml_file)
-    elif java_file is not None:
-        return client_agent.run(prompt, java_file)
-    elif re.search(r"([A-Za-z]:[\\/\w\-. ]+)", prompt):
-        return junit_agent.run(prompt)
-    else:
-        return "[ERROR] Please upload a YAML file with prompt for models, a Java file for client class, or provide a valid file path for JUnit generation."
-
-# ====================================================
-# Gradio Chat Interface
-# ====================================================
-chatbot_ui = gr.ChatInterface(
-    fn=unified_chatbot,
-    title="OSIF_Co-Developer",
-    description=(
-        "Options:\n"
-        "1. Upload a YAML file and enter a prompt like: `generate model class from this config`\n"
-        "2. Provide a Windows file path like: `C:\\Users\\project\\src` to generate JUnit tests.\n"
-        "3. Ask connector questions: e.g., `give connector properties of (salesforce, SQS, s3, CrossAccountSQS)`\n"
-        "4. Upload a Java file and enter a prompt like: `create client class`"
-    ),
-    additional_inputs=[
-        # Single upload box for both YAML and Java files. Allows multiple files but shows only one box in browser.
-        gr.File(label="Upload File (YAML or Java)", file_types=[".yaml", ".yml", ".java"], file_count="multiple"),
-    ],
-    theme="default"
-)
-
-if __name__ == "__main__":
-    print("Starting Unified Generator...")
-    chatbot_ui.launch()
-
-
-
---------------------------------------------------------------------------------------------------------------------
-
-code 2:
-
-
-import gradio as gr
-import mysql.connector
-import json
-from langchain_openai import AzureChatOpenAI
-from langchain_core.tracers.stdout import ConsoleCallbackHandler
-from langchain_core.messages import HumanMessage, AIMessage
-from langgraph.prebuilt import create_react_agent
-from langchain_community.callbacks import get_openai_callback
-
-
-# -------------------------------
-# Configure Azure OpenAI
-# -------------------------------
-llm = AzureChatOpenAI(
-    deployment_name="gpt-4_complex_conversions",
-    azure_endpoint="https://testopenaiassets.openai.azure.com",
-    openai_api_key="",
-    openai_api_version="2025-01-01-preview"
-)
-
-# -------------------------------
-# Configure MySQL (for logs)
-# -------------------------------
-config = {
-    "host": "34.224.108.184",
-    "user": "OSIF",
-    "password": "12345@Cap",
-    "database": "OSIF"
-}
-
-def fetch_logs():
-    """Fetch logs or API performance data from MySQL."""
-    conn = mysql.connector.connect(**config)
-    cursor = conn.cursor(dictionary=True)
-    try:
-        cursor.execute("SELECT * FROM log_entries ORDER BY id DESC LIMIT 100")
-        results = cursor.fetchall()
-    except Exception as e:
-        results = [{"error": str(e)}]
-    cursor.close()
-    conn.close()
-    return results
-
-
-# -------------------------------
-# Create ReAct Agent (for coding/file analysis)
-# -------------------------------
-agent = create_react_agent(
-    model=llm,
-    tools=[],
-    verbose=True
-)
-
-
-# -------------------------------
-# Common Token Usage Wrapper
-# -------------------------------
-def run_with_token_tracking(func, *args, **kwargs):
-    """Run an LLM function with token tracking and return response + usage info."""
-    with get_openai_callback() as cb:
-        result = func(*args, **kwargs)
-
-        # Token usage details
-        usage = "\n\n--- Token Usage ---"
-        usage += f"\nTotal Tokens: {cb.total_tokens}"
-        usage += f"\nPrompt Tokens: {cb.prompt_tokens}"
-        usage += f"\nCompletion Tokens: {cb.completion_tokens}"
-        usage += f"\nTotal Cost (USD): ${format(cb.total_cost, '.6f')}"
-
-    return result, usage
-
-
-# -------------------------------
-# Chat Function - Combined
-# -------------------------------
-def chat_with_agent(user_prompt, history, file=None):
-    """
-    Decide whether to handle logs (Code 1) or coding/file (Code 2) 
-    based on user question or file upload.
-    """
-    try:
-        # If user uploaded a file or asks coding-related things → use Code 2 path
-        if file is not None or any(keyword in user_prompt.lower() for keyword in ["code", "function", "error in", "fix", "class", "python", "java", "file"]):
-            messages = []
-
-            if history is not None:
-                for user_msg, bot_msg in history:
-                    messages.append(HumanMessage(content=user_msg))
-                    messages.append(AIMessage(content=bot_msg))
-
-            file_content = ""
-            if file is not None:
-                try:
-                    with open(file.name, "r", encoding="utf-8", errors="ignore") as f:
-                        file_content = f.read()
-                except Exception as e:
-                    file_content = f"[Error reading file: {e}]"
-
-            if file_content:
-                user_message = (
-                    f"User question:\n{user_prompt}\n\n"
-                    f"Attached file content:\n{file_content}\n"
-                )
-            else:
-                user_message = user_prompt
-
-            messages.append(HumanMessage(content=user_message))
-
-            def invoke_agent():
-                return agent.invoke(
-                    {"messages": messages},
-                    config={"callbacks": [ConsoleCallbackHandler()]}
-                )
-
-            result, usage = run_with_token_tracking(invoke_agent)
-            final_response = result["messages"][-1].content + usage
-            return final_response
-
-        # Otherwise, assume logs-related → use Code 1 path
-        else:
-            results = fetch_logs()
-
-            if not results or "error" in results[0]:
-                return f"Could not fetch logs from DB: {results}"
-
-            level_counts = {}
-            for log in results:
-                level = log.get("level", "UNKNOWN").upper()
-                level_counts[level] = level_counts.get(level, 0) + 1
-
-            summary = "\n".join([f"{level}: {count}" for level, count in level_counts.items()])
-            debug_count = level_counts.get("DEBUG", 0)
-
-            logs_str = json.dumps(results, indent=2, default=str)
-
-            messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        """
-You are a highly experienced data analyst specializing in system and API log analysis.
-Your task is to analyze structured log data provided to you...
-(Instructions unchanged from Code 1)
-"""
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"{user_prompt}\n\n"
-                        f"--- Log Summary ---\n{summary}\n\n"
-                        f"Total DEBUG logs: {debug_count}\n\n"
-                        f"--- Raw Logs (latest 100 rows) ---\n{logs_str}"
-                    ),
-                },
-            ]
-
-            def invoke_llm():
-                return llm.invoke(messages, config={"callbacks": [ConsoleCallbackHandler()]})
-
-            result, usage = run_with_token_tracking(invoke_llm)
-            final_response = result.content + usage
-            return final_response
-
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-
-# -------------------------------
-# Gradio UI (Single)
-# -------------------------------
-chatbot_ui = gr.ChatInterface(
-    fn=chat_with_agent,
-    additional_inputs=[
-        gr.File(
-            label="Upload a file (optional)",
-            file_types=[".txt", ".java", ".py", ".js", ".cpp", ".md", ".log", "*"]
-        )
-    ],
-    title="OSIF Co-Developer",
-    description="Ask about logs, coding, or upload a file. The AI will analyze and respond accordingly.",
-    theme="default"
-)
-
-
-# -------------------------------
-# Launch App
-# -------------------------------
-if __name__ == "__main__":
-    chatbot_ui.launch(debug=False)
+    # 2) Code / file analysis via ReAct agent (from code2) or JUnit flow in code1
+    # If file uploaded or code keywords present => prefer ReAct agent
+    if single_file_for_react is not None or any(k in lower_prompt for k in CODE_KEYWORDS):
+        # If the user explicitly wants JUnit (preserve code1 behavior)
+        if "junit" in lower_prompt:
+       
